@@ -51,6 +51,72 @@ Failure reasons: `declined`, `insufficient_funds`, `expired_card`,
 Every one drives the real state machine. `payment success` and a test card that
 happens to succeed take the same code path.
 
+## Stored authorizations
+
+```bash
+paybox authorizations              # every reusable handle a charge has minted
+```
+
+Charging a card mints one; charging the same card again reuses it. Only
+`reusable` codes can be charged off-session — mobile money never can, because
+the payer has to approve each prompt.
+
+## Recurring billing
+
+```bash
+paybox plan list
+paybox subscription list
+paybox subscription list --status attention   # renewals that are failing
+paybox subscription get sub_...               # detail plus billing history
+paybox subscription disable sub_...
+```
+
+Plans and subscriptions are created through the provider API
+(`POST /paystack/plan`, `POST /paystack/subscription`); the CLI reads and
+controls them. The payoff is virtual time:
+
+```bash
+paybox time advance 365d
+paybox subscription get sub_...    # a year of renewals, one month apart
+```
+
+Each renewal is stamped at the instant it was **due**, not at the end of the
+advance — the billing history shows twelve distinct dates, which is the visible
+proof that the scheduler runs jobs at their scheduled time.
+
+## Balance
+
+```bash
+paybox balance                                  # per currency
+paybox balance credit 500000                    # emulator-only test funds
+paybox balance credit 500000 --currency GHS
+```
+
+The balance is a fold over an append-only ledger. Transfers are refused when it
+cannot cover them, which is why `balance credit` exists: it lets a payout test
+be set up without first staging a collection. No provider has an equivalent.
+
+## Disputes
+
+```bash
+paybox dispute list
+paybox dispute open pay_...                     # emulator-only
+paybox dispute open pay_... --category fraud --amount 50000
+paybox dispute resolve dsp_... --amount 50000   # merchant accepts; refunds
+paybox dispute resolve dsp_... --decline
+```
+
+Opening a dispute is emulator-only: a chargeback originates with the payer's
+bank, so Paystack has no endpoint for it. Accepting one raises and settles a
+**real** refund, so the payment moves to `refunded` and the balance is debited
+through the ordinary path.
+
+The response deadline is a scheduled job:
+
+```bash
+paybox time advance 7d      # fires charge.dispute.remind
+```
+
 ## Webhooks
 
 ```bash

@@ -16,9 +16,15 @@ All packages are implemented and the vertical slice runs end to end: `shared`, `
 
 **Paystack is the only provider adapter.** Stripe, Flutterwave and Kora are unimplemented and reported as such by `paybox provider` and the startup banner. Coverage is documented honestly in `docs/paystack.md` — that file is a contract, not marketing.
 
+Paystack coverage is now broad: transactions, all five documented `/charge` channels, stored authorizations (`charge_authorization`, the PIN/OTP loop), plans/subscriptions/invoices, subaccounts and splits, a balance ledger, disputes, dedicated virtual accounts, and reporting endpoints. **The authoritative source is Paystack's official OpenAPI spec** — `PaystackOSS/openapi`, `dist/paystack.yaml`, pinned at blob `efa5c8d25611a60f01fd8ce59352fb38b7edfbfb` — because `paystack.com/docs` returns HTTP 403 to automated fetches. Cite the `operationId` and that SHA next to anything derived from it. Where the spec types a response generically (every `/charge` envelope; all of `/settlement`), `docs/paystack.md` says so rather than inventing a shape.
+
+Three endpoints are **emulator-only** and must never be presented as Paystack surface: `POST /paystack/dispute` (a chargeback originates with the payer's bank), `POST /api/dedicated-accounts/:number/credit`, and `POST /api/balance/credit`. Each exists because the flow would otherwise be untestable locally.
+
 The dashboard is a single self-contained HTML document served from `apps/api/src/dashboard.ts`, not a React/Vite app. That was a deliberate trade to keep `npm install -g` free of build artifacts; a React dashboard is the intended upgrade.
 
-Not built yet: transport interception for SDKs with a hardcoded host, the Postgres dialect, `paybox stop` (start runs in the foreground). The default branch is `main`; `feat/payment-emulator-foundation` points at the same commit.
+Not built yet: transport interception for SDKs with a hardcoded host, the Postgres dialect, `paybox stop` (start runs in the foreground), and settlements — the OpenAPI spec gives `/settlement` no response schema at all, so there is nothing to emulate faithfully.
+
+The default branch is `main`. `feat/paystack-coverage` carries the six-phase Paystack build-out described above.
 
 ## Commands
 
@@ -62,7 +68,13 @@ shared ──> core ──> (storage, webhooks, simulator) ──> providers/* �
 
 **Amounts are integer minor units, always.** No FX conversion ever happens; `formatAmount` is display-only.
 
-**Provider-specific behaviour reaches the engine as an injected function, never an import.** `ProviderStatusResolver` (`core/src/engine.ts`) is how the stored `providerStatus` reads `success` for Paystack while the canonical status reads `successful` — without `core` learning that Paystack exists. Follow that pattern for anything else core needs from an adapter.
+**The balance is a fold over an append-only ledger** (`balance_ledger`), never a stored mutable number — the same reasoning as the event log. A transfer *reserves* its amount when queued, not when it settles, so two queued payouts cannot spend the same money; a failed or reversed transfer credits the reservation back. The opening test float is a config value, deliberately **not** a ledger row, so `paybox reset` cannot wipe it.
+
+**Recurring billing uses no new scheduler primitive.** A `subscription.charge` handler enqueues its own next occurrence, exactly the way a failed webhook schedules its retry. This is the single most load-bearing consequence of `VirtualClock#at`: because the scheduler runs each job at the instant it was *due*, one `time advance 1y` on a monthly plan yields twelve renewals with twelve correct dates. Billing periods use **calendar arithmetic** with day-of-month clamping (`core/src/time/recurrence.ts`), never a fixed 30 days.
+
+**Provider-specific behaviour reaches the engine as an injected function, never an import.** `ProviderStatusResolver` (`core/src/engine.ts`) is how the stored `providerStatus` reads `success` for Paystack while the canonical status reads `successful` — without `core` learning that Paystack exists. `AuthorizationMinter` follows the same pattern: which channels mint a reusable handle is provider knowledge. Follow it for anything else core needs from an adapter.
+
+**Canonical vocabularies are snake_case; adapters do the punctuation.** Paystack writes `non-renewing` and `awaiting-merchant-feedback`; the canonical statuses are `non_renewing` and `awaiting_merchant_feedback`, mapped in `providers/paystack/src/status.ts`.
 
 **Never invent provider behaviour.** Read the live docs, cite the URL and date in a comment, and record anything unverifiable in `docs/<provider>.md`. Where a provider does *not* do something, neither do we — see the deliberate absence of `charge.failed` in `providers/paystack/src/webhook.ts`, which Paystack does not send.
 
@@ -102,6 +114,8 @@ Network latency is applied on the **response** (`onSend`), not the request. That
 The engine only raises `PayboxError` with a code from the `ERROR_CODES` list. Each adapter owns the mapping to its provider's wire format (Paystack's `{status:false,message}`, Stripe's `{error:{type,code}}`). Note that decline-style codes default to HTTP 200: the request succeeded, the payment did not.
 
 ## Testing
+
+Ten suites, 145 tests. The load-bearing one is in `tests/paystack-subscriptions.test.ts`: a monthly subscription plus a single `advance` must yield twelve invoices one calendar month apart, each payment stamped at its own period start. If that breaks, `VirtualClock#at` has broken.
 
 `tests/helpers.ts` exposes `createHarness()` — in-memory SQLite, clock frozen at a fixed instant, fixed seed. Assertions can therefore be exact (literal ids, exact timestamps, gapless sequence numbers) rather than approximate. Prefer it over ad-hoc setup.
 

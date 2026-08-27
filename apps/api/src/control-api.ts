@@ -242,6 +242,133 @@ export const controlApiPlugin: FastifyPluginAsync<{ context: PayboxContext }> = 
     return reply.status(201).send(settled);
   });
 
+  /* ---------------- authorizations, plans, subscriptions ---------------- */
+
+  fastify.get('/authorizations', async () => storage.authorizations.list({ limit: 100 }));
+
+  fastify.get('/plans', async () => storage.plans.list({ limit: 100 }));
+
+  fastify.get<{ Querystring: { status?: string } }>('/subscriptions', async (request) =>
+    storage.subscriptions.list({
+      limit: 100,
+      ...(request.query.status ? { status: request.query.status as 'active' } : {}),
+    }),
+  );
+
+  fastify.get<{ Params: { id: string } }>('/subscriptions/:id', async (request) => {
+    const subscription = await storage.subscriptions.byId(request.params.id);
+    if (!subscription) {
+      throw new PayboxError('not_found', `No subscription ${request.params.id}.`);
+    }
+    return {
+      subscription,
+      plan: await storage.plans.byId(subscription.planId),
+      invoices: await storage.invoices.listBySubscription(subscription.id),
+    };
+  });
+
+  fastify.post<{ Params: { id: string }; Body: { status?: string } }>(
+    '/subscriptions/:id/disable',
+    async (request) =>
+      engine.transitionSubscription(
+        request.params.id,
+        (request.body?.status ?? 'non_renewing') as 'non_renewing',
+      ),
+  );
+
+  fastify.get('/invoices', async () => storage.invoices.list({ limit: 100 }));
+
+  /* ---------------- marketplace ---------------- */
+
+  fastify.get('/subaccounts', async () => storage.subaccounts.list({ limit: 100 }));
+
+  fastify.get('/splits', async () => storage.splits.list({ limit: 100 }));
+
+  fastify.get<{ Querystring: { currency?: string } }>('/balance', async (request) => {
+    const currencies = await storage.ledger.currencies('paystack');
+    const listed = request.query.currency
+      ? [request.query.currency.toUpperCase()]
+      : currencies.length > 0
+        ? currencies
+        : ['NGN'];
+    return {
+      balances: await Promise.all(
+        listed.map(async (currency) => ({
+          currency,
+          balance: await engine.getBalance('paystack', currency),
+        })),
+      ),
+    };
+  });
+
+  fastify.get('/balance/ledger', async () => storage.ledger.list({ limit: 100 }));
+
+  /**
+   * Top up the test float.
+   *
+   * Emulator-only, and deliberately so: there is no provider API that puts
+   * money in your balance out of nowhere. It exists so a payout test can be
+   * set up without first staging a collection.
+   */
+  fastify.post<{ Body: { amount?: number; currency?: string; reason?: string } }>(
+    '/balance/credit',
+    async (request, reply) => {
+      const amount = Number(request.body?.amount);
+      if (!Number.isInteger(amount) || amount <= 0) {
+        throw new PayboxError(
+          'validation_failed',
+          'A positive integer amount in minor units is required.',
+        );
+      }
+      const entry = await engine.creditBalance({
+        provider: 'paystack',
+        currency: request.body?.currency ?? 'NGN',
+        amount,
+        reason: request.body?.reason ?? 'manual_credit',
+      });
+      return reply.status(201).send(entry);
+    },
+  );
+
+  /* ---------------- disputes ---------------- */
+
+  fastify.get<{ Querystring: { status?: string } }>('/disputes', async (request) =>
+    storage.disputes.list({
+      limit: 100,
+      ...(request.query.status ? { status: request.query.status as 'resolved' } : {}),
+    }),
+  );
+
+  fastify.post<{
+    Body: { paymentId?: string; category?: string; refundAmount?: number; message?: string };
+  }>('/disputes', async (request, reply) => {
+    const paymentId = String(request.body?.paymentId ?? '');
+    if (!paymentId) throw new PayboxError('validation_failed', 'A paymentId is required.');
+    const dispute = await engine.createDispute({
+      paymentId,
+      ...(request.body?.category ? { category: request.body.category } : {}),
+      ...(request.body?.refundAmount !== undefined
+        ? { refundAmount: request.body.refundAmount }
+        : {}),
+      ...(request.body?.message ? { message: request.body.message } : {}),
+    });
+    await engine.scheduleDisputeReminder(dispute);
+    return reply.status(201).send(dispute);
+  });
+
+  fastify.post<{
+    Params: { id: string };
+    Body: { resolution?: string; message?: string; refundAmount?: number };
+  }>('/disputes/:id/resolve', async (request) =>
+    engine.resolveDispute(request.params.id, {
+      resolution: (request.body?.resolution ?? 'merchant-accepted') as 'declined',
+      message: request.body?.message ?? 'Resolved from the CLI',
+      ...(request.body?.refundAmount !== undefined
+        ? { refundAmount: request.body.refundAmount }
+        : {}),
+    }),
+  );
+
   /* ---------------- events ---------------- */
 
   fastify.get<{ Querystring: { limit?: string; type?: string; resourceId?: string } }>(
