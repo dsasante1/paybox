@@ -1,0 +1,39 @@
+# paybox configuration. Every value can also be set by environment variable
+# (PAYBOX_*), and the environment wins. See docs/getting-started.md.
+
+host: 127.0.0.1
+port: 8080
+
+database:
+  path: ./data/paybox.db
+
+# Identical seeds produce identical ids, references and retry jitter.
+seed: paybox
+
+# Freeze the clock for fully deterministic runs. Drive it with
+# `paybox time advance 30s`.
+freezeClock: false
+startAt: null
+
+webhooks:
+  retry:
+    enabled: true
+    maxAttempts: 5
+  timeoutMs: 10000
+
+providers:
+  paystack:
+    enabled: true
+
+security:
+  # Relaxes the sk_test_ format check. Live keys are refused regardless.
+  allowAnyKey: false
+
+simulation:
+  # Test instruments play their outcome out automatically after a short delay,
+  # the way a real mobile-money prompt or card authorization would. Turn off to
+  # drive every transition explicitly.
+  autoAdvance: true
+  autoAdvanceDelayMs: 3000
+
+logLevel: info

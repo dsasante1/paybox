@@ -1,0 +1,26 @@
+{
+  "name": "@paybox/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@paybox/shared": "0.1.0",
+    "@paybox/core": "0.1.0",
+    "@paybox/storage": "0.1.0",
+    "@paybox/webhooks": "0.1.0",
+    "@paybox/simulator": "0.1.0",
+    "@paybox/paystack": "0.1.0",
+    "fastify": "^5.12.1",
+    "@fastify/cors": "^11.3.0",
+    "@fastify/static": "^10.1.3",
+    "zod": "^4.4.3",
+    "fastify-type-provider-zod": "^7.0.0",
+    "@fastify/swagger": "^9.8.1",
+    "@scalar/fastify-api-reference": "^1.66.1",
+    "yaml": "^2.8.0",
+    "fastify-plugin": "^5.1.0"
+  }
+}
