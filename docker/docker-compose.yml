@@ -1,0 +1,30 @@
+# The simplest useful deployment is one container and a volume.
+#
+# There is deliberately no Postgres or Redis service here: paybox runs as a
+# single process with an embedded database, and adding brokers would break the
+# virtual-clock guarantee that makes `paybox time advance` work. See
+# docs/architecture.md.
+
+services:
+  paybox:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: paybox:local
+    ports:
+      # Published to loopback only. Change to "8080:8080" to expose it on your
+      # network — and read SECURITY.md first.
+      - "127.0.0.1:8080:8080"
+    environment:
+      PAYBOX_SEED: paybox
+      PAYBOX_LOG_LEVEL: info
+      # Uncomment for reproducible CI runs:
+      # PAYBOX_FREEZE_CLOCK: "1"
+      # PAYBOX_START_AT: "2026-01-01T00:00:00Z"
+      # PAYBOX_DATABASE: ":memory:"
+    volumes:
+      - paybox-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  paybox-data:
