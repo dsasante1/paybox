@@ -8,6 +8,7 @@ import {
   type PaymentMethod,
 } from '@paybox/shared';
 import type { PaymentEngine, Storage } from '@paybox/core';
+import type { SubscriptionRunner } from '@paybox/simulator';
 import {
   PAYMENT_SIMULATE_JOB,
   maskInstrument,
@@ -26,12 +27,16 @@ import {
   initializeSchema,
   normalizeMetadata,
   partialDebitSchema,
+  planCreateSchema,
+  planUpdateSchema,
   recipientSchema,
   refundSchema,
   submitBirthdaySchema,
   submitOtpSchema,
   submitPhoneSchema,
   submitPinSchema,
+  subscriptionCreateSchema,
+  subscriptionToggleSchema,
   transferSchema,
 } from './schemas.js';
 import {
@@ -39,7 +44,10 @@ import {
   ok,
   serializeCustomer,
   serializeDedicatedAccount,
+  serializeInvoice,
+  serializePlan,
   serializeRefund,
+  serializeSubscription,
   serializeTransaction,
   serializeTransfer,
 } from './serializers.js';
@@ -52,6 +60,8 @@ import { paystackAuthorizationMinter } from './authorization.js';
 export interface PaystackPluginOptions {
   engine: PaymentEngine;
   simulator: PaymentSimulator;
+  /** Drives recurring billing; renewals are scheduled through it. */
+  subscriptions: SubscriptionRunner;
   storage: Storage;
   clock: Clock;
   ids: IdFactory;
@@ -86,7 +96,7 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
   fastify,
   options,
 ) => {
-  const { engine, simulator, storage, clock, ids } = options;
+  const { engine, simulator, subscriptions, storage, clock, ids } = options;
   const includeFees = options.includeFees ?? true;
   const autoAdvance = options.autoAdvance ?? true;
   const autoAdvanceDelayMs = options.autoAdvanceDelayMs ?? 3_000;
@@ -806,6 +816,228 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
       }),
     );
   });
+
+  /* ---------------------------------------------------------------- *
+   * Plans and subscriptions
+   * ---------------------------------------------------------------- */
+
+  fastify.post('/plan', async (request, reply) => {
+    authenticate(request);
+    const body = planCreateSchema.parse(request.body);
+    const currency = (body.currency ?? 'NGN').toUpperCase();
+    if (!isSupportedCurrency(currency)) {
+      throw new PayboxError('unsupported_currency', `Currency ${currency} is not supported.`);
+    }
+
+    const plan = await engine.createPlan({
+      provider: PROVIDER,
+      name: body.name,
+      amount: body.amount,
+      currency,
+      interval: body.interval,
+      description: body.description ?? null,
+      invoiceLimit: body.invoice_limit == null ? 0 : Number(body.invoice_limit),
+      ...(body.send_invoices !== undefined ? { sendInvoices: body.send_invoices } : {}),
+      ...(body.send_sms !== undefined ? { sendSms: body.send_sms } : {}),
+    });
+    return reply.status(201).send(ok('Plan created', serializePlan(plan)));
+  });
+
+  fastify.get('/plan', async (request, reply) => {
+    authenticate(request);
+    const { items, total } = await storage.plans.list({ provider: PROVIDER, limit: 100 });
+    return reply.send({
+      status: true,
+      message: 'Plans retrieved',
+      data: items.map(serializePlan),
+      meta: { total, skipped: 0, perPage: 100, page: 1 },
+    });
+  });
+
+  async function requirePlan(handle: string) {
+    const code = handle.replace(/^PLN_/, '');
+    const plan =
+      (await storage.plans.byCode(PROVIDER, code)) ?? (await storage.plans.byId(handle));
+    if (!plan) throw new PayboxError('not_found', `Plan ${handle} not found.`);
+    return plan;
+  }
+
+  fastify.get<{ Params: { code: string } }>('/plan/:code', async (request, reply) => {
+    authenticate(request);
+    return reply.send(ok('Plan retrieved', serializePlan(await requirePlan(request.params.code))));
+  });
+
+  fastify.put<{ Params: { code: string } }>('/plan/:code', async (request, reply) => {
+    authenticate(request);
+    const body = planUpdateSchema.parse(request.body);
+    const plan = await requirePlan(request.params.code);
+    // Amount and interval are deliberately not updatable here: changing either
+    // on a plan with live subscriptions would silently reprice them, and
+    // Paystack does not repricing existing subscriptions either.
+    const updated = await engine.updatePlan(plan.id, {
+      ...(body.name !== undefined ? { name: body.name } : {}),
+      ...(body.description !== undefined ? { description: body.description } : {}),
+      ...(body.send_invoices !== undefined ? { sendInvoices: body.send_invoices } : {}),
+      ...(body.send_sms !== undefined ? { sendSms: body.send_sms } : {}),
+    });
+    return reply.send(ok('Plan updated', serializePlan(updated)));
+  });
+
+  /**
+   * Start a subscription.
+   *
+   * `authorization` is optional at Paystack: omitted, it uses the customer's
+   * most recent one. Resolving that is adapter work, so the engine only ever
+   * sees a concrete, chargeable instrument.
+   */
+  fastify.post('/subscription', async (request, reply) => {
+    authenticate(request);
+    const body = subscriptionCreateSchema.parse(request.body);
+
+    const customerCode = body.customer.replace(/^CUS_/, '');
+    const customer =
+      (await storage.customers.byProviderCustomerId(PROVIDER, customerCode)) ??
+      (await storage.customers.byEmail(PROVIDER, body.customer)) ??
+      (await storage.customers.byId(body.customer));
+    if (!customer) {
+      throw new PayboxError('not_found', `Customer ${body.customer} not found.`);
+    }
+
+    const plan = await requirePlan(body.plan);
+
+    const authorization = body.authorization
+      ? await engine.resolveAuthorization(PROVIDER, body.authorization.replace(/^AUTH_/, ''))
+      : (await storage.authorizations.listByCustomer(customer.id)).find((a) => a.reusable);
+    if (!authorization) {
+      throw new PayboxError(
+        'not_found',
+        `No reusable authorization available for ${body.customer}. ` +
+          'Charge a card for this customer first, then subscribe.',
+        { details: { customer: body.customer } },
+      );
+    }
+
+    const subscription = await engine.createSubscription({
+      provider: PROVIDER,
+      customerId: customer.id,
+      planId: plan.id,
+      authorizationId: authorization.id,
+      startDate: body.start_date ?? null,
+      ...(body.quantity != null ? { quantity: Number(body.quantity) } : {}),
+    });
+    await subscriptions.start(subscription);
+
+    return reply.status(201).send(
+      ok(
+        'Subscription successfully created',
+        serializeSubscription(subscription, { plan, customer, authorization }),
+      ),
+    );
+  });
+
+  fastify.get('/subscription', async (request, reply) => {
+    authenticate(request);
+    const { items, total } = await storage.subscriptions.list({
+      provider: PROVIDER,
+      limit: 100,
+    });
+    const data = await Promise.all(items.map((s) => decorateSubscription(s)));
+    return reply.send({
+      status: true,
+      message: 'Subscriptions retrieved',
+      data,
+      meta: { total, skipped: 0, perPage: 100, page: 1 },
+    });
+  });
+
+  async function decorateSubscription(subscription: Awaited<
+    ReturnType<typeof engine.createSubscription>
+  >) {
+    return serializeSubscription(subscription, {
+      plan: await storage.plans.byId(subscription.planId),
+      customer: await storage.customers.byId(subscription.customerId),
+      authorization: await storage.authorizations.byId(subscription.authorizationId),
+    });
+  }
+
+  async function requireSubscription(handle: string) {
+    const code = handle.replace(/^SUB_/, '');
+    const subscription =
+      (await storage.subscriptions.byCode(PROVIDER, code)) ??
+      (await storage.subscriptions.byId(handle));
+    if (!subscription) {
+      throw new PayboxError('not_found', `Subscription ${handle} not found.`);
+    }
+    return subscription;
+  }
+
+  fastify.get<{ Params: { code: string } }>('/subscription/:code', async (request, reply) => {
+    authenticate(request);
+    const subscription = await requireSubscription(request.params.code);
+    return reply.send(ok('Subscription retrieved', await decorateSubscription(subscription)));
+  });
+
+  /**
+   * Stop renewing. Paystack requires the email token as well as the code --
+   * it is what authorises a customer-initiated cancellation from an email
+   * link, so the emulator checks it rather than accepting any value.
+   */
+  fastify.post('/subscription/disable', async (request, reply) => {
+    authenticate(request);
+    const body = subscriptionToggleSchema.parse(request.body);
+    const subscription = await requireSubscription(body.code);
+    if (body.token !== subscription.emailToken) {
+      throw new PayboxError('authentication_failed', 'Invalid subscription email token.');
+    }
+    await engine.transitionSubscription(subscription.id, 'non_renewing');
+    return reply.send(ok('Subscription disabled successfully', true));
+  });
+
+  fastify.post('/subscription/enable', async (request, reply) => {
+    authenticate(request);
+    const body = subscriptionToggleSchema.parse(request.body);
+    const subscription = await requireSubscription(body.code);
+    if (body.token !== subscription.emailToken) {
+      throw new PayboxError('authentication_failed', 'Invalid subscription email token.');
+    }
+    const resumed = await engine.transitionSubscription(subscription.id, 'active', {
+      nextPaymentDate: clock.nowISO(),
+    });
+    await subscriptions.start(resumed);
+    return reply.send(ok('Subscription enabled successfully', true));
+  });
+
+  fastify.get<{ Params: { code: string } }>(
+    '/subscription/:code/manage/link',
+    async (request, reply) => {
+      authenticate(request);
+      const subscription = await requireSubscription(request.params.code);
+      return reply.send(
+        ok('Link generated', {
+          link: `${options.baseUrl}${options.basePath}/subscription/manage/${subscription.emailToken}`,
+        }),
+      );
+    },
+  );
+
+  /** Billing history. Not a Paystack endpoint shape; see docs/paystack.md. */
+  fastify.get<{ Params: { code: string } }>(
+    '/subscription/:code/invoices',
+    async (request, reply) => {
+      authenticate(request);
+      const subscription = await requireSubscription(request.params.code);
+      const invoices = await storage.invoices.listBySubscription(subscription.id);
+      const data = await Promise.all(
+        invoices.map(async (invoice) =>
+          serializeInvoice(
+            invoice,
+            invoice.paymentId ? await storage.payments.byId(invoice.paymentId) : null,
+          ),
+        ),
+      );
+      return reply.send(ok('Invoices retrieved', data));
+    },
+  );
 
   /* ---------------------------------------------------------------- *
    * Dedicated virtual accounts

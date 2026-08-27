@@ -6,23 +6,31 @@ import {
   type Customer,
   type DedicatedAccount,
   type IdFactory,
+  type Invoice,
+  type InvoiceStatus,
   type Metadata,
   type Payment,
   type PaymentMethod,
   type PaymentStatus,
   type PayboxEvent,
+  type Plan,
+  type PlanInterval,
   type ProviderId,
   type Refund,
   type RefundStatus,
+  type Subscription,
+  type SubscriptionStatus,
   type Transfer,
   type TransferStatus,
 } from '@paybox/shared';
 import type { Job, Storage } from './ports.js';
 import { EventBus } from './event-bus.js';
 import {
+  assertInvoiceTransition,
   assertPaymentTransition,
   assertRefundTransition,
   assertRefundable,
+  assertSubscriptionTransition,
   assertTransferTransition,
   isTerminalPayment,
   refundedStatus,
@@ -812,6 +820,277 @@ export class PaymentEngine {
   }
 
   /* ---------------------------------------------------------------- *
+   * Plans, subscriptions and invoices
+   * ---------------------------------------------------------------- */
+
+  async createPlan(input: {
+    provider: ProviderId;
+    name: string;
+    amount: number;
+    currency: string;
+    interval: PlanInterval;
+    description?: string | null;
+    invoiceLimit?: number;
+    sendInvoices?: boolean;
+    sendSms?: boolean;
+    providerPlanCode?: string;
+    metadata?: Metadata;
+  }): Promise<Plan> {
+    validateAmount(input.amount);
+    if (!isSupportedCurrency(input.currency)) {
+      throw new PayboxError(
+        'unsupported_currency',
+        `Currency ${input.currency} is not supported by the emulator.`,
+        { details: { currency: input.currency } },
+      );
+    }
+
+    const now = this.#clock.nowISO();
+    const plan: Plan = {
+      id: this.#ids.next('pln'),
+      provider: input.provider,
+      providerPlanCode: input.providerPlanCode ?? this.#ids.token(12),
+      name: input.name,
+      amount: input.amount,
+      currency: input.currency.toUpperCase(),
+      interval: input.interval,
+      description: input.description ?? null,
+      invoiceLimit: input.invoiceLimit ?? 0,
+      sendInvoices: input.sendInvoices ?? true,
+      sendSms: input.sendSms ?? true,
+      active: true,
+      metadata: input.metadata ?? {},
+      createdAt: now,
+      updatedAt: now,
+    };
+    return this.#storage.plans.insert(plan);
+  }
+
+  async updatePlan(id: string, patch: Partial<Plan>): Promise<Plan> {
+    return this.#storage.plans.update(id, { ...patch, updatedAt: this.#clock.nowISO() });
+  }
+
+  /**
+   * Start a subscription.
+   *
+   * The authorization is required and must be chargeable. Paystack lets you
+   * omit it and falls back to the customer's most recent one -- the adapter
+   * does that resolution, so by the time it reaches here there is always a
+   * concrete instrument. Creating a subscription that could never be debited
+   * would only fail later, at the first renewal, far from the cause.
+   */
+  async createSubscription(input: {
+    provider: ProviderId;
+    customerId: string;
+    planId: string;
+    authorizationId: string;
+    startDate?: string | null;
+    quantity?: number;
+    invoiceLimit?: number;
+    providerSubscriptionCode?: string;
+    metadata?: Metadata;
+  }): Promise<Subscription> {
+    const plan = await this.#storage.plans.byId(input.planId);
+    if (!plan) throw new PayboxError('not_found', `No plan with id ${input.planId}.`);
+
+    const authorization = await this.#storage.authorizations.byId(input.authorizationId);
+    if (!authorization) {
+      throw new PayboxError('not_found', `No authorization with id ${input.authorizationId}.`);
+    }
+    this.assertChargeable(authorization);
+
+    const now = this.#clock.nowISO();
+    const quantity = input.quantity ?? 1;
+    const subscription: Subscription = {
+      id: this.#ids.next('sub'),
+      provider: input.provider,
+      providerSubscriptionCode: input.providerSubscriptionCode ?? this.#ids.token(12),
+      customerId: input.customerId,
+      planId: plan.id,
+      authorizationId: authorization.id,
+      status: 'active',
+      providerStatus: this.#providerStatus(input.provider, 'successful'),
+      quantity,
+      amount: plan.amount * quantity,
+      currency: plan.currency,
+      startDate: input.startDate ?? now,
+      nextPaymentDate: input.startDate ?? now,
+      invoiceLimit: input.invoiceLimit ?? plan.invoiceLimit,
+      invoiceCount: 0,
+      emailToken: this.#ids.token(20),
+      cancelledAt: null,
+      metadata: input.metadata ?? {},
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const created = await tx.subscriptions.insert(subscription);
+      const event = await this.#appendEvent(tx, {
+        type: 'subscription.created',
+        provider: created.provider,
+        resourceId: created.id,
+        resourceType: 'subscription',
+        data: subscriptionEventData(created),
+        previousStatus: null,
+        currentStatus: created.status,
+      });
+      return { result: created, events: [event] };
+    });
+
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
+  async transitionSubscription(
+    subscriptionId: string,
+    to: SubscriptionStatus,
+    options: { nextPaymentDate?: string | null } = {},
+  ): Promise<Subscription> {
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const subscription = await tx.subscriptions.byId(subscriptionId);
+      if (!subscription) {
+        throw new PayboxError('not_found', `No subscription with id ${subscriptionId}.`);
+      }
+      assertSubscriptionTransition(subscription.status, to);
+
+      const now = this.#clock.nowISO();
+      const stops = to === 'completed' || to === 'cancelled' || to === 'non_renewing';
+      const updated = await tx.subscriptions.update(subscriptionId, {
+        status: to,
+        providerStatus: to,
+        updatedAt: now,
+        // A subscription that no longer renews must not keep a due date, or
+        // the scheduler would raise an invoice for something already ended.
+        ...(options.nextPaymentDate !== undefined
+          ? { nextPaymentDate: options.nextPaymentDate }
+          : stops
+            ? { nextPaymentDate: null }
+            : {}),
+        ...(to === 'cancelled' ? { cancelledAt: now } : {}),
+      });
+
+      const event = await this.#appendEvent(tx, {
+        type: `subscription.${to}`,
+        provider: updated.provider,
+        resourceId: updated.id,
+        resourceType: 'subscription',
+        data: subscriptionEventData(updated),
+        previousStatus: subscription.status,
+        currentStatus: to,
+      });
+      return { result: updated, events: [event] };
+    });
+
+    // Nothing should still be scheduled for a subscription that has stopped.
+    if (result.nextPaymentDate === null) {
+      await this.#storage.jobs.cancelGroup(`subscription:${subscriptionId}`);
+    }
+
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
+  /** Raise the next invoice. Emitted ahead of the debit, as Paystack does. */
+  async createInvoice(input: {
+    subscriptionId: string;
+    periodStart: string;
+    periodEnd: string;
+    dueAt: string;
+    amount?: number;
+    metadata?: Metadata;
+  }): Promise<Invoice> {
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const subscription = await tx.subscriptions.byId(input.subscriptionId);
+      if (!subscription) {
+        throw new PayboxError('not_found', `No subscription with id ${input.subscriptionId}.`);
+      }
+
+      const now = this.#clock.nowISO();
+      const invoice: Invoice = {
+        id: this.#ids.next('inv'),
+        provider: subscription.provider,
+        providerInvoiceCode: this.#ids.token(12),
+        subscriptionId: subscription.id,
+        customerId: subscription.customerId,
+        paymentId: null,
+        amount: input.amount ?? subscription.amount,
+        currency: subscription.currency,
+        status: 'pending',
+        providerStatus: 'pending',
+        periodStart: input.periodStart,
+        periodEnd: input.periodEnd,
+        dueAt: input.dueAt,
+        paidAt: null,
+        metadata: input.metadata ?? {},
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      const created = await tx.invoices.insert(invoice);
+      // Count the invoice as raised here, in the same transaction, so the
+      // invoice_limit check can never double-count a retried job.
+      await tx.subscriptions.update(subscription.id, {
+        invoiceCount: subscription.invoiceCount + 1,
+        updatedAt: now,
+      });
+
+      const event = await this.#appendEvent(tx, {
+        type: 'invoice.created',
+        provider: created.provider,
+        resourceId: created.id,
+        resourceType: 'invoice',
+        data: invoiceEventData(created),
+        previousStatus: null,
+        currentStatus: created.status,
+      });
+      return { result: created, events: [event] };
+    });
+
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
+  async transitionInvoice(
+    invoiceId: string,
+    to: InvoiceStatus,
+    options: { paymentId?: string | null } = {},
+  ): Promise<Invoice> {
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const invoice = await tx.invoices.byId(invoiceId);
+      if (!invoice) throw new PayboxError('not_found', `No invoice with id ${invoiceId}.`);
+      assertInvoiceTransition(invoice.status, to);
+
+      const now = this.#clock.nowISO();
+      const updated = await tx.invoices.update(invoiceId, {
+        status: to,
+        providerStatus: to,
+        updatedAt: now,
+        ...(options.paymentId !== undefined ? { paymentId: options.paymentId } : {}),
+        ...(to === 'success' ? { paidAt: now } : {}),
+      });
+
+      const event = await this.#appendEvent(tx, {
+        type: to === 'failed' ? 'invoice.payment_failed' : `invoice.${to}`,
+        provider: updated.provider,
+        resourceId: updated.id,
+        resourceType: 'invoice',
+        data: invoiceEventData(updated),
+        previousStatus: invoice.status,
+        currentStatus: to,
+      });
+      return { result: updated, events: [event] };
+    });
+
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
+  async getSubscription(id: string): Promise<Subscription | null> {
+    return this.#storage.subscriptions.byId(id);
+  }
+
+  /* ---------------------------------------------------------------- *
    * Internals
    * ---------------------------------------------------------------- */
 
@@ -914,6 +1193,34 @@ function dedicatedAccountEventData(account: DedicatedAccount): Metadata {
     bank: account.bankName,
     currency: account.currency,
     customer_id: account.customerId,
+  };
+}
+
+function subscriptionEventData(subscription: Subscription): Metadata {
+  return {
+    id: subscription.id,
+    subscription_code: subscription.providerSubscriptionCode,
+    customer_id: subscription.customerId,
+    plan_id: subscription.planId,
+    amount: subscription.amount,
+    currency: subscription.currency,
+    status: subscription.status,
+    next_payment_date: subscription.nextPaymentDate,
+  };
+}
+
+function invoiceEventData(invoice: Invoice): Metadata {
+  return {
+    id: invoice.id,
+    invoice_code: invoice.providerInvoiceCode,
+    subscription_id: invoice.subscriptionId,
+    customer_id: invoice.customerId,
+    payment_id: invoice.paymentId,
+    amount: invoice.amount,
+    currency: invoice.currency,
+    status: invoice.status,
+    period_start: invoice.periodStart,
+    period_end: invoice.periodEnd,
   };
 }
 

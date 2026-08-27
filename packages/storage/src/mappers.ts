@@ -2,14 +2,20 @@ import type {
   Authorization,
   Customer,
   DedicatedAccount,
+  Invoice,
+  InvoiceStatus,
   Metadata,
   Payment,
   PaymentMethod,
   PaymentStatus,
   PayboxEvent,
+  Plan,
+  PlanInterval,
   ProviderId,
   Refund,
   RefundStatus,
+  Subscription,
+  SubscriptionStatus,
   Transfer,
   TransferStatus,
 } from '@paybox/shared';
@@ -24,6 +30,9 @@ import type {
 import type {
   AuthorizationRow,
   DedicatedAccountRow,
+  InvoiceRow,
+  PlanRow,
+  SubscriptionRow,
   TransferRecipientRow,
   CustomerRow,
   EventRow,
@@ -346,6 +355,165 @@ export function dedicatedAccountPatch(
   const out: Partial<DedicatedAccountRow> = {};
   if (patch.active !== undefined) out.active = patch.active ? 1 : 0;
   if (patch.assigned !== undefined) out.assigned = patch.assigned ? 1 : 0;
+  if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
+  if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
+  return out;
+}
+
+export const toPlan = (row: PlanRow): Plan => ({
+  id: row.id,
+  provider: row.provider as ProviderId,
+  providerPlanCode: row.provider_plan_code,
+  name: row.name,
+  amount: row.amount,
+  currency: row.currency,
+  interval: row.interval as PlanInterval,
+  description: row.description,
+  invoiceLimit: row.invoice_limit,
+  sendInvoices: row.send_invoices === 1,
+  sendSms: row.send_sms === 1,
+  active: row.active === 1,
+  metadata: readJson(row.metadata),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+export const fromPlan = (plan: Plan): PlanRow => ({
+  id: plan.id,
+  provider: plan.provider,
+  provider_plan_code: plan.providerPlanCode,
+  name: plan.name,
+  amount: plan.amount,
+  currency: plan.currency,
+  interval: plan.interval,
+  description: plan.description,
+  invoice_limit: plan.invoiceLimit,
+  send_invoices: plan.sendInvoices ? 1 : 0,
+  send_sms: plan.sendSms ? 1 : 0,
+  active: plan.active ? 1 : 0,
+  metadata: writeJson(plan.metadata),
+  created_at: plan.createdAt,
+  updated_at: plan.updatedAt,
+});
+
+export function planPatch(patch: Partial<Plan>): Partial<PlanRow> {
+  const out: Partial<PlanRow> = {};
+  if (patch.name !== undefined) out.name = patch.name;
+  if (patch.amount !== undefined) out.amount = patch.amount;
+  if (patch.description !== undefined) out.description = patch.description;
+  if (patch.invoiceLimit !== undefined) out.invoice_limit = patch.invoiceLimit;
+  if (patch.sendInvoices !== undefined) out.send_invoices = patch.sendInvoices ? 1 : 0;
+  if (patch.sendSms !== undefined) out.send_sms = patch.sendSms ? 1 : 0;
+  if (patch.active !== undefined) out.active = patch.active ? 1 : 0;
+  if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
+  if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
+  return out;
+}
+
+export const toSubscription = (row: SubscriptionRow): Subscription => ({
+  id: row.id,
+  provider: row.provider as ProviderId,
+  providerSubscriptionCode: row.provider_subscription_code,
+  customerId: row.customer_id,
+  planId: row.plan_id,
+  authorizationId: row.authorization_id,
+  status: row.status as SubscriptionStatus,
+  providerStatus: row.provider_status,
+  quantity: row.quantity,
+  amount: row.amount,
+  currency: row.currency,
+  startDate: row.start_date,
+  nextPaymentDate: row.next_payment_date,
+  invoiceLimit: row.invoice_limit,
+  invoiceCount: row.invoice_count,
+  emailToken: row.email_token,
+  cancelledAt: row.cancelled_at,
+  metadata: readJson(row.metadata),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+export const fromSubscription = (sub: Subscription): SubscriptionRow => ({
+  id: sub.id,
+  provider: sub.provider,
+  provider_subscription_code: sub.providerSubscriptionCode,
+  customer_id: sub.customerId,
+  plan_id: sub.planId,
+  authorization_id: sub.authorizationId,
+  status: sub.status,
+  provider_status: sub.providerStatus,
+  quantity: sub.quantity,
+  amount: sub.amount,
+  currency: sub.currency,
+  start_date: sub.startDate,
+  next_payment_date: sub.nextPaymentDate,
+  invoice_limit: sub.invoiceLimit,
+  invoice_count: sub.invoiceCount,
+  email_token: sub.emailToken,
+  cancelled_at: sub.cancelledAt,
+  metadata: writeJson(sub.metadata),
+  created_at: sub.createdAt,
+  updated_at: sub.updatedAt,
+});
+
+export function subscriptionPatch(patch: Partial<Subscription>): Partial<SubscriptionRow> {
+  const out: Partial<SubscriptionRow> = {};
+  if (patch.status !== undefined) out.status = patch.status;
+  if (patch.providerStatus !== undefined) out.provider_status = patch.providerStatus;
+  if (patch.nextPaymentDate !== undefined) out.next_payment_date = patch.nextPaymentDate;
+  if (patch.invoiceCount !== undefined) out.invoice_count = patch.invoiceCount;
+  if (patch.cancelledAt !== undefined) out.cancelled_at = patch.cancelledAt;
+  if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
+  if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
+  return out;
+}
+
+export const toInvoice = (row: InvoiceRow): Invoice => ({
+  id: row.id,
+  provider: row.provider as ProviderId,
+  providerInvoiceCode: row.provider_invoice_code,
+  subscriptionId: row.subscription_id,
+  customerId: row.customer_id,
+  paymentId: row.payment_id,
+  amount: row.amount,
+  currency: row.currency,
+  status: row.status as InvoiceStatus,
+  providerStatus: row.provider_status,
+  periodStart: row.period_start,
+  periodEnd: row.period_end,
+  dueAt: row.due_at,
+  paidAt: row.paid_at,
+  metadata: readJson(row.metadata),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+export const fromInvoice = (invoice: Invoice): InvoiceRow => ({
+  id: invoice.id,
+  provider: invoice.provider,
+  provider_invoice_code: invoice.providerInvoiceCode,
+  subscription_id: invoice.subscriptionId,
+  customer_id: invoice.customerId,
+  payment_id: invoice.paymentId,
+  amount: invoice.amount,
+  currency: invoice.currency,
+  status: invoice.status,
+  provider_status: invoice.providerStatus,
+  period_start: invoice.periodStart,
+  period_end: invoice.periodEnd,
+  due_at: invoice.dueAt,
+  paid_at: invoice.paidAt,
+  metadata: writeJson(invoice.metadata),
+  created_at: invoice.createdAt,
+  updated_at: invoice.updatedAt,
+});
+
+export function invoicePatch(patch: Partial<Invoice>): Partial<InvoiceRow> {
+  const out: Partial<InvoiceRow> = {};
+  if (patch.status !== undefined) out.status = patch.status;
+  if (patch.providerStatus !== undefined) out.provider_status = patch.providerStatus;
+  if (patch.paymentId !== undefined) out.payment_id = patch.paymentId;
+  if (patch.paidAt !== undefined) out.paid_at = patch.paidAt;
   if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
   if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
   return out;

@@ -1,8 +1,11 @@
 import type {
+  InvoiceStatus,
   PaymentStatus,
   PaymentMethod,
+  PlanInterval,
   ProviderId,
   RefundStatus,
+  SubscriptionStatus,
   TransferStatus,
 } from './status.js';
 
@@ -165,6 +168,82 @@ export interface DedicatedAccount {
   currency: string;
   active: boolean;
   assigned: boolean;
+  metadata: Metadata;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A recurring price. Canonical: Stripe and Flutterwave both have one. */
+export interface Plan {
+  id: string;
+  provider: ProviderId;
+  providerPlanCode: string;
+  name: string;
+  amount: number;
+  currency: string;
+  interval: PlanInterval;
+  description: string | null;
+  /** How many invoices to raise before the subscription completes. 0 = forever. */
+  invoiceLimit: number;
+  sendInvoices: boolean;
+  sendSms: boolean;
+  active: boolean;
+  metadata: Metadata;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * A customer's ongoing commitment to a plan.
+ *
+ * `nextPaymentDate` is the load-bearing field: it is virtual-time ISO, and the
+ * scheduler compares it against virtual time, which is what makes
+ * `paybox time advance 1y` run a year of billing instantly and in order.
+ */
+export interface Subscription {
+  id: string;
+  provider: ProviderId;
+  providerSubscriptionCode: string;
+  customerId: string;
+  planId: string;
+  /** The stored instrument each renewal debits. */
+  authorizationId: string;
+  status: SubscriptionStatus;
+  providerStatus: string;
+  quantity: number;
+  amount: number;
+  currency: string;
+  startDate: string;
+  /** Null once the subscription stops renewing. */
+  nextPaymentDate: string | null;
+  invoiceLimit: number;
+  /** How many invoices have been raised, for the `invoiceLimit` check. */
+  invoiceCount: number;
+  /** Paystack's token for the customer-facing management link. */
+  emailToken: string;
+  cancelledAt: string | null;
+  metadata: Metadata;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One billing attempt. Links a subscription period to the payment that paid it. */
+export interface Invoice {
+  id: string;
+  provider: ProviderId;
+  providerInvoiceCode: string;
+  subscriptionId: string;
+  customerId: string;
+  /** Null until the charge is attempted. */
+  paymentId: string | null;
+  amount: number;
+  currency: string;
+  status: InvoiceStatus;
+  providerStatus: string;
+  periodStart: string;
+  periodEnd: string;
+  dueAt: string;
+  paidAt: string | null;
   metadata: Metadata;
   createdAt: string;
   updatedAt: string;

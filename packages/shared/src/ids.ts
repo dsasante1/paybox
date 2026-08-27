@@ -16,6 +16,9 @@ export const ID_PREFIXES = [
   'cus', // customer
   'aut', // stored authorization
   'dva', // dedicated virtual account
+  'pln', // plan
+  'sub', // subscription
+  'inv', // invoice
   'whd', // webhook delivery
   'whe', // webhook endpoint
   'job', // scheduled job

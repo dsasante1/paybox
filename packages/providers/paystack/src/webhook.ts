@@ -3,7 +3,9 @@ import type { FormattedWebhook, FormatterContext, WebhookFormatter } from '@payb
 import { paystackSignatureHeaders } from './signature.js';
 import {
   serializeDedicatedAccount,
+  serializeInvoice,
   serializeRefund,
+  serializeSubscription,
   serializeTransaction,
   serializeTransfer,
 } from './serializers.js';
@@ -18,6 +20,10 @@ import {
  * charge. Emitting one would teach developers to rely on a callback that will
  * never arrive in production, which is the opposite of what this tool is for.
  *
+ * A failed *renewal* is different and does have a webhook:
+ * `invoice.payment_failed`. That is the signal a dunning flow listens for, and
+ * it is why the emulator raises invoices rather than only charging.
+ *
  * Event names verified 2026-08-27 against the Paystack AsyncAPI mirror at
  * https://apis.io/asyncapis/paystack/paystack-webhooks-asyncapi/, since
  * paystack.com/docs refuses automated fetches. If Paystack adds events, add
@@ -31,6 +37,13 @@ const EVENT_MAP: Record<string, string> = {
   'transfer.reversed': 'transfer.reversed',
   'dedicated_account.assigned': 'dedicatedaccount.assign.success',
   'dedicated_account.assign_failed': 'dedicatedaccount.assign.failed',
+  'subscription.created': 'subscription.create',
+  'subscription.non_renewing': 'subscription.not_renew',
+  'subscription.cancelled': 'subscription.disable',
+  'subscription.completed': 'subscription.disable',
+  'invoice.created': 'invoice.create',
+  'invoice.success': 'invoice.update',
+  'invoice.payment_failed': 'invoice.payment_failed',
 };
 
 export class PaystackWebhookFormatter implements WebhookFormatter {
@@ -73,6 +86,29 @@ export class PaystackWebhookFormatter implements WebhookFormatter {
       const transfer = await storage.transfers.byId(event.resourceId);
       if (!transfer) return null;
       return serializeTransfer(transfer);
+    }
+
+    if (event.resourceType === 'subscription') {
+      const subscription = await storage.subscriptions.byId(event.resourceId);
+      if (!subscription) return null;
+      return serializeSubscription(subscription, {
+        plan: await storage.plans.byId(subscription.planId),
+        customer: await storage.customers.byId(subscription.customerId),
+        authorization: await storage.authorizations.byId(subscription.authorizationId),
+      });
+    }
+
+    if (event.resourceType === 'invoice') {
+      const invoice = await storage.invoices.byId(event.resourceId);
+      if (!invoice) return null;
+      const payment = invoice.paymentId
+        ? await storage.payments.byId(invoice.paymentId)
+        : null;
+      const subscription = await storage.subscriptions.byId(invoice.subscriptionId);
+      return {
+        ...serializeInvoice(invoice, payment),
+        ...(subscription ? { subscription: serializeSubscription(subscription) } : {}),
+      };
     }
 
     if (event.resourceType === 'dedicated_account') {

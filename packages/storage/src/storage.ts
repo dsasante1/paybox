@@ -4,6 +4,9 @@ import type {
   AuthorizationRepository,
   CustomerRepository,
   DedicatedAccountRepository,
+  InvoiceRepository,
+  PlanRepository,
+  SubscriptionRepository,
   EventFilter,
   EventRepository,
   IdempotencyRecord,
@@ -80,6 +83,11 @@ class SqliteStorage implements Storage {
       'refunds',
       'transfers',
       'transfer_recipients',
+      // Invoices reference subscriptions, which reference plans and
+      // authorizations; drop them in dependency order.
+      'invoices',
+      'subscriptions',
+      'plans',
       // Before payments and customers: these reference both.
       'authorizations',
       'dedicated_accounts',
@@ -522,6 +530,196 @@ class SqliteStorage implements Storage {
         .execute();
       const total = await count.executeTakeFirst();
       return { items: rows.map(map.toDedicatedAccount), total: Number(total?.total ?? 0) };
+    },
+  };
+
+  readonly plans: PlanRepository = {
+    insert: async (plan) => {
+      await this.#db.insertInto('plans').values(map.fromPlan(plan)).execute();
+      return plan;
+    },
+    byId: async (id) => {
+      const row = await this.#db
+        .selectFrom('plans')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toPlan(row) : null;
+    },
+    byCode: async (provider, code) => {
+      const row = await this.#db
+        .selectFrom('plans')
+        .selectAll()
+        .where('provider', '=', provider)
+        .where('provider_plan_code', '=', code)
+        .executeTakeFirst();
+      return row ? map.toPlan(row) : null;
+    },
+    update: async (id, patch) => {
+      const columns = map.planPatch(patch);
+      if (Object.keys(columns).length > 0) {
+        await this.#db.updateTable('plans').set(columns).where('id', '=', id).execute();
+      }
+      const row = await this.#db
+        .selectFrom('plans')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toPlan(row) : notFound('plan', id);
+    },
+    list: async (filter) => {
+      const { limit, offset } = page(filter);
+      let query = this.#db.selectFrom('plans').selectAll();
+      let count = this.#db.selectFrom('plans').select(({ fn }) => fn.countAll<number>().as('total'));
+      if (filter?.provider) {
+        query = query.where('provider', '=', filter.provider);
+        count = count.where('provider', '=', filter.provider);
+      }
+      const rows = await query
+        .orderBy('created_at', 'desc')
+        .limit(limit)
+        .offset(offset)
+        .execute();
+      const total = await count.executeTakeFirst();
+      return { items: rows.map(map.toPlan), total: Number(total?.total ?? 0) };
+    },
+  };
+
+  readonly subscriptions: SubscriptionRepository = {
+    insert: async (subscription) => {
+      await this.#db
+        .insertInto('subscriptions')
+        .values(map.fromSubscription(subscription))
+        .execute();
+      return subscription;
+    },
+    byId: async (id) => {
+      const row = await this.#db
+        .selectFrom('subscriptions')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toSubscription(row) : null;
+    },
+    byCode: async (provider, code) => {
+      const row = await this.#db
+        .selectFrom('subscriptions')
+        .selectAll()
+        .where('provider', '=', provider)
+        .where('provider_subscription_code', '=', code)
+        .executeTakeFirst();
+      return row ? map.toSubscription(row) : null;
+    },
+    update: async (id, patch) => {
+      const columns = map.subscriptionPatch(patch);
+      if (Object.keys(columns).length > 0) {
+        await this.#db.updateTable('subscriptions').set(columns).where('id', '=', id).execute();
+      }
+      const row = await this.#db
+        .selectFrom('subscriptions')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toSubscription(row) : notFound('subscription', id);
+    },
+    listByCustomer: async (customerId) => {
+      const rows = await this.#db
+        .selectFrom('subscriptions')
+        .selectAll()
+        .where('customer_id', '=', customerId)
+        .orderBy('created_at', 'desc')
+        .execute();
+      return rows.map(map.toSubscription);
+    },
+    list: async (filter) => {
+      const { limit, offset } = page(filter);
+      let query = this.#db.selectFrom('subscriptions').selectAll();
+      let count = this.#db
+        .selectFrom('subscriptions')
+        .select(({ fn }) => fn.countAll<number>().as('total'));
+      if (filter?.provider) {
+        query = query.where('provider', '=', filter.provider);
+        count = count.where('provider', '=', filter.provider);
+      }
+      if (filter?.status) {
+        query = query.where('status', '=', filter.status);
+        count = count.where('status', '=', filter.status);
+      }
+      const rows = await query
+        .orderBy('created_at', 'desc')
+        .limit(limit)
+        .offset(offset)
+        .execute();
+      const total = await count.executeTakeFirst();
+      return { items: rows.map(map.toSubscription), total: Number(total?.total ?? 0) };
+    },
+  };
+
+  readonly invoices: InvoiceRepository = {
+    insert: async (invoice) => {
+      await this.#db.insertInto('invoices').values(map.fromInvoice(invoice)).execute();
+      return invoice;
+    },
+    byId: async (id) => {
+      const row = await this.#db
+        .selectFrom('invoices')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toInvoice(row) : null;
+    },
+    byCode: async (provider, code) => {
+      const row = await this.#db
+        .selectFrom('invoices')
+        .selectAll()
+        .where('provider', '=', provider)
+        .where('provider_invoice_code', '=', code)
+        .executeTakeFirst();
+      return row ? map.toInvoice(row) : null;
+    },
+    update: async (id, patch) => {
+      const columns = map.invoicePatch(patch);
+      if (Object.keys(columns).length > 0) {
+        await this.#db.updateTable('invoices').set(columns).where('id', '=', id).execute();
+      }
+      const row = await this.#db
+        .selectFrom('invoices')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toInvoice(row) : notFound('invoice', id);
+    },
+    listBySubscription: async (subscriptionId) => {
+      const rows = await this.#db
+        .selectFrom('invoices')
+        .selectAll()
+        .where('subscription_id', '=', subscriptionId)
+        .orderBy('period_start', 'asc')
+        .orderBy('id', 'asc')
+        .execute();
+      return rows.map(map.toInvoice);
+    },
+    list: async (filter) => {
+      const { limit, offset } = page(filter);
+      let query = this.#db.selectFrom('invoices').selectAll();
+      let count = this.#db
+        .selectFrom('invoices')
+        .select(({ fn }) => fn.countAll<number>().as('total'));
+      if (filter?.provider) {
+        query = query.where('provider', '=', filter.provider);
+        count = count.where('provider', '=', filter.provider);
+      }
+      if (filter?.status) {
+        query = query.where('status', '=', filter.status);
+        count = count.where('status', '=', filter.status);
+      }
+      const rows = await query
+        .orderBy('created_at', 'desc')
+        .limit(limit)
+        .offset(offset)
+        .execute();
+      const total = await count.executeTakeFirst();
+      return { items: rows.map(map.toInvoice), total: Number(total?.total ?? 0) };
     },
   };
 

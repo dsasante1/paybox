@@ -1,4 +1,4 @@
-import type { PaymentStatus } from '@paybox/shared';
+import type { PaymentStatus, SubscriptionStatus } from '@paybox/shared';
 
 /**
  * Paystack's transaction status vocabulary.
@@ -81,4 +81,26 @@ export function gatewayResponse(status: PaymentStatus, failureCode: string | nul
     default:
       return 'Transaction failed';
   }
+}
+
+
+/**
+ * Subscription status: canonical -> Paystack.
+ *
+ * Only one differs in spelling. Paystack writes `non-renewing` with a hyphen;
+ * the canonical vocabulary is snake_case throughout, so the adapter maps it
+ * here rather than letting a provider's punctuation into the engine.
+ *
+ * Schema `SubscriptionCreateResponse.data.status` in the pinned OpenAPI spec.
+ */
+const SUBSCRIPTION_TO_PAYSTACK: Record<SubscriptionStatus, string> = {
+  active: 'active',
+  non_renewing: 'non-renewing',
+  attention: 'attention',
+  completed: 'complete',
+  cancelled: 'cancelled',
+};
+
+export function toPaystackSubscriptionStatus(status: SubscriptionStatus): string {
+  return SUBSCRIPTION_TO_PAYSTACK[status];
 }

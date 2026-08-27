@@ -2,12 +2,19 @@ import type {
   Authorization,
   Customer,
   DedicatedAccount,
+  Invoice,
+  Plan,
+  Subscription,
   Payment,
   PayboxEvent,
   Refund,
   Transfer,
 } from '@paybox/shared';
-import { gatewayResponse, toPaystackStatus } from './status.js';
+import {
+  gatewayResponse,
+  toPaystackStatus,
+  toPaystackSubscriptionStatus,
+} from './status.js';
 import { serializeAuthorization } from './authorization.js';
 
 /**
@@ -346,6 +353,104 @@ export function serializeDedicatedAccount(
       expired_at: null,
     },
     ...(customer ? { customer: serializeCustomer(customer) } : {}),
+  };
+}
+
+/** Schema `PlanCreateResponse.data`. */
+export function serializePlan(plan: Plan) {
+  return {
+    id: numericTransactionId(plan.providerPlanCode),
+    name: plan.name,
+    amount: plan.amount,
+    interval: plan.interval,
+    integration: 100_000,
+    domain: 'test',
+    plan_code: `PLN_${plan.providerPlanCode}`,
+    description: plan.description,
+    send_invoices: plan.sendInvoices,
+    send_sms: plan.sendSms,
+    hosted_page: false,
+    hosted_page_url: null,
+    hosted_page_summary: null,
+    currency: plan.currency,
+    invoice_limit: plan.invoiceLimit,
+    migrate: false,
+    is_deleted: false,
+    is_archived: !plan.active,
+    createdAt: plan.createdAt,
+    updatedAt: plan.updatedAt,
+  };
+}
+
+/**
+ * Schema `SubscriptionCreateResponse.data`.
+ *
+ * `cron_expression` and `easy_cron_id` are Paystack implementation details
+ * leaking through their API. The emulator does not run cron -- renewals are
+ * jobs compared against virtual time -- so `easy_cron_id` is null and the
+ * cron expression is derived from the next payment date for shape only.
+ */
+export function serializeSubscription(
+  subscription: Subscription,
+  context: {
+    plan?: Plan | null;
+    customer?: Customer | null;
+    authorization?: Authorization | null;
+  } = {},
+) {
+  return {
+    id: numericTransactionId(subscription.providerSubscriptionCode),
+    domain: 'test',
+    status: toPaystackSubscriptionStatus(subscription.status),
+    subscription_code: `SUB_${subscription.providerSubscriptionCode}`,
+    email_token: subscription.emailToken,
+    amount: subscription.amount,
+    cron_expression: cronFor(subscription.nextPaymentDate),
+    next_payment_date: subscription.nextPaymentDate,
+    open_invoice: null,
+    integration: 100_000,
+    invoice_limit: subscription.invoiceLimit,
+    split_code: null,
+    quantity: subscription.quantity,
+    start: Math.floor(Date.parse(subscription.startDate) / 1000),
+    easy_cron_id: null,
+    cancelledAt: subscription.cancelledAt,
+    createdAt: subscription.createdAt,
+    updatedAt: subscription.updatedAt,
+    metadata: subscription.metadata,
+    ...(context.plan ? { plan: serializePlan(context.plan) } : {}),
+    ...(context.customer ? { customer: serializeCustomer(context.customer) } : {}),
+    ...(context.authorization
+      ? { authorization: serializeAuthorization(context.authorization) }
+      : {}),
+  };
+}
+
+/** Shape-only: the emulator schedules jobs, not cron. */
+function cronFor(nextPaymentDate: string | null): string | null {
+  if (!nextPaymentDate) return null;
+  const date = new Date(nextPaymentDate);
+  return `${date.getUTCMinutes()} ${date.getUTCHours()} ${date.getUTCDate()} * *`;
+}
+
+/** Paystack calls these invoices on subscriptions and payment requests alike. */
+export function serializeInvoice(invoice: Invoice, payment?: Payment | null) {
+  return {
+    id: numericTransactionId(invoice.providerInvoiceCode),
+    domain: 'test',
+    invoice_code: `INV_${invoice.providerInvoiceCode}`,
+    amount: invoice.amount,
+    currency: invoice.currency,
+    status: invoice.status,
+    paid: invoice.status === 'success',
+    paid_at: invoice.paidAt,
+    description: null,
+    period_start: invoice.periodStart,
+    period_end: invoice.periodEnd,
+    due_date: invoice.dueAt,
+    created_at: invoice.createdAt,
+    updated_at: invoice.updatedAt,
+    transaction: payment ? serializeTransaction(payment) : null,
   };
 }
 

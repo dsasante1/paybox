@@ -50,10 +50,19 @@ build time.
 | `POST /customer` | **Compatible** | |
 | `GET /customer/:code` | **Compatible** | Accepts `CUS_...` or a paybox id. |
 | `GET /customer` | **Partially compatible** | No pagination or search. |
+| `POST /plan` | **Compatible** | Documented interval enum only. |
+| `GET /plan`, `GET /plan/{code}` | **Compatible** | |
+| `PUT /plan/{code}` | **Partially compatible** | Amount and interval are not updatable; see below. |
+| `POST /subscription` | **Compatible** | Requires a reusable authorization. |
+| `GET /subscription`, `GET /subscription/{code}` | **Compatible** | |
+| `POST /subscription/disable` | **Compatible** | Email token is checked, not ignored. |
+| `POST /subscription/enable` | **Compatible** | Resumes from now. |
+| `GET /subscription/{code}/manage/link` | **Partially compatible** | Returns a link; no hosted page behind it. |
+| `GET /subscription/{code}/invoices` | **Emulator-only** | Billing history; not a Paystack endpoint. |
 | `POST /transferrecipient` | **Partially compatible** | `nuban` shape only; no bank-name resolution. |
 | `POST /transfer` | **Partially compatible** | Created in `pending`. Settle it from the dashboard or CLI. |
 | `GET /transfer/:id` | **Partially compatible** | |
-| Plans, subscriptions, invoices, split payments, disputes, settlements, bulk transfers, balance, integration | **Not supported** | |
+| Split payments, disputes, settlements, bulk transfers, balance, integration | **Not supported** | |
 
 ## Authentication
 
@@ -182,6 +191,51 @@ balance behind a card, so it can only enforce the arithmetic in the request
 itself (`at_least` above `amount` is rejected). Do not use it to test
 partial-collection logic that depends on a real card balance.
 
+## Subscriptions
+
+Recurring billing runs on virtual time. A subscription's `next_payment_date` is
+a virtual-time instant, and the scheduler compares it against virtual time, so:
+
+```bash
+paybox time advance 365d     # a year of billing, instantly and in order
+```
+
+Each cycle's job enqueues the next one — there is no cron. Because the
+scheduler runs every job inside `VirtualClock#at`, a renewal's payment is
+stamped **at the instant it was due**, not at the time the clock has since
+reached. Twelve monthly renewals in one advance produce twelve payments dated
+one calendar month apart.
+
+Periods use **calendar arithmetic**, not a fixed 30 days, and the day of month
+is clamped rather than rolled over — a subscription starting on the 31st bills
+on the 28th in February and stays on the 31st thereafter.
+
+| Behaviour | Detail |
+|---|---|
+| First charge | Immediate, unless `start_date` is in the future. |
+| `invoice.create` | Raised **3 days before** the debit, as Paystack documents. |
+| `invoice_limit` | `0` means unlimited. On reaching it the subscription becomes `complete`. |
+| Failed renewal | Invoice `failed`, `invoice.payment_failed` fires, subscription moves to `attention` — and **keeps trying**. `attention` is recoverable, not terminal. |
+| `disable` / `enable` | The `token` must be the subscription's real `email_token`; a wrong one is rejected. |
+
+The renewal debits the subscription's stored authorization, so the outcome
+comes from the instrument behind it: a subscription backed by a card that
+requires a step-up fails every renewal, because nobody is present to complete
+it. That is the dunning scenario, reproduced locally.
+
+`PUT /plan/{code}` deliberately will **not** change `amount` or `interval`.
+Repricing a plan with live subscriptions would silently reprice them.
+
+### Canonical vs Paystack status
+
+| Canonical | Paystack |
+|---|---|
+| `active` | `active` |
+| `non_renewing` | `non-renewing` |
+| `attention` | `attention` |
+| `completed` | `complete` |
+| `cancelled` | `cancelled` |
+
 ## Status mapping
 
 The emulator stores a canonical status and answers with Paystack's.
@@ -216,16 +270,25 @@ Envelope: `{ "event": "<name>", "data": { ... } }`
 | `transfer.reversed` | `transfer.reversed` |
 | `dedicated_account.assigned` | `dedicatedaccount.assign.success` |
 | `dedicated_account.assign_failed` | `dedicatedaccount.assign.failed` |
+| `subscription.created` | `subscription.create` |
+| `subscription.non_renewing` | `subscription.not_renew` |
+| `subscription.cancelled`, `subscription.completed` | `subscription.disable` |
+| `invoice.created` | `invoice.create` |
+| `invoice.success` | `invoice.update` |
+| `invoice.payment_failed` | `invoice.payment_failed` |
 
 ### Events deliberately **not** emitted
+
+A failed **renewal** is different from a failed charge and does have a
+webhook: `invoice.payment_failed`. That is what a dunning flow listens for.
 
 **There is no `charge.failed`.** Paystack's documented event list does not
 include one, so neither does the emulator. If your integration is waiting for a
 failure webhook, it will wait forever here — and in production. Detect failures
 by verifying, not by webhook.
 
-Subscription and invoice events are not emitted because subscriptions are not
-implemented.
+`subscription.expiring_cards` is not emitted: the emulator's synthetic test
+cards have no meaningful expiry horizon to warn about.
 
 ### Retry behaviour
 

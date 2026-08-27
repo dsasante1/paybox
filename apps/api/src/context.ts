@@ -15,6 +15,9 @@ import {
   PaymentSimulator,
   ScenarioRunner,
   SCENARIO_STEP_JOB,
+  SUBSCRIPTION_CHARGE_JOB,
+  SUBSCRIPTION_INVOICE_JOB,
+  SubscriptionRunner,
   type SimulatedOutcome,
 } from '@paybox/simulator';
 import {
@@ -43,6 +46,7 @@ export interface PayboxContext {
   engine: PaymentEngine;
   simulator: PaymentSimulator;
   scenarios: ScenarioRunner;
+  subscriptions: SubscriptionRunner;
   dispatcher: WebhookDispatcher;
   scheduler: Scheduler;
   network: NetworkSimulator;
@@ -110,6 +114,7 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
   });
   const simulator = new PaymentSimulator({ engine, clock });
   const scenarios = new ScenarioRunner({ storage, clock, ids, simulator, engine });
+  const subscriptions = new SubscriptionRunner({ storage, clock, ids, simulator, engine });
   const network = new NetworkSimulator(random);
 
   const dispatcher = new WebhookDispatcher({
@@ -163,6 +168,8 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
 
   scheduler.register(WEBHOOK_DELIVERY_JOB, dispatcher.handleJob);
   scheduler.register(SCENARIO_STEP_JOB, scenarios.handleJob);
+  scheduler.register(SUBSCRIPTION_INVOICE_JOB, subscriptions.handleInvoiceJob);
+  scheduler.register(SUBSCRIPTION_CHARGE_JOB, subscriptions.handleChargeJob);
   scheduler.register(PAYMENT_SIMULATE_JOB, async (job) => {
     const paymentId = String(job.payload.paymentId ?? '');
     const outcome = job.payload.outcome as SimulatedOutcome | undefined;
@@ -191,6 +198,7 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
     engine,
     simulator,
     scenarios,
+    subscriptions,
     dispatcher,
     scheduler,
     network,

@@ -283,4 +283,78 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_dva_customer ON dedicated_accounts (customer_id);
     `,
   },
+  {
+    id: '0005_subscriptions',
+    sql: `
+      CREATE TABLE plans (
+        id                TEXT PRIMARY KEY,
+        provider          TEXT NOT NULL,
+        provider_plan_code TEXT NOT NULL,
+        name              TEXT NOT NULL,
+        amount            INTEGER NOT NULL CHECK (amount > 0),
+        currency          TEXT NOT NULL,
+        interval          TEXT NOT NULL,
+        description       TEXT,
+        invoice_limit     INTEGER NOT NULL DEFAULT 0,
+        send_invoices     INTEGER NOT NULL DEFAULT 1,
+        send_sms          INTEGER NOT NULL DEFAULT 1,
+        active            INTEGER NOT NULL DEFAULT 1,
+        metadata          TEXT NOT NULL DEFAULT '{}',
+        created_at        TEXT NOT NULL,
+        updated_at        TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX idx_plans_provider_code ON plans (provider, provider_plan_code);
+
+      CREATE TABLE subscriptions (
+        id                         TEXT PRIMARY KEY,
+        provider                   TEXT NOT NULL,
+        provider_subscription_code TEXT NOT NULL,
+        customer_id                TEXT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+        plan_id                    TEXT NOT NULL REFERENCES plans(id) ON DELETE RESTRICT,
+        authorization_id           TEXT NOT NULL REFERENCES authorizations(id) ON DELETE RESTRICT,
+        status                     TEXT NOT NULL,
+        provider_status            TEXT NOT NULL,
+        quantity                   INTEGER NOT NULL DEFAULT 1,
+        amount                     INTEGER NOT NULL CHECK (amount > 0),
+        currency                   TEXT NOT NULL,
+        start_date                 TEXT NOT NULL,
+        -- Virtual-time ISO, compared against virtual time by the scheduler.
+        next_payment_date          TEXT,
+        invoice_limit              INTEGER NOT NULL DEFAULT 0,
+        invoice_count              INTEGER NOT NULL DEFAULT 0,
+        email_token                TEXT NOT NULL,
+        cancelled_at               TEXT,
+        metadata                   TEXT NOT NULL DEFAULT '{}',
+        created_at                 TEXT NOT NULL,
+        updated_at                 TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX idx_subscriptions_provider_code
+        ON subscriptions (provider, provider_subscription_code);
+      CREATE INDEX idx_subscriptions_customer ON subscriptions (customer_id);
+      CREATE INDEX idx_subscriptions_next_payment ON subscriptions (next_payment_date);
+
+      CREATE TABLE invoices (
+        id                   TEXT PRIMARY KEY,
+        provider             TEXT NOT NULL,
+        provider_invoice_code TEXT NOT NULL,
+        subscription_id      TEXT NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+        customer_id          TEXT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+        payment_id           TEXT REFERENCES payments(id) ON DELETE SET NULL,
+        amount               INTEGER NOT NULL CHECK (amount > 0),
+        currency             TEXT NOT NULL,
+        status               TEXT NOT NULL,
+        provider_status      TEXT NOT NULL,
+        period_start         TEXT NOT NULL,
+        period_end           TEXT NOT NULL,
+        due_at               TEXT NOT NULL,
+        paid_at              TEXT,
+        metadata             TEXT NOT NULL DEFAULT '{}',
+        created_at           TEXT NOT NULL,
+        updated_at           TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX idx_invoices_provider_code
+        ON invoices (provider, provider_invoice_code);
+      CREATE INDEX idx_invoices_subscription ON invoices (subscription_id);
+    `,
+  },
 ];

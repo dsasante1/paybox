@@ -207,6 +207,67 @@ export interface DedicatedAccountRow {
   updated_at: string;
 }
 
+export interface PlanRow {
+  id: string;
+  provider: string;
+  provider_plan_code: string;
+  name: string;
+  amount: number;
+  currency: string;
+  interval: string;
+  description: string | null;
+  invoice_limit: number;
+  send_invoices: number;
+  send_sms: number;
+  active: number;
+  metadata: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SubscriptionRow {
+  id: string;
+  provider: string;
+  provider_subscription_code: string;
+  customer_id: string;
+  plan_id: string;
+  authorization_id: string;
+  status: string;
+  provider_status: string;
+  quantity: number;
+  amount: number;
+  currency: string;
+  start_date: string;
+  next_payment_date: string | null;
+  invoice_limit: number;
+  invoice_count: number;
+  email_token: string;
+  cancelled_at: string | null;
+  metadata: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InvoiceRow {
+  id: string;
+  provider: string;
+  provider_invoice_code: string;
+  subscription_id: string;
+  customer_id: string;
+  payment_id: string | null;
+  amount: number;
+  currency: string;
+  status: string;
+  provider_status: string;
+  period_start: string;
+  period_end: string;
+  due_at: string;
+  paid_at: string | null;
+  metadata: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface MigrationRow {
   id: string;
   applied_at: string;
@@ -224,6 +285,9 @@ export interface Database {
   idempotency_keys: IdempotencyRow;
   authorizations: AuthorizationRow;
   dedicated_accounts: DedicatedAccountRow;
+  plans: PlanRow;
+  subscriptions: SubscriptionRow;
+  invoices: InvoiceRow;
   transfer_recipients: TransferRecipientRow;
   event_sequences: EventSequenceRow;
   schema_migrations: MigrationRow;

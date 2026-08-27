@@ -2,13 +2,18 @@ import type {
   Authorization,
   Customer,
   DedicatedAccount,
+  Invoice,
+  InvoiceStatus,
   Metadata,
   Payment,
   PayboxEvent,
   PaymentStatus,
+  Plan,
   ProviderId,
   Refund,
   RefundStatus,
+  Subscription,
+  SubscriptionStatus,
   Transfer,
   TransferStatus,
 } from '@paybox/shared';
@@ -206,6 +211,37 @@ export interface DedicatedAccountRepository {
   list(filter?: ListOptions & { provider?: ProviderId }): Promise<Page<DedicatedAccount>>;
 }
 
+export interface PlanRepository {
+  insert(plan: Plan): Promise<Plan>;
+  byId(id: string): Promise<Plan | null>;
+  byCode(provider: ProviderId, code: string): Promise<Plan | null>;
+  update(id: string, patch: Partial<Plan>): Promise<Plan>;
+  list(filter?: ListOptions & { provider?: ProviderId }): Promise<Page<Plan>>;
+}
+
+export interface SubscriptionRepository {
+  insert(subscription: Subscription): Promise<Subscription>;
+  byId(id: string): Promise<Subscription | null>;
+  byCode(provider: ProviderId, code: string): Promise<Subscription | null>;
+  update(id: string, patch: Partial<Subscription>): Promise<Subscription>;
+  listByCustomer(customerId: string): Promise<Subscription[]>;
+  list(
+    filter?: ListOptions & { provider?: ProviderId; status?: SubscriptionStatus },
+  ): Promise<Page<Subscription>>;
+}
+
+export interface InvoiceRepository {
+  insert(invoice: Invoice): Promise<Invoice>;
+  byId(id: string): Promise<Invoice | null>;
+  byCode(provider: ProviderId, code: string): Promise<Invoice | null>;
+  update(id: string, patch: Partial<Invoice>): Promise<Invoice>;
+  /** Oldest first, so a billing history reads in the order it happened. */
+  listBySubscription(subscriptionId: string): Promise<Invoice[]>;
+  list(
+    filter?: ListOptions & { provider?: ProviderId; status?: InvoiceStatus },
+  ): Promise<Page<Invoice>>;
+}
+
 export interface EventFilter extends ListOptions {
   provider?: ProviderId;
   type?: string;
@@ -272,6 +308,9 @@ export interface Storage {
   readonly customers: CustomerRepository;
   readonly authorizations: AuthorizationRepository;
   readonly dedicatedAccounts: DedicatedAccountRepository;
+  readonly plans: PlanRepository;
+  readonly subscriptions: SubscriptionRepository;
+  readonly invoices: InvoiceRepository;
   readonly recipients: RecipientRepository;
   readonly events: EventRepository;
   readonly webhooks: WebhookRepository;

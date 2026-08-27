@@ -12,3 +12,13 @@ export {
   type ScenarioStep,
   type ScenarioRun,
 } from './scenarios.js';
+export {
+  authorizationChargeDetails,
+  authorizationOutcome,
+} from './authorizations.js';
+export {
+  SubscriptionRunner,
+  SUBSCRIPTION_CHARGE_JOB,
+  SUBSCRIPTION_INVOICE_JOB,
+  type SubscriptionRunnerDeps,
+} from './subscriptions.js';

@@ -1,8 +1,10 @@
 import {
   PayboxError,
   TERMINAL_STATUSES,
+  type InvoiceStatus,
   type PaymentStatus,
   type RefundStatus,
+  type SubscriptionStatus,
   type TransferStatus,
 } from '@paybox/shared';
 
@@ -61,6 +63,65 @@ const TRANSFER_TRANSITIONS: Readonly<Record<TransferStatus, readonly TransferSta
   failed: [],
   reversed: [],
 };
+
+/**
+ * Subscription lifecycle.
+ *
+ *   active ──> non_renewing ──> completed | cancelled
+ *      │                            
+ *      ├──> attention ──> active (the merchant fixed the instrument)
+ *      └──> completed | cancelled
+ *
+ * `attention` is not terminal: a failed renewal is recoverable, and modelling
+ * it as terminal would make the recovery path -- the one a merchant actually
+ * has to build -- untestable.
+ */
+const SUBSCRIPTION_TRANSITIONS: Readonly<
+  Record<SubscriptionStatus, readonly SubscriptionStatus[]>
+> = {
+  active: ['non_renewing', 'attention', 'completed', 'cancelled'],
+  non_renewing: ['completed', 'cancelled', 'active'],
+  attention: ['active', 'non_renewing', 'completed', 'cancelled'],
+  completed: [],
+  cancelled: [],
+};
+
+/** One billing attempt: raised, then either paid or not. */
+const INVOICE_TRANSITIONS: Readonly<Record<InvoiceStatus, readonly InvoiceStatus[]>> = {
+  pending: ['success', 'failed'],
+  success: [],
+  failed: [],
+};
+
+export function assertSubscriptionTransition(
+  from: SubscriptionStatus,
+  to: SubscriptionStatus,
+): void {
+  if (from !== to && SUBSCRIPTION_TRANSITIONS[from].includes(to)) return;
+  throw new PayboxError(
+    'invalid_state_transition',
+    `Cannot move a subscription from ${from} to ${to}. Allowed: ${
+      SUBSCRIPTION_TRANSITIONS[from].join(', ') || 'none (terminal)'
+    }.`,
+    { details: { from, to, allowed: SUBSCRIPTION_TRANSITIONS[from] } },
+  );
+}
+
+export function assertInvoiceTransition(from: InvoiceStatus, to: InvoiceStatus): void {
+  if (from !== to && INVOICE_TRANSITIONS[from].includes(to)) return;
+  throw new PayboxError(
+    'invalid_state_transition',
+    `Cannot move an invoice from ${from} to ${to}. Allowed: ${
+      INVOICE_TRANSITIONS[from].join(', ') || 'none (terminal)'
+    }.`,
+    { details: { from, to, allowed: INVOICE_TRANSITIONS[from] } },
+  );
+}
+
+/** A subscription only renews while it is in one of these states. */
+export function isRenewable(status: SubscriptionStatus): boolean {
+  return status === 'active' || status === 'attention';
+}
 
 export function canTransitionPayment(from: PaymentStatus, to: PaymentStatus): boolean {
   return PAYMENT_TRANSITIONS[from].includes(to);

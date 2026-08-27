@@ -165,6 +165,36 @@ export const dedicatedAccountAssignSchema = z.object({
   split_code: z.string().optional(),
 });
 
+/**
+ * Plans and subscriptions. Schemas `PlanCreate` and `SubscriptionCreate` from
+ * the pinned OpenAPI spec. The interval enum is exactly the documented one.
+ */
+export const planCreateSchema = z.object({
+  name: z.string().min(1),
+  amount: minorAmount,
+  interval: z.enum(['daily', 'weekly', 'monthly', 'biannually', 'annually']),
+  description: z.string().optional(),
+  send_invoices: z.boolean().optional(),
+  send_sms: z.boolean().optional(),
+  currency: z.string().length(3).optional(),
+  invoice_limit: z.union([z.number(), z.string()]).optional(),
+});
+
+export const planUpdateSchema = planCreateSchema.partial();
+
+export const subscriptionCreateSchema = z.object({
+  customer: z.string().min(1),
+  plan: z.string().min(1),
+  authorization: z.string().optional(),
+  start_date: z.string().optional(),
+  quantity: z.union([z.number(), z.string()]).optional(),
+});
+
+export const subscriptionToggleSchema = z.object({
+  code: z.string().min(1),
+  token: z.string().min(1),
+});
+
 export const refundSchema = z.object({
   transaction: z.union([z.string(), z.number()]).transform(String),
   amount: minorAmount.optional(),
