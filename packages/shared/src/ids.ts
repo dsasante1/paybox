@@ -14,6 +14,7 @@ export const ID_PREFIXES = [
   'ref', // refund
   'trf', // transfer
   'cus', // customer
+  'aut', // stored authorization
   'whd', // webhook delivery
   'whe', // webhook endpoint
   'job', // scheduled job

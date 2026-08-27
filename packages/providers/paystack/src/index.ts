@@ -18,3 +18,7 @@ export {
   fail,
 } from './serializers.js';
 export { toPaystackError } from './errors.js';
+export {
+  paystackAuthorizationMinter,
+  serializeAuthorization,
+} from './authorization.js';

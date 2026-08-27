@@ -1,4 +1,5 @@
 import type {
+  Authorization,
   Customer,
   Metadata,
   Payment,
@@ -180,6 +181,19 @@ export interface CustomerRepository {
   list(filter?: ListOptions): Promise<Page<Customer>>;
 }
 
+export interface AuthorizationRepository {
+  insert(authorization: Authorization): Promise<Authorization>;
+  byId(id: string): Promise<Authorization | null>;
+  byCode(provider: ProviderId, code: string): Promise<Authorization | null>;
+  /** Deduping lookup: one instrument charged twice yields one authorization. */
+  bySignature(provider: ProviderId, signature: string): Promise<Authorization | null>;
+  /** Most recent first -- a subscription with no explicit authorization uses
+   *  the customer's latest, which is what Paystack documents. */
+  listByCustomer(customerId: string): Promise<Authorization[]>;
+  update(id: string, patch: Partial<Authorization>): Promise<Authorization>;
+  list(filter?: ListOptions & { provider?: ProviderId }): Promise<Page<Authorization>>;
+}
+
 export interface EventFilter extends ListOptions {
   provider?: ProviderId;
   type?: string;
@@ -244,6 +258,7 @@ export interface Storage {
   readonly refunds: RefundRepository;
   readonly transfers: TransferRepository;
   readonly customers: CustomerRepository;
+  readonly authorizations: AuthorizationRepository;
   readonly recipients: RecipientRepository;
   readonly events: EventRepository;
   readonly webhooks: WebhookRepository;

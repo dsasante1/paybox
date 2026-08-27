@@ -217,4 +217,42 @@ export const MIGRATIONS: readonly Migration[] = [
         ON transfer_recipients (provider, provider_recipient_id);
     `,
   },
+  {
+    id: '0003_authorizations',
+    sql: `
+      -- Reusable instrument handles (spec §5). Only masked fragments are ever
+      -- stored: there is no column for a PAN and none for a CVV, by design.
+      CREATE TABLE authorizations (
+        id                          TEXT PRIMARY KEY,
+        provider                    TEXT NOT NULL,
+        provider_authorization_code TEXT NOT NULL,
+        customer_id                 TEXT REFERENCES customers(id) ON DELETE SET NULL,
+        payment_id                  TEXT REFERENCES payments(id) ON DELETE SET NULL,
+        channel                     TEXT NOT NULL,
+        bin                         TEXT,
+        last4                       TEXT,
+        exp_month                   TEXT,
+        exp_year                    TEXT,
+        card_type                   TEXT,
+        bank                        TEXT,
+        brand                       TEXT,
+        country_code                TEXT,
+        signature                   TEXT,
+        reusable                    INTEGER NOT NULL DEFAULT 0,
+        active                      INTEGER NOT NULL DEFAULT 1,
+        account_name                TEXT,
+        mobile_money_number         TEXT,
+        metadata                    TEXT NOT NULL DEFAULT '{}',
+        created_at                  TEXT NOT NULL,
+        updated_at                  TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX idx_authorizations_provider_code
+        ON authorizations (provider, provider_authorization_code);
+      CREATE INDEX idx_authorizations_customer ON authorizations (customer_id);
+      -- Partial: only non-null signatures dedupe, so momo rows (which have
+      -- none) do not collide with each other.
+      CREATE UNIQUE INDEX idx_authorizations_signature
+        ON authorizations (provider, signature) WHERE signature IS NOT NULL;
+    `,
+  },
 ];

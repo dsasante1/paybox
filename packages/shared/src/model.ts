@@ -94,6 +94,55 @@ export interface Customer {
 }
 
 /**
+ * A stored authorization: the reusable handle a provider hands back after a
+ * successful charge so the merchant can debit the same instrument again
+ * without the customer present (spec §5).
+ *
+ * This is a canonical resource, not a Paystack one -- Stripe's payment method
+ * and Flutterwave's card token are the same idea, and the engine must be able
+ * to model recurring billing without learning any provider's name for it.
+ *
+ * `reusable` is the load-bearing flag. Cards are reusable; mobile money is not,
+ * because the customer has to approve each prompt on their handset. Charging a
+ * non-reusable authorization is refused rather than silently succeeding, which
+ * is the failure a developer needs to discover locally rather than in
+ * production.
+ *
+ * Only masked fragments are ever stored: a BIN and a last four. The PAN is
+ * discarded at the API boundary and the CVV is never read at all (spec §29).
+ */
+export interface Authorization {
+  id: string;
+  provider: ProviderId;
+  /** The code the provider would mint, e.g. Paystack's `AUTH_...` suffix. */
+  providerAuthorizationCode: string;
+  customerId: string | null;
+  /** The payment that first produced this authorization, if any. */
+  paymentId: string | null;
+  channel: PaymentMethod;
+  bin: string | null;
+  last4: string | null;
+  expMonth: string | null;
+  expYear: string | null;
+  cardType: string | null;
+  bank: string | null;
+  brand: string | null;
+  countryCode: string | null;
+  /** Provider-side fingerprint; stable per instrument, used for dedupe. */
+  signature: string | null;
+  /** False for channels that require the customer at every charge. */
+  reusable: boolean;
+  /** Cleared by an explicit deactivation; a deactivated code cannot charge. */
+  active: boolean;
+  /** Set for mobile-money authorizations so the wire format can echo it. */
+  accountName: string | null;
+  mobileMoneyNumber: string | null;
+  metadata: Metadata;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
  * An entry in the append-only event log (spec §8).
  *
  * The event log -- not the payment row -- is the source of truth for history.
@@ -107,7 +156,17 @@ export interface PayboxEvent {
   provider: ProviderId;
   /** Canonical id of the subject (payment, refund, transfer...). */
   resourceId: string;
-  resourceType: 'payment' | 'refund' | 'transfer' | 'customer';
+  resourceType:
+    | 'payment'
+    | 'refund'
+    | 'transfer'
+    | 'customer'
+    | 'authorization'
+    | 'subscription'
+    | 'invoice'
+    | 'dispute'
+    | 'subaccount'
+    | 'dedicated_account';
   /** Monotonic per-resource, so replay ordering is total and stable. */
   sequence: number;
   data: Metadata;

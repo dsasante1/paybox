@@ -165,6 +165,31 @@ export interface TransferRecipientRow {
   updated_at: string;
 }
 
+export interface AuthorizationRow {
+  id: string;
+  provider: string;
+  provider_authorization_code: string;
+  customer_id: string | null;
+  payment_id: string | null;
+  channel: string;
+  bin: string | null;
+  last4: string | null;
+  exp_month: string | null;
+  exp_year: string | null;
+  card_type: string | null;
+  bank: string | null;
+  brand: string | null;
+  country_code: string | null;
+  signature: string | null;
+  reusable: number;
+  active: number;
+  account_name: string | null;
+  mobile_money_number: string | null;
+  metadata: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface MigrationRow {
   id: string;
   applied_at: string;
@@ -180,6 +205,7 @@ export interface Database {
   webhook_deliveries: WebhookDeliveryRow;
   jobs: JobRow;
   idempotency_keys: IdempotencyRow;
+  authorizations: AuthorizationRow;
   transfer_recipients: TransferRecipientRow;
   event_sequences: EventSequenceRow;
   schema_migrations: MigrationRow;

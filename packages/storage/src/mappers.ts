@@ -1,4 +1,5 @@
 import type {
+  Authorization,
   Customer,
   Metadata,
   Payment,
@@ -20,6 +21,7 @@ import type {
   WebhookEndpoint,
 } from '@paybox/core';
 import type {
+  AuthorizationRow,
   TransferRecipientRow,
   CustomerRow,
   EventRow,
@@ -237,6 +239,66 @@ export function customerPatch(patch: Partial<Customer>): Partial<CustomerRow> {
   if (patch.firstName !== undefined) out.first_name = patch.firstName;
   if (patch.lastName !== undefined) out.last_name = patch.lastName;
   if (patch.phone !== undefined) out.phone = patch.phone;
+  if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
+  if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
+  return out;
+}
+
+export const toAuthorization = (row: AuthorizationRow): Authorization => ({
+  id: row.id,
+  provider: row.provider as ProviderId,
+  providerAuthorizationCode: row.provider_authorization_code,
+  customerId: row.customer_id,
+  paymentId: row.payment_id,
+  channel: row.channel as PaymentMethod,
+  bin: row.bin,
+  last4: row.last4,
+  expMonth: row.exp_month,
+  expYear: row.exp_year,
+  cardType: row.card_type,
+  bank: row.bank,
+  brand: row.brand,
+  countryCode: row.country_code,
+  signature: row.signature,
+  reusable: row.reusable === 1,
+  active: row.active === 1,
+  accountName: row.account_name,
+  mobileMoneyNumber: row.mobile_money_number,
+  metadata: readJson(row.metadata),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+export const fromAuthorization = (auth: Authorization): AuthorizationRow => ({
+  id: auth.id,
+  provider: auth.provider,
+  provider_authorization_code: auth.providerAuthorizationCode,
+  customer_id: auth.customerId,
+  payment_id: auth.paymentId,
+  channel: auth.channel,
+  bin: auth.bin,
+  last4: auth.last4,
+  exp_month: auth.expMonth,
+  exp_year: auth.expYear,
+  card_type: auth.cardType,
+  bank: auth.bank,
+  brand: auth.brand,
+  country_code: auth.countryCode,
+  signature: auth.signature,
+  reusable: auth.reusable ? 1 : 0,
+  active: auth.active ? 1 : 0,
+  account_name: auth.accountName,
+  mobile_money_number: auth.mobileMoneyNumber,
+  metadata: writeJson(auth.metadata),
+  created_at: auth.createdAt,
+  updated_at: auth.updatedAt,
+});
+
+export function authorizationPatch(patch: Partial<Authorization>): Partial<AuthorizationRow> {
+  const out: Partial<AuthorizationRow> = {};
+  if (patch.customerId !== undefined) out.customer_id = patch.customerId;
+  if (patch.reusable !== undefined) out.reusable = patch.reusable ? 1 : 0;
+  if (patch.active !== undefined) out.active = patch.active ? 1 : 0;
   if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
   if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
   return out;

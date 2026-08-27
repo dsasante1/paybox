@@ -1,6 +1,7 @@
 import {
   PayboxError,
   isSupportedCurrency,
+  type Authorization,
   type Clock,
   type Customer,
   type IdFactory,
@@ -67,12 +68,49 @@ export interface TransitionOptions {
  */
 export type ProviderStatusResolver = (provider: ProviderId, status: PaymentStatus) => string;
 
+/**
+ * The instrument fragments an adapter wants preserved when a payment succeeds.
+ *
+ * Everything here is either masked or synthetic. There is deliberately no
+ * field that could hold a PAN or a CVV (spec §29).
+ */
+export interface AuthorizationDraft {
+  channel: PaymentMethod;
+  /** Whether this instrument can be charged again without the customer. */
+  reusable: boolean;
+  providerAuthorizationCode?: string;
+  bin?: string | null;
+  last4?: string | null;
+  expMonth?: string | null;
+  expYear?: string | null;
+  cardType?: string | null;
+  bank?: string | null;
+  brand?: string | null;
+  countryCode?: string | null;
+  /** Stable per instrument. Non-null signatures dedupe; null ones never do. */
+  signature?: string | null;
+  accountName?: string | null;
+  mobileMoneyNumber?: string | null;
+  metadata?: Metadata;
+}
+
+/**
+ * Turns a settled payment into the authorization its provider would mint, or
+ * null if that provider mints nothing for this channel.
+ *
+ * Injected for the same reason as `ProviderStatusResolver`: deciding that a
+ * card is reusable and a mobile-money prompt is not is provider knowledge, and
+ * the engine must not acquire it (spec §30).
+ */
+export type AuthorizationMinter = (payment: Payment) => AuthorizationDraft | null;
+
 export interface EngineDeps {
   storage: Storage;
   clock: Clock;
   ids: IdFactory;
   bus: EventBus;
   providerStatus?: ProviderStatusResolver;
+  mintAuthorization?: AuthorizationMinter;
 }
 
 /**
@@ -90,6 +128,7 @@ export class PaymentEngine {
   readonly #ids: IdFactory;
   readonly #bus: EventBus;
   readonly #providerStatus: ProviderStatusResolver;
+  readonly #mintAuthorization: AuthorizationMinter;
 
   constructor(deps: EngineDeps) {
     this.#storage = deps.storage;
@@ -97,6 +136,7 @@ export class PaymentEngine {
     this.#ids = deps.ids;
     this.#bus = deps.bus;
     this.#providerStatus = deps.providerStatus ?? ((_provider, status) => status);
+    this.#mintAuthorization = deps.mintAuthorization ?? (() => null);
   }
 
   /* ---------------------------------------------------------------- *
@@ -225,16 +265,26 @@ export class PaymentEngine {
       }
 
       const updated = await tx.payments.update(paymentId, patch);
-      const event = await this.#appendEvent(tx, {
-        type: `payment.${to}`,
-        provider: updated.provider,
-        resourceId: updated.id,
-        resourceType: 'payment',
-        data: { ...paymentEventData(updated), ...(options.eventData ?? {}) },
-        previousStatus: payment.status,
-        currentStatus: to,
-      });
-      return { result: updated, events: [event] };
+      const emitted: PayboxEvent[] = [
+        await this.#appendEvent(tx, {
+          type: `payment.${to}`,
+          provider: updated.provider,
+          resourceId: updated.id,
+          resourceType: 'payment',
+          data: { ...paymentEventData(updated), ...(options.eventData ?? {}) },
+          previousStatus: payment.status,
+          currentStatus: to,
+        }),
+      ];
+
+      // Mint the reusable handle in the same transaction as the state change,
+      // so a committed success can never leave a missing authorization behind.
+      if (to === 'successful') {
+        const minted = await this.#mintFor(tx, updated);
+        if (minted) emitted.push(minted);
+      }
+
+      return { result: updated, events: emitted };
     });
 
     // A payment that has reached a terminal state must not be expired later by
@@ -542,6 +592,137 @@ export class PaymentEngine {
   }
 
   /* ---------------------------------------------------------------- *
+   * Authorizations (spec §5)
+   * ---------------------------------------------------------------- */
+
+  async getAuthorization(id: string): Promise<Authorization | null> {
+    return this.#storage.authorizations.byId(id);
+  }
+
+  /** Accepts a canonical id or the provider's own code. */
+  async resolveAuthorization(
+    provider: ProviderId,
+    handle: string,
+  ): Promise<Authorization | null> {
+    return (
+      (await this.#storage.authorizations.byCode(provider, handle)) ??
+      (await this.#storage.authorizations.byId(handle))
+    );
+  }
+
+  /**
+   * Assert an authorization may be charged right now.
+   *
+   * Both refusals model real provider behaviour rather than emulator
+   * bookkeeping: a deactivated code is dead at the provider, and a
+   * non-reusable one (mobile money, most bank debits) needs the customer to
+   * approve each prompt, so charging it off-session is not a thing that can
+   * work. Discovering that here is the whole point.
+   */
+  assertChargeable(authorization: Authorization): void {
+    if (!authorization.active) {
+      throw new PayboxError(
+        'authentication_failed',
+        `Authorization ${authorization.providerAuthorizationCode} has been deactivated.`,
+        { details: { authorizationId: authorization.id } },
+      );
+    }
+    if (!authorization.reusable) {
+      throw new PayboxError(
+        'unsupported_operation',
+        `Authorization ${authorization.providerAuthorizationCode} is not reusable; ` +
+          `${authorization.channel} requires the customer to approve every charge.`,
+        { details: { authorizationId: authorization.id, channel: authorization.channel } },
+      );
+    }
+  }
+
+  async deactivateAuthorization(id: string): Promise<Authorization> {
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const existing = await tx.authorizations.byId(id);
+      if (!existing) throw new PayboxError('not_found', `No authorization with id ${id}.`);
+
+      const updated = await tx.authorizations.update(id, {
+        active: false,
+        updatedAt: this.#clock.nowISO(),
+      });
+      const event = await this.#appendEvent(tx, {
+        type: 'authorization.deactivated',
+        provider: updated.provider,
+        resourceId: updated.id,
+        resourceType: 'authorization',
+        data: authorizationEventData(updated),
+        previousStatus: 'active',
+        currentStatus: 'inactive',
+      });
+      return { result: updated, events: [event] };
+    });
+
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
+  /**
+   * Mint (or reuse) the authorization for a payment that just succeeded.
+   *
+   * Runs inside the caller's transaction and returns the event to publish
+   * after commit, so it obeys the same append-then-publish rule as every other
+   * state change.
+   */
+  async #mintFor(tx: Storage, payment: Payment): Promise<PayboxEvent | null> {
+    const draft = this.#mintAuthorization(payment);
+    if (!draft) return null;
+
+    // A signature is the provider's fingerprint for the instrument, so the
+    // same card charged twice must yield one authorization, not two. Channels
+    // without a signature (mobile money) mint a fresh row every time, which is
+    // what the provider does.
+    const signature = draft.signature ?? null;
+    if (signature) {
+      const existing = await tx.authorizations.bySignature(payment.provider, signature);
+      if (existing) return null;
+    }
+
+    const now = this.#clock.nowISO();
+    const authorization: Authorization = {
+      id: this.#ids.next('aut'),
+      provider: payment.provider,
+      providerAuthorizationCode:
+        draft.providerAuthorizationCode ?? payment.providerTransactionId,
+      customerId: payment.customerId,
+      paymentId: payment.id,
+      channel: draft.channel,
+      bin: draft.bin ?? null,
+      last4: draft.last4 ?? null,
+      expMonth: draft.expMonth ?? null,
+      expYear: draft.expYear ?? null,
+      cardType: draft.cardType ?? null,
+      bank: draft.bank ?? null,
+      brand: draft.brand ?? null,
+      countryCode: draft.countryCode ?? null,
+      signature,
+      reusable: draft.reusable,
+      active: true,
+      accountName: draft.accountName ?? null,
+      mobileMoneyNumber: draft.mobileMoneyNumber ?? null,
+      metadata: draft.metadata ?? {},
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const created = await tx.authorizations.insert(authorization);
+    return this.#appendEvent(tx, {
+      type: 'authorization.created',
+      provider: created.provider,
+      resourceId: created.id,
+      resourceType: 'authorization',
+      data: authorizationEventData(created),
+      previousStatus: null,
+      currentStatus: 'active',
+    });
+  }
+
+  /* ---------------------------------------------------------------- *
    * Internals
    * ---------------------------------------------------------------- */
 
@@ -621,6 +802,18 @@ function refundEventData(refund: Refund, payment: Payment): Metadata {
     amount: refund.amount,
     currency: refund.currency,
     status: refund.status,
+  };
+}
+
+function authorizationEventData(authorization: Authorization): Metadata {
+  return {
+    id: authorization.id,
+    authorization_code: authorization.providerAuthorizationCode,
+    channel: authorization.channel,
+    last4: authorization.last4,
+    reusable: authorization.reusable,
+    active: authorization.active,
+    customer_id: authorization.customerId,
   };
 }
 

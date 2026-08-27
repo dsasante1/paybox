@@ -1,5 +1,13 @@
-import type { Customer, Payment, PayboxEvent, Refund, Transfer } from '@paybox/shared';
+import type {
+  Authorization,
+  Customer,
+  Payment,
+  PayboxEvent,
+  Refund,
+  Transfer,
+} from '@paybox/shared';
 import { gatewayResponse, toPaystackStatus } from './status.js';
+import { serializeAuthorization } from './authorization.js';
 
 /**
  * Paystack response serialisation.
@@ -50,6 +58,12 @@ export interface SerializeOptions {
   /** Canonical events for this payment, rendered into Paystack's `log`. */
   events?: PayboxEvent[];
   includeFees?: boolean;
+  /**
+   * The authorization minted when this payment succeeded, if there is one.
+   * Preferred over the synthesised shape below, so the `authorization_code` a
+   * caller reads back from `verify` is the one they can actually charge.
+   */
+  authorization?: Authorization | null;
 }
 
 function paystackCustomer(payment: Payment, customer: Customer | null | undefined) {
@@ -72,7 +86,10 @@ function paystackCustomer(payment: Payment, customer: Customer | null | undefine
  * Card fields are synthetic by construction -- the emulator never sees a real
  * PAN, only a test card identifier -- and CVV is never present in any shape.
  */
-function paystackAuthorization(payment: Payment) {
+function paystackAuthorization(payment: Payment, stored?: Authorization | null) {
+  // A real, chargeable code whenever the payment actually minted one.
+  if (stored) return serializeAuthorization(stored);
+
   const details = payment.paymentMethodDetails;
   const channel = paystackChannel(payment);
 
@@ -199,7 +216,7 @@ export function serializeTransaction(payment: Payment, options: SerializeOptions
     log: paystackLog(payment, options.events),
     fees,
     fees_split: null,
-    authorization: paystackAuthorization(payment),
+    authorization: paystackAuthorization(payment, options.authorization),
     customer: paystackCustomer(payment, options.customer),
     plan: null,
     split: {},

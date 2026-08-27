@@ -16,12 +16,19 @@ import {
 } from '@paybox/simulator';
 import {
   checkoutPaySchema,
+  chargeAuthorizationSchema,
   chargeSchema,
   customerSchema,
+  deactivateAuthorizationSchema,
   initializeSchema,
   normalizeMetadata,
+  partialDebitSchema,
   recipientSchema,
   refundSchema,
+  submitBirthdaySchema,
+  submitOtpSchema,
+  submitPhoneSchema,
+  submitPinSchema,
   transferSchema,
 } from './schemas.js';
 import {
@@ -36,6 +43,7 @@ import { toPaystackError } from './errors.js';
 import { assertPaystackCredentials } from './auth.js';
 import { renderCheckoutPage, renderCheckoutResult } from './checkout.js';
 import { fromPaystackStatus } from './status.js';
+import { paystackAuthorizationMinter } from './authorization.js';
 
 export interface PaystackPluginOptions {
   engine: PaymentEngine;
@@ -118,7 +126,89 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
   async function decorate(payment: Payment) {
     const customer = payment.customerId ? await storage.customers.byId(payment.customerId) : null;
     const events = await storage.events.listByResource(payment.id);
-    return serializeTransaction(payment, { customer, events, includeFees });
+    return serializeTransaction(payment, {
+      customer,
+      events,
+      includeFees,
+      authorization: await storedAuthorization(payment),
+    });
+  }
+
+  /**
+   * The authorization this payment would have minted, if it exists.
+   *
+   * Looked up by the code the minter derives from the instrument rather than
+   * by payment id: a card charged twice dedupes onto one authorization, so the
+   * second payment has no row of its own and must still report the same
+   * chargeable code.
+   */
+  async function storedAuthorization(payment: Payment) {
+    const draft = paystackAuthorizationMinter(payment);
+    if (!draft?.providerAuthorizationCode) return null;
+    return storage.authorizations.byCode(PROVIDER, draft.providerAuthorizationCode);
+  }
+
+  /** Resolve an `AUTH_...` code (or a canonical id) to a chargeable row. */
+  async function requireAuthorization(handle: string) {
+    const code = handle.replace(/^AUTH_/, '');
+    const authorization =
+      (await engine.resolveAuthorization(PROVIDER, code)) ??
+      (await engine.resolveAuthorization(PROVIDER, handle));
+    if (!authorization) {
+      throw new PayboxError('not_found', `Authorization ${handle} not found.`);
+    }
+    engine.assertChargeable(authorization);
+    return authorization;
+  }
+
+  /**
+   * Charge a stored authorization off-session.
+   *
+   * Unlike `/charge`, this settles inline: the customer is not present, so
+   * there is no prompt to wait on and Paystack answers with a finished
+   * transaction. The outcome still comes from the instrument behind the
+   * authorization, so an `AUTH_` minted from the insufficient-funds test card
+   * declines here exactly as the original charge did.
+   */
+  async function chargeStoredAuthorization(input: {
+    authorizationCode: string;
+    email: string;
+    amount: number;
+    currency: string;
+    reference?: string | undefined;
+    metadata?: Record<string, unknown>;
+  }): Promise<Payment> {
+    const authorization = await requireAuthorization(input.authorizationCode);
+    const customer = await engine.createCustomer({ provider: PROVIDER, email: input.email });
+
+    const payment = await engine.createPayment({
+      provider: PROVIDER,
+      amount: input.amount,
+      currency: input.currency,
+      ...(input.reference ? { reference: input.reference } : {}),
+      customerId: customer.id,
+      paymentMethod: authorization.channel,
+      paymentMethodDetails: {
+        bin: authorization.bin,
+        last4: authorization.last4,
+        exp_month: authorization.expMonth,
+        exp_year: authorization.expYear,
+        brand: authorization.brand,
+        card_type: authorization.cardType,
+        bank: authorization.bank,
+        country: authorization.countryCode,
+      },
+      metadata: {
+        ...(input.metadata ?? {}),
+        email: input.email,
+        authorization_code: `AUTH_${authorization.providerAuthorizationCode}`,
+      },
+      status: 'pending',
+      providerStatus: 'pending',
+    });
+
+    const { outcome } = resolveInstrument(authorization.last4, authorization.channel);
+    return simulator.apply(payment.id, outcome);
   }
 
   /** Schedule the outcome implied by a test instrument. */
@@ -222,6 +312,59 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
     },
   );
 
+  fastify.post('/transaction/charge_authorization', async (request, reply) => {
+    authenticate(request);
+    const body = chargeAuthorizationSchema.parse(request.body);
+    const currency = (body.currency ?? 'NGN').toUpperCase();
+    if (!isSupportedCurrency(currency)) {
+      throw new PayboxError('unsupported_currency', `Currency ${currency} is not supported.`);
+    }
+
+    const payment = await chargeStoredAuthorization({
+      authorizationCode: body.authorization_code,
+      email: body.email,
+      amount: body.amount,
+      currency,
+      reference: body.reference,
+      metadata: normalizeMetadata(body.metadata),
+    });
+    return reply.send(ok('Charge attempted', await decorate(payment)));
+  });
+
+  /**
+   * Partial debit (spec §33).
+   *
+   * Paystack debits up to `amount` and no less than `at_least`. The emulator
+   * has no notion of a balance behind a card, so it debits the full requested
+   * amount and enforces only the arithmetic the caller can get wrong --
+   * `at_least` exceeding `amount`, which is always a bug in the request.
+   */
+  fastify.post('/transaction/partial_debit', async (request, reply) => {
+    authenticate(request);
+    const body = partialDebitSchema.parse(request.body);
+    const currency = body.currency.toUpperCase();
+    if (!isSupportedCurrency(currency)) {
+      throw new PayboxError('unsupported_currency', `Currency ${currency} is not supported.`);
+    }
+    const atLeast = body.at_least == null ? null : Number(body.at_least);
+    if (atLeast != null && Number.isFinite(atLeast) && atLeast > body.amount) {
+      throw new PayboxError(
+        'validation_failed',
+        `at_least (${atLeast}) cannot exceed amount (${body.amount}).`,
+        { details: { at_least: atLeast, amount: body.amount } },
+      );
+    }
+
+    const payment = await chargeStoredAuthorization({
+      authorizationCode: body.authorization_code,
+      email: body.email,
+      amount: body.amount,
+      currency,
+      reference: body.reference,
+    });
+    return reply.send(ok('Charge attempted', await decorate(payment)));
+  });
+
   /**
    * Direct charge (spec §33 mobile money / card / bank).
    *
@@ -316,6 +459,119 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
       }),
     );
   });
+
+  /* ---------------------------------------------------------------- *
+   * Charge continuation steps
+   *
+   * Paystack's card flow is a conversation: a charge can come back asking for
+   * a PIN, then an OTP, then succeed. Each step below advances a payment that
+   * is parked in `requires_action` -- the state the `authentication_required`
+   * test instrument leaves it in.
+   * ---------------------------------------------------------------- */
+
+  /** The OTP the emulator accepts. Any other value fails the charge. */
+  const VALID_OTP = '123456';
+  const VALID_PIN = '1234';
+
+  async function requirePendingCharge(reference: string): Promise<Payment> {
+    const payment = await loadTransaction(reference);
+    if (payment.status !== 'requires_action') {
+      throw new PayboxError(
+        'invalid_state_transition',
+        `Transaction ${reference} is not awaiting a customer action; it is ${payment.status}.`,
+        { details: { reference, status: payment.status } },
+      );
+    }
+    return payment;
+  }
+
+  /** Paystack's "next step" envelope, shared by the submit_* endpoints. */
+  function nextStep(payment: Payment, status: string, displayText: string) {
+    return ok('Charge attempted', {
+      reference: payment.reference,
+      status,
+      display_text: displayText,
+      amount: payment.amount,
+      currency: payment.currency,
+    });
+  }
+
+  fastify.post('/charge/submit_pin', async (request, reply) => {
+    authenticate(request);
+    const body = submitPinSchema.parse(request.body);
+    const payment = await requirePendingCharge(body.reference);
+    if (body.pin !== VALID_PIN) {
+      const failed = await simulator.apply(payment.id, 'authentication_failed');
+      return reply.send(ok('Charge attempted', await decorate(failed)));
+    }
+    // A correct PIN does not settle anything: Paystack answers by asking for
+    // the OTP, and the payment stays parked awaiting it.
+    return reply.send(
+      nextStep(payment, 'send_otp', 'Please enter the OTP sent to your phone'),
+    );
+  });
+
+  fastify.post('/charge/submit_phone', async (request, reply) => {
+    authenticate(request);
+    const body = submitPhoneSchema.parse(request.body);
+    const payment = await requirePendingCharge(body.reference);
+    return reply.send(
+      nextStep(payment, 'send_otp', 'Please enter the OTP sent to your phone'),
+    );
+  });
+
+  fastify.post('/charge/submit_birthday', async (request, reply) => {
+    authenticate(request);
+    const body = submitBirthdaySchema.parse(request.body);
+    const payment = await requirePendingCharge(body.reference);
+    return reply.send(
+      nextStep(payment, 'send_otp', 'Please enter the OTP sent to your phone'),
+    );
+  });
+
+  /**
+   * Submit the OTP that completes (or fails) a parked charge.
+   *
+   * The response is the full transaction object. Paystack's documented
+   * `ChargeSubmitOtpResponse` is a strict subset of those fields plus
+   * `redirect_url`, which is added here -- returning a superset keeps one
+   * serializer and cannot break a client reading documented fields.
+   */
+  fastify.post('/charge/submit_otp', async (request, reply) => {
+    authenticate(request);
+    const body = submitOtpSchema.parse(request.body);
+    const payment = await requirePendingCharge(body.reference);
+
+    // A wrong OTP is an authentication failure, not a customer rejection --
+    // they are different `gateway_response` strings and different failure
+    // codes, and conflating them would misreport why the charge died.
+    const settled =
+      body.otp === VALID_OTP
+        ? await simulator.apply(payment.id, 'success')
+        : await simulator.apply(payment.id, 'authentication_failed');
+    return reply.send(
+      ok('Charge attempted', {
+        ...(await decorate(settled)),
+        redirect_url: settled.callbackUrl,
+      }),
+    );
+  });
+
+  /**
+   * Poll a charge that came back pending (spec §33).
+   *
+   * Paystack's guidance is to wait ten seconds or more before calling this.
+   * Under a frozen clock that wait is `paybox time advance 10s`, which is the
+   * whole reason this endpoint is worth having locally.
+   */
+  fastify.get<{ Params: { reference: string } }>(
+    '/charge/:reference',
+    async (request, reply) => {
+      authenticate(request);
+      const payment = await loadTransaction(request.params.reference);
+      return reply.send(ok('Charge retrieved', await decorate(payment)));
+    },
+  );
 
   /* ---------------------------------------------------------------- *
    * Hosted checkout
@@ -455,6 +711,31 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
     });
   });
 
+  /**
+   * Deactivate a stored authorization.
+   *
+   * Irreversible, as at Paystack: there is no reactivate endpoint, and the
+   * emulator does not invent one.
+   */
+  fastify.post('/customer/authorization/deactivate', async (request, reply) => {
+    authenticate(request);
+    const body = deactivateAuthorizationSchema.parse(request.body);
+    const code = body.authorization_code.replace(/^AUTH_/, '');
+    const authorization = await engine.resolveAuthorization(PROVIDER, code);
+    if (!authorization) {
+      throw new PayboxError(
+        'not_found',
+        `Authorization ${body.authorization_code} not found.`,
+      );
+    }
+    const deactivated = await engine.deactivateAuthorization(authorization.id);
+    return reply.send(
+      ok('Authorization has been deactivated', {
+        authorization_code: `AUTH_${deactivated.providerAuthorizationCode}`,
+      }),
+    );
+  });
+
   /* ---------------------------------------------------------------- *
    * Transfers
    * ---------------------------------------------------------------- */
@@ -536,7 +817,6 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
     return reply.send(ok('Transfer retrieved', serializeTransfer(transfer)));
   });
 
-  void simulator; // used by the checkout/auto-advance job handler, wired in apps/api
 };
 
 /** Convenience for tests that want the plugin registered on a bare Fastify. */

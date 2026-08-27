@@ -65,6 +65,67 @@ export const chargeSchema = z.object({
     .optional(),
 });
 
+/**
+ * Charging a stored authorization.
+ *
+ * Verified against the official Paystack OpenAPI specification,
+ * `PaystackOSS/openapi` `dist/paystack.yaml` blob
+ * efa5c8d25611a60f01fd8ce59352fb38b7edfbfb (fetched 2026-08-27), schema
+ * `TransactionChargeAuthorization`. Required: email, amount,
+ * authorization_code.
+ */
+export const chargeAuthorizationSchema = z.object({
+  email: z.string().email(),
+  amount: minorAmount,
+  authorization_code: z.string().min(1),
+  reference: z.string().min(1).max(100).optional(),
+  currency: z.string().length(3).optional(),
+  metadata: z.union([z.record(z.string(), z.unknown()), z.string()]).optional(),
+  // Accepted and echoed; splits themselves are not modelled yet, and
+  // docs/paystack.md says so rather than pretending otherwise.
+  split_code: z.string().optional(),
+  subaccount: z.string().optional(),
+  transaction_charge: z.union([z.number(), z.string()]).optional(),
+  bearer: z.enum(['account', 'subaccount']).optional(),
+  queue: z.boolean().optional(),
+});
+
+/** Schema `TransactionPartialDebit`. Note `currency` is required here. */
+export const partialDebitSchema = z.object({
+  email: z.string().email(),
+  amount: minorAmount,
+  authorization_code: z.string().min(1),
+  currency: z.string().length(3),
+  at_least: z.union([z.number(), z.string()]).optional(),
+  reference: z.string().min(1).max(100).optional(),
+});
+
+/** Schemas `ChargeSubmitOTP` / `ChargeSubmitPin` / `...Phone` / `...Birthday`. */
+export const submitOtpSchema = z.object({
+  otp: z.string().min(1),
+  reference: z.string().min(1),
+});
+
+export const submitPinSchema = z.object({
+  pin: z.string().min(1),
+  reference: z.string().min(1),
+});
+
+export const submitPhoneSchema = z.object({
+  phone: z.string().min(1),
+  reference: z.string().min(1),
+});
+
+export const submitBirthdaySchema = z.object({
+  birthday: z.string().min(1),
+  reference: z.string().min(1),
+});
+
+/** Schema `CustomerDeactivateAuthorization`. */
+export const deactivateAuthorizationSchema = z.object({
+  authorization_code: z.string().min(1),
+});
+
 export const refundSchema = z.object({
   transaction: z.union([z.string(), z.number()]).transform(String),
   amount: minorAmount.optional(),

@@ -23,7 +23,12 @@ import {
   createRetryPolicy,
   type DeliveryTransport,
 } from '@paybox/webhooks';
-import { PaystackWebhookFormatter, generateLocalKeys, toPaystackStatus } from '@paybox/paystack';
+import {
+  PaystackWebhookFormatter,
+  generateLocalKeys,
+  paystackAuthorizationMinter,
+  toPaystackStatus,
+} from '@paybox/paystack';
 import type { PayboxConfig } from './config.js';
 import { PayboxLogger, type LogEntry } from './logger.js';
 import { NetworkSimulator } from './network.js';
@@ -90,7 +95,19 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
   const providerStatus: ProviderStatusResolver = (provider, status) =>
     provider === 'paystack' ? toPaystackStatus(status) : status;
 
-  const engine = new PaymentEngine({ storage, clock, ids, bus, providerStatus });
+  // Which channels mint a reusable authorization is also provider knowledge,
+  // injected the same way and for the same reason as the status mapping above.
+  const mintAuthorization = (payment: Parameters<typeof paystackAuthorizationMinter>[0]) =>
+    payment.provider === 'paystack' ? paystackAuthorizationMinter(payment) : null;
+
+  const engine = new PaymentEngine({
+    storage,
+    clock,
+    ids,
+    bus,
+    providerStatus,
+    mintAuthorization,
+  });
   const simulator = new PaymentSimulator({ engine, clock });
   const scenarios = new ScenarioRunner({ storage, clock, ids, simulator, engine });
   const network = new NetworkSimulator(random);

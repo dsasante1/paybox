@@ -1,6 +1,7 @@
 import { Kysely, sql, type Transaction } from 'kysely';
 import { PayboxError, type Customer, type Payment, type PayboxEvent, type ProviderId, type Refund, type Transfer } from '@paybox/shared';
 import type {
+  AuthorizationRepository,
   CustomerRepository,
   EventFilter,
   EventRepository,
@@ -78,6 +79,8 @@ class SqliteStorage implements Storage {
       'refunds',
       'transfers',
       'transfer_recipients',
+      // Before payments and customers: authorizations reference both.
+      'authorizations',
       'payments',
       'customers',
     ] as const;
@@ -358,6 +361,86 @@ class SqliteStorage implements Storage {
         .select(({ fn }) => fn.countAll<number>().as('total'))
         .executeTakeFirst();
       return { items: rows.map(map.toCustomer), total: Number(total?.total ?? 0) };
+    },
+  };
+
+  readonly authorizations: AuthorizationRepository = {
+    insert: async (authorization) => {
+      await this.#db
+        .insertInto('authorizations')
+        .values(map.fromAuthorization(authorization))
+        .execute();
+      return authorization;
+    },
+    byId: async (id) => {
+      const row = await this.#db
+        .selectFrom('authorizations')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toAuthorization(row) : null;
+    },
+    byCode: async (provider, code) => {
+      const row = await this.#db
+        .selectFrom('authorizations')
+        .selectAll()
+        .where('provider', '=', provider)
+        .where('provider_authorization_code', '=', code)
+        .executeTakeFirst();
+      return row ? map.toAuthorization(row) : null;
+    },
+    bySignature: async (provider, signature) => {
+      const row = await this.#db
+        .selectFrom('authorizations')
+        .selectAll()
+        .where('provider', '=', provider)
+        .where('signature', '=', signature)
+        .executeTakeFirst();
+      return row ? map.toAuthorization(row) : null;
+    },
+    listByCustomer: async (customerId) => {
+      const rows = await this.#db
+        .selectFrom('authorizations')
+        .selectAll()
+        .where('customer_id', '=', customerId)
+        .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
+        .execute();
+      return rows.map(map.toAuthorization);
+    },
+    update: async (id, patch) => {
+      const columns = map.authorizationPatch(patch);
+      if (Object.keys(columns).length > 0) {
+        await this.#db
+          .updateTable('authorizations')
+          .set(columns)
+          .where('id', '=', id)
+          .execute();
+      }
+      const row = await this.#db
+        .selectFrom('authorizations')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toAuthorization(row) : notFound('authorization', id);
+    },
+    list: async (filter) => {
+      const { limit, offset } = page(filter);
+      let query = this.#db.selectFrom('authorizations').selectAll();
+      let count = this.#db
+        .selectFrom('authorizations')
+        .select(({ fn }) => fn.countAll<number>().as('total'));
+      if (filter?.provider) {
+        query = query.where('provider', '=', filter.provider);
+        count = count.where('provider', '=', filter.provider);
+      }
+      const rows = await query
+        .orderBy('created_at', 'desc')
+        .limit(limit)
+        .offset(offset)
+        .execute();
+      const total = await count.executeTakeFirst();
+      return { items: rows.map(map.toAuthorization), total: Number(total?.total ?? 0) };
     },
   };
 

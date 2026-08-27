@@ -4,13 +4,22 @@
 and is not implemented. Where behaviour is modelled rather than verified
 against Paystack's documentation, it says so.
 
-Verified against Paystack's public documentation on **2026-08-27**:
+Verified on **2026-08-27** against Paystack's **official OpenAPI
+specification**, which is the authoritative source used throughout this
+adapter:
 
-- Transaction API reference — <https://paystack.com/docs/api/transaction/>
-- Webhooks — <https://paystack.com/docs/payments/webhooks/>
+- <https://github.com/PaystackOSS/openapi> — `dist/paystack.yaml`, blob SHA
+  `efa5c8d25611a60f01fd8ce59352fb38b7edfbfb` (repository last pushed
+  2026-06-09). Request and response shapes cite their `operationId` in the
+  source comments.
+- Webhook event names cross-checked against the Paystack AsyncAPI mirror at
+  <https://apis.io/asyncapis/paystack/paystack-webhooks-asyncapi/>.
 
-Re-verify before relying on any of this. Provider APIs change; nothing here is
-generated from a live schema.
+Note that <https://paystack.com/docs> returns HTTP 403 to automated fetches, so
+the docs site cannot be machine-verified; the OpenAPI spec above is used
+instead. Re-verify against a current SHA before relying on any of this.
+Provider APIs change, and nothing here is generated from a live schema at
+build time.
 
 ---
 
@@ -23,6 +32,14 @@ generated from a live schema.
 | `GET /transaction/:id` | **Partially compatible** | Accepts the numeric id, the reference, or a paybox id. |
 | `GET /transaction` | **Partially compatible** | Supports `perPage`, `page`, `status`. No date filters. |
 | `POST /charge` | **Partially compatible** | `mobile_money`, `card`, `bank`. No USSD, QR, EFT or bank_transfer. |
+| `GET /charge/{reference}` | **Compatible** | Polls a charge that came back pending. |
+| `POST /transaction/charge_authorization` | **Compatible** | Settles inline; the customer is not present. |
+| `POST /transaction/partial_debit` | **Partially compatible** | Debits the full requested amount; see below. |
+| `POST /charge/submit_otp` | **Compatible** | Completes or fails a parked charge. |
+| `POST /charge/submit_pin` | **Partially compatible** | Answers `send_otp`; does not settle. |
+| `POST /charge/submit_phone` | **Partially compatible** | Answers `send_otp`. |
+| `POST /charge/submit_birthday` | **Partially compatible** | Answers `send_otp`. |
+| `POST /customer/authorization/deactivate` | **Compatible** | Irreversible, as at Paystack. |
 | `POST /refund` | **Compatible** | Full and partial. Enforces the remaining balance. |
 | `GET /refund/:id` | **Compatible** | |
 | `POST /customer` | **Compatible** | |
@@ -31,8 +48,6 @@ generated from a live schema.
 | `POST /transferrecipient` | **Partially compatible** | `nuban` shape only; no bank-name resolution. |
 | `POST /transfer` | **Partially compatible** | Created in `pending`. Settle it from the dashboard or CLI. |
 | `GET /transfer/:id` | **Partially compatible** | |
-| `POST /charge/submit_otp` | **Not supported** | |
-| `POST /transaction/charge_authorization` | **Not supported** | No stored-authorization reuse. |
 | Plans, subscriptions, invoices, split payments, disputes, settlements, bulk transfers, balance, integration, dedicated virtual accounts | **Not supported** | |
 
 ## Authentication
@@ -78,6 +93,49 @@ the Luhn check, and are not issued by any network.
 
 **CVV is never read, never stored, and appears nowhere in the data model.**
 A card number is reduced to its BIN and last four before anything is persisted.
+
+## Stored authorizations
+
+A successful charge mints a reusable handle, exactly as Paystack does, and it
+comes back on every later `verify` as `authorization.authorization_code`.
+
+| Channel | `reusable` | Why |
+|---|---|---|
+| Card | `true` | Chargeable off-session via `charge_authorization`. |
+| Mobile money | `false` | The payer must approve a prompt on their handset every time. |
+| Bank, USSD, other | `false` | No off-session mandate is modelled. |
+
+Charging a non-reusable or deactivated code is **refused**, because it would
+also fail in production. That refusal is the point: it is the failure mode a
+developer should find locally.
+
+The `authorization_code` is derived from the instrument, not the transaction,
+so charging the same test card twice returns **one** authorization rather than
+accumulating a new one per payment. Only masked fragments are ever stored —
+there is no column that could hold a PAN, and none for a CVV.
+
+### The PIN/OTP conversation
+
+Paystack's card flow can come back asking for a PIN and then an OTP. The
+`4000 0000 0000 0004` and `...0005` test cards park a charge in that state.
+
+| Value | Accepted |
+|---|---|
+| OTP | `123456` — anything else fails the charge with `authentication_required` |
+| PIN | `1234` — anything else fails the charge |
+
+These fixed values are **emulator-specific**. Paystack has no universal test
+OTP; do not read them as provider behaviour.
+
+`submit_pin`, `submit_phone` and `submit_birthday` answer `send_otp` and leave
+the payment parked — only `submit_otp` settles it. `submit_otp` returns the
+full transaction object plus `redirect_url`, a superset of the documented
+`ChargeSubmitOtpResponse` fields.
+
+`partial_debit` debits the full requested `amount`: the emulator models no
+balance behind a card, so it can only enforce the arithmetic in the request
+itself (`at_least` above `amount` is rejected). Do not use it to test
+partial-collection logic that depends on a real card balance.
 
 ## Status mapping
 
@@ -149,12 +207,14 @@ fidelity:
 
 ## Known limitations
 
-1. No stored-authorization reuse (`charge_authorization`), so recurring card
-   flows cannot be tested.
-2. No USSD or bank-transfer/virtual-account channels.
-3. `GET /transaction` has no date-range filtering.
-4. Transfers do not model a balance — a transfer never fails for insufficient
+1. No USSD or bank-transfer/virtual-account channels.
+2. `GET /transaction` has no date-range filtering.
+3. Transfers do not model a balance — a transfer never fails for insufficient
    funds unless you make it.
-5. Fees are approximate (above).
-6. Transaction ids are derived deterministically from the reference rather than
-   allocated by a counter, so they are stable but not monotonic over time.
+4. Fees are approximate (above).
+5. Transaction ids are derived deterministically from the reference rather than
+   allocated by a counter, so they are stable but not monotonic over time. This
+   is deliberate: hash-derived ids stay stable when operations are reordered,
+   which is what lets the test suite assert literal ids. A monotonic counter
+   would be more faithful to Paystack and less useful here.
+6. `partial_debit` does not model a card balance (above).
