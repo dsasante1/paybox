@@ -1,0 +1,14 @@
+{
+  "name": "@paybox/webhooks",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@paybox/shared": "0.1.0",
+    "@paybox/core": "0.1.0",
+    "undici": "^8.10.0"
+  }
+}
