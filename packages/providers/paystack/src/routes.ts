@@ -11,6 +11,7 @@ import type { PaymentEngine, Storage } from '@paybox/core';
 import {
   PAYMENT_SIMULATE_JOB,
   maskInstrument,
+  outcomeFromMetadata,
   resolveInstrument,
   type PaymentSimulator,
 } from '@paybox/simulator';
@@ -20,6 +21,8 @@ import {
   chargeSchema,
   customerSchema,
   deactivateAuthorizationSchema,
+  dedicatedAccountAssignSchema,
+  dedicatedAccountCreateSchema,
   initializeSchema,
   normalizeMetadata,
   partialDebitSchema,
@@ -35,6 +38,7 @@ import {
   numericTransactionId,
   ok,
   serializeCustomer,
+  serializeDedicatedAccount,
   serializeRefund,
   serializeTransaction,
   serializeTransfer,
@@ -212,9 +216,15 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
   }
 
   /** Schedule the outcome implied by a test instrument. */
-  async function scheduleOutcome(payment: Payment, identifier: string | null): Promise<void> {
+  async function scheduleOutcome(
+    payment: Payment,
+    identifier: string | null,
+    metadata?: Record<string, unknown>,
+  ): Promise<void> {
     if (!autoAdvance) return;
-    const { outcome } = resolveInstrument(identifier, payment.paymentMethod);
+    const { outcome } = resolveInstrument(identifier, payment.paymentMethod, {
+      override: outcomeFromMetadata(metadata),
+    });
     await storage.jobs.enqueue({
       id: ids.next('job'),
       kind: PAYMENT_SIMULATE_JOB,
@@ -373,14 +383,70 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
    * That asymmetry is one of the hardest things to test against a sandbox, so
    * the emulator reproduces it exactly rather than returning a settled result.
    */
+  /**
+   * How each channel presents itself on the wire.
+   *
+   * `parks` means the charge stops at `requires_action` because the customer
+   * has to do something out of band -- approve a prompt, dial a code, sign in
+   * at their bank. Everything else starts processing immediately.
+   *
+   * NOTE: the `status` and `display_text` strings below are **modelled, not
+   * verified**. Paystack's OpenAPI specification types every `/charge`
+   * response as a generic transaction object and contains no `pay_offline`,
+   * `send_otp` or `ussd_code` field, so the envelope cannot be machine-checked
+   * against it. docs/paystack.md says so plainly.
+   */
+  const CHANNEL_PRESENTATION = {
+    mobile_money: {
+      parks: true,
+      status: 'pay_offline',
+      displayText:
+        'Please approve the payment prompt on your phone to complete this transaction.',
+    },
+    ussd: {
+      parks: true,
+      status: 'pay_offline',
+      displayText: 'Please dial the USSD code on your phone to complete this transaction.',
+    },
+    eft: {
+      parks: true,
+      status: 'pay_offline',
+      displayText: 'Please complete the payment in your banking app.',
+    },
+    card: { parks: false, status: 'processing', displayText: 'Your payment is being processed.' },
+    bank: { parks: false, status: 'processing', displayText: 'Your payment is being processed.' },
+  } as const satisfies Partial<
+    Record<PaymentMethod, { parks: boolean; status: string; displayText: string }>
+  >;
+
   fastify.post('/charge', async (request, reply) => {
     authenticate(request);
     const body = chargeSchema.parse(request.body);
     const currency = (body.currency ?? 'GHS').toUpperCase();
 
-    let method: PaymentMethod = 'card';
+    // Paystack's spec composes /charge from one channel object at a time.
+    // Two at once is ambiguous, so refuse rather than silently picking one.
+    const supplied = (['mobile_money', 'card', 'bank', 'ussd', 'eft'] as const).filter(
+      (key) => body[key] != null,
+    );
+    if (supplied.length === 0) {
+      throw new PayboxError(
+        'validation_failed',
+        'Supply one of mobile_money, card, bank, ussd or eft on a charge request.',
+      );
+    }
+    if (supplied.length > 1) {
+      throw new PayboxError(
+        'validation_failed',
+        `Supply exactly one channel on a charge request; received ${supplied.join(', ')}.`,
+        { details: { channels: supplied } },
+      );
+    }
+
+    let method: PaymentMethod;
     let identifier: string | null = null;
     let details: Record<string, unknown> = {};
+    let ussdCode: string | null = null;
 
     if (body.mobile_money) {
       method = 'mobile_money';
@@ -407,14 +473,25 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
     } else if (body.bank) {
       method = 'bank';
       identifier = body.bank.account_number;
-      details = { bank: body.bank.code, account_number: maskInstrument(body.bank.account_number).last4 };
+      details = {
+        bank: body.bank.code,
+        account_number: maskInstrument(body.bank.account_number).last4,
+      };
+    } else if (body.ussd) {
+      method = 'ussd';
+      // A USSD charge carries only a bank code from a fixed enum -- there are
+      // no last four digits to select an outcome from, which is exactly what
+      // `metadata.paybox_outcome` exists for.
+      ussdCode = buildUssdCode(body.ussd.type);
+      details = { bank_code: body.ussd.type, ussd_code: ussdCode, country: 'NG' };
+    } else if (body.eft) {
+      method = 'eft';
+      details = { provider: body.eft.provider, country: 'ZA' };
     } else {
-      throw new PayboxError(
-        'validation_failed',
-        'Supply one of mobile_money, card or bank on a charge request.',
-      );
+      throw new PayboxError('validation_failed', 'Unsupported charge channel.');
     }
 
+    const metadata = normalizeMetadata(body.metadata);
     const customer = await engine.createCustomer({ provider: PROVIDER, email: body.email });
     const payment = await engine.createPayment({
       provider: PROVIDER,
@@ -424,38 +501,32 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
       customerId: customer.id,
       paymentMethod: method,
       paymentMethodDetails: details,
-      metadata: { ...normalizeMetadata(body.metadata), email: body.email },
+      metadata: { ...metadata, email: body.email },
       status: 'pending',
       providerStatus: 'pending',
       expiresInMs: 10 * 60_000,
     });
 
-    // Mobile money goes straight to "awaiting customer authorization"; cards
-    // and bank charges start processing immediately.
-    const pending =
-      method === 'mobile_money'
-        ? await engine.transitionPayment(payment.id, 'requires_action', {
-            providerStatus: 'ongoing',
-          })
-        : await engine.transitionPayment(payment.id, 'processing', {
-            providerStatus: 'processing',
-          });
+    const presentation = CHANNEL_PRESENTATION[method];
+    const pending = presentation.parks
+      ? await engine.transitionPayment(payment.id, 'requires_action', {
+          providerStatus: 'ongoing',
+        })
+      : await engine.transitionPayment(payment.id, 'processing', {
+          providerStatus: 'processing',
+        });
 
-    await scheduleOutcome(pending, identifier);
-
-    const displayText =
-      method === 'mobile_money'
-        ? 'Please approve the payment prompt on your phone to complete this transaction.'
-        : 'Your payment is being processed.';
+    await scheduleOutcome(pending, identifier, metadata);
 
     return reply.send(
       ok('Charge attempted', {
         reference: pending.reference,
-        status: method === 'mobile_money' ? 'pay_offline' : 'processing',
-        display_text: displayText,
+        status: presentation.status,
+        display_text: presentation.displayText,
         amount: pending.amount,
         currency: pending.currency,
         transaction: String(numericTransactionId(pending.providerTransactionId)),
+        ...(ussdCode ? { ussd_code: ussdCode } : {}),
       }),
     );
   });
@@ -737,6 +808,167 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
   });
 
   /* ---------------------------------------------------------------- *
+   * Dedicated virtual accounts
+   *
+   * A DVA is an inbound rail: money transferred into the account number is
+   * attributed to its customer. The numbers minted here are synthetic and
+   * belong to no bank (spec §29).
+   * ---------------------------------------------------------------- */
+
+  /**
+   * The banks that can back a DVA.
+   *
+   * Paystack exposes this through `GET /dedicated_account/available_providers`
+   * and the real list varies by integration and country. These three are the
+   * ones Paystack's own documentation uses in its examples; the emulator
+   * treats the list as closed so that an unavailable bank produces the
+   * assignment failure a developer needs to handle.
+   */
+  const DVA_PROVIDERS = [
+    { provider_slug: 'titan-paystack', bank_name: 'Titan Paystack', id: 1, bank_id: 302 },
+    { provider_slug: 'wema-bank', bank_name: 'Wema Bank', id: 2, bank_id: 20 },
+    { provider_slug: 'paystack-mfb', bank_name: 'Paystack-Titan MFB', id: 3, bank_id: 807 },
+  ] as const;
+
+  const DEFAULT_DVA_PROVIDER = DVA_PROVIDERS[0];
+
+  /**
+   * A synthetic ten-digit NUBAN.
+   *
+   * Derived from the customer code so the same customer always gets the same
+   * number under a fixed seed, which keeps integration tests reproducible.
+   */
+  function syntheticAccountNumber(seed: string): string {
+    let hash = 0;
+    for (let i = 0; i < seed.length; i++) {
+      hash = (hash * 31 + seed.charCodeAt(i)) % 1_000_000_000;
+    }
+    return String(1_000_000_000 + hash).slice(0, 10);
+  }
+
+  async function assignAccount(
+    customer: Awaited<ReturnType<typeof engine.createCustomer>>,
+    preferredBank: string | undefined,
+    currency: string,
+  ) {
+    const bank = preferredBank
+      ? DVA_PROVIDERS.find((p) => p.provider_slug === preferredBank)
+      : DEFAULT_DVA_PROVIDER;
+
+    if (!bank) {
+      // Record the failure so the `dedicatedaccount.assign.failed` webhook
+      // fires, then answer with the error -- both halves happen in production.
+      await engine.failDedicatedAccountAssignment({
+        provider: PROVIDER,
+        customerId: customer.id,
+        reason: `Preferred bank "${preferredBank}" is not available.`,
+      });
+      throw new PayboxError(
+        'validation_failed',
+        `Preferred bank "${preferredBank}" is not available on this integration.`,
+        {
+          details: {
+            available: DVA_PROVIDERS.map((p) => p.provider_slug),
+          },
+        },
+      );
+    }
+
+    const name = [customer.firstName, customer.lastName].filter(Boolean).join(' ');
+    return engine.createDedicatedAccount({
+      provider: PROVIDER,
+      customerId: customer.id,
+      accountNumber: syntheticAccountNumber(customer.providerCustomerId),
+      accountName: name || customer.email,
+      bankName: bank.bank_name,
+      bankSlug: bank.provider_slug,
+      currency,
+    });
+  }
+
+  fastify.post('/dedicated_account', async (request, reply) => {
+    authenticate(request);
+    const body = dedicatedAccountCreateSchema.parse(request.body);
+    const code = body.customer.replace(/^CUS_/, '');
+    const customer =
+      (await storage.customers.byProviderCustomerId(PROVIDER, code)) ??
+      (await storage.customers.byId(body.customer));
+    if (!customer) {
+      throw new PayboxError('not_found', `Customer ${body.customer} not found.`);
+    }
+
+    const account = await assignAccount(customer, body.preferred_bank, 'NGN');
+    return reply.send(
+      ok('NUBAN successfully created', serializeDedicatedAccount(account, customer)),
+    );
+  });
+
+  /** Creates the customer if needed, then assigns, per the documented flow. */
+  fastify.post('/dedicated_account/assign', async (request, reply) => {
+    authenticate(request);
+    const body = dedicatedAccountAssignSchema.parse(request.body);
+
+    const customer = await engine.createCustomer({
+      provider: PROVIDER,
+      email: body.email,
+      firstName: body.first_name,
+      lastName: body.last_name,
+      phone: body.phone,
+    });
+    const account = await assignAccount(
+      customer,
+      body.preferred_bank,
+      body.country === 'GH' ? 'GHS' : 'NGN',
+    );
+
+    return reply.send(
+      ok('Assign dedicated account in progress', serializeDedicatedAccount(account, customer)),
+    );
+  });
+
+  fastify.get('/dedicated_account/available_providers', async (request, reply) => {
+    authenticate(request);
+    return reply.send(ok('Dedicated account providers retrieved', DVA_PROVIDERS));
+  });
+
+  fastify.get('/dedicated_account', async (request, reply) => {
+    authenticate(request);
+    const { items, total } = await storage.dedicatedAccounts.list({
+      provider: PROVIDER,
+      limit: 100,
+    });
+    const data = await Promise.all(
+      items.map(async (account) =>
+        serializeDedicatedAccount(account, await storage.customers.byId(account.customerId)),
+      ),
+    );
+    return reply.send({
+      status: true,
+      message: 'Managed accounts successfully retrieved',
+      data,
+      meta: { total, skipped: 0, perPage: 100, page: 1 },
+    });
+  });
+
+  fastify.get<{ Params: { id: string } }>(
+    '/dedicated_account/:id',
+    async (request, reply) => {
+      authenticate(request);
+      const account =
+        (await storage.dedicatedAccounts.byId(request.params.id)) ??
+        (await storage.dedicatedAccounts.byProviderAccountId(PROVIDER, request.params.id)) ??
+        (await storage.dedicatedAccounts.byAccountNumber(PROVIDER, request.params.id));
+      if (!account) {
+        throw new PayboxError('not_found', `Dedicated account ${request.params.id} not found.`);
+      }
+      const customer = await storage.customers.byId(account.customerId);
+      return reply.send(
+        ok('Dedicated account retrieved', serializeDedicatedAccount(account, customer)),
+      );
+    },
+  );
+
+  /* ---------------------------------------------------------------- *
    * Transfers
    * ---------------------------------------------------------------- */
 
@@ -818,6 +1050,18 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
   });
 
 };
+
+/**
+ * The dial string a USSD charge asks the payer to enter.
+ *
+ * Modelled, not verified: Paystack's OpenAPI specification carries no
+ * `ussd_code` field, so its exact shape cannot be checked against the
+ * authoritative source. The three-digit prefix is the bank code the caller
+ * supplied, which is the part that is documented.
+ */
+function buildUssdCode(bankCode: string): string {
+  return `*${bankCode}*000#`;
+}
 
 /** Convenience for tests that want the plugin registered on a bare Fastify. */
 export async function registerPaystack(

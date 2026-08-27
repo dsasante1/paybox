@@ -3,6 +3,7 @@ import { PayboxError, type Customer, type Payment, type PayboxEvent, type Provid
 import type {
   AuthorizationRepository,
   CustomerRepository,
+  DedicatedAccountRepository,
   EventFilter,
   EventRepository,
   IdempotencyRecord,
@@ -79,8 +80,9 @@ class SqliteStorage implements Storage {
       'refunds',
       'transfers',
       'transfer_recipients',
-      // Before payments and customers: authorizations reference both.
+      // Before payments and customers: these reference both.
       'authorizations',
+      'dedicated_accounts',
       'payments',
       'customers',
     ] as const;
@@ -441,6 +443,85 @@ class SqliteStorage implements Storage {
         .execute();
       const total = await count.executeTakeFirst();
       return { items: rows.map(map.toAuthorization), total: Number(total?.total ?? 0) };
+    },
+  };
+
+  readonly dedicatedAccounts: DedicatedAccountRepository = {
+    insert: async (account) => {
+      await this.#db
+        .insertInto('dedicated_accounts')
+        .values(map.fromDedicatedAccount(account))
+        .execute();
+      return account;
+    },
+    byId: async (id) => {
+      const row = await this.#db
+        .selectFrom('dedicated_accounts')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toDedicatedAccount(row) : null;
+    },
+    byProviderAccountId: async (provider, id) => {
+      const row = await this.#db
+        .selectFrom('dedicated_accounts')
+        .selectAll()
+        .where('provider', '=', provider)
+        .where('provider_account_id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toDedicatedAccount(row) : null;
+    },
+    byAccountNumber: async (provider, accountNumber) => {
+      const row = await this.#db
+        .selectFrom('dedicated_accounts')
+        .selectAll()
+        .where('provider', '=', provider)
+        .where('account_number', '=', accountNumber)
+        .executeTakeFirst();
+      return row ? map.toDedicatedAccount(row) : null;
+    },
+    byCustomer: async (customerId) => {
+      const row = await this.#db
+        .selectFrom('dedicated_accounts')
+        .selectAll()
+        .where('customer_id', '=', customerId)
+        .orderBy('created_at', 'desc')
+        .executeTakeFirst();
+      return row ? map.toDedicatedAccount(row) : null;
+    },
+    update: async (id, patch) => {
+      const columns = map.dedicatedAccountPatch(patch);
+      if (Object.keys(columns).length > 0) {
+        await this.#db
+          .updateTable('dedicated_accounts')
+          .set(columns)
+          .where('id', '=', id)
+          .execute();
+      }
+      const row = await this.#db
+        .selectFrom('dedicated_accounts')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toDedicatedAccount(row) : notFound('dedicated account', id);
+    },
+    list: async (filter) => {
+      const { limit, offset } = page(filter);
+      let query = this.#db.selectFrom('dedicated_accounts').selectAll();
+      let count = this.#db
+        .selectFrom('dedicated_accounts')
+        .select(({ fn }) => fn.countAll<number>().as('total'));
+      if (filter?.provider) {
+        query = query.where('provider', '=', filter.provider);
+        count = count.where('provider', '=', filter.provider);
+      }
+      const rows = await query
+        .orderBy('created_at', 'desc')
+        .limit(limit)
+        .offset(offset)
+        .execute();
+      const total = await count.executeTakeFirst();
+      return { items: rows.map(map.toDedicatedAccount), total: Number(total?.total ?? 0) };
     },
   };
 

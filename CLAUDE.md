@@ -18,7 +18,7 @@ All packages are implemented and the vertical slice runs end to end: `shared`, `
 
 The dashboard is a single self-contained HTML document served from `apps/api/src/dashboard.ts`, not a React/Vite app. That was a deliberate trade to keep `npm install -g` free of build artifacts; a React dashboard is the intended upgrade.
 
-Not built yet: transport interception for SDKs with a hardcoded host, the Postgres dialect, `paybox stop` (start runs in the foreground). There are no commits on `master`.
+Not built yet: transport interception for SDKs with a hardcoded host, the Postgres dialect, `paybox stop` (start runs in the foreground). The default branch is `main`; `feat/payment-emulator-foundation` points at the same commit.
 
 ## Commands
 

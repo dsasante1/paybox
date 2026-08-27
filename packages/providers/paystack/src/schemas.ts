@@ -63,6 +63,20 @@ export const chargeSchema = z.object({
       account_number: z.string(),
     })
     .optional(),
+  // Schema `USSD`: a fixed enum of three-digit bank codes, per the OpenAPI
+  // spec. Anything outside it is a validation error rather than a silent
+  // fallback -- a typo'd code would fail at Paystack too.
+  ussd: z
+    .object({
+      type: z.enum(['737', '919', '822', '966']),
+    })
+    .optional(),
+  // Schema `EFT`. Paystack documents only `provider` on this object.
+  eft: z
+    .object({
+      provider: z.string().min(1),
+    })
+    .optional(),
 });
 
 /**
@@ -124,6 +138,31 @@ export const submitBirthdaySchema = z.object({
 /** Schema `CustomerDeactivateAuthorization`. */
 export const deactivateAuthorizationSchema = z.object({
   authorization_code: z.string().min(1),
+});
+
+/**
+ * Dedicated virtual accounts. Schemas `DedicatedVirtualAccountCreate` and
+ * `DedicatedVirtualAccountAssign` from the pinned OpenAPI spec.
+ */
+export const dedicatedAccountCreateSchema = z.object({
+  customer: z.string().min(1),
+  preferred_bank: z.string().optional(),
+  subaccount: z.string().optional(),
+  split_code: z.string().optional(),
+});
+
+export const dedicatedAccountAssignSchema = z.object({
+  email: z.string().email(),
+  first_name: z.string().min(1),
+  last_name: z.string().min(1),
+  phone: z.string().min(1),
+  preferred_bank: z.string().min(1),
+  country: z.enum(['NG', 'GH']),
+  account_number: z.string().optional(),
+  bvn: z.string().optional(),
+  bank_code: z.string().optional(),
+  subaccount: z.string().optional(),
+  split_code: z.string().optional(),
 });
 
 export const refundSchema = z.object({

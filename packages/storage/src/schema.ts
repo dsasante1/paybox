@@ -190,6 +190,23 @@ export interface AuthorizationRow {
   updated_at: string;
 }
 
+export interface DedicatedAccountRow {
+  id: string;
+  provider: string;
+  provider_account_id: string;
+  customer_id: string;
+  account_number: string;
+  account_name: string;
+  bank_name: string;
+  bank_slug: string;
+  currency: string;
+  active: number;
+  assigned: number;
+  metadata: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface MigrationRow {
   id: string;
   applied_at: string;
@@ -206,6 +223,7 @@ export interface Database {
   jobs: JobRow;
   idempotency_keys: IdempotencyRow;
   authorizations: AuthorizationRow;
+  dedicated_accounts: DedicatedAccountRow;
   transfer_recipients: TransferRecipientRow;
   event_sequences: EventSequenceRow;
   schema_migrations: MigrationRow;

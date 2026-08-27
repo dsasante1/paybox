@@ -255,4 +255,32 @@ export const MIGRATIONS: readonly Migration[] = [
         ON authorizations (provider, signature) WHERE signature IS NOT NULL;
     `,
   },
+  {
+    id: '0004_dedicated_accounts',
+    sql: `
+      -- Synthetic account numbers only. These belong to no bank and the
+      -- emulator has no path that could move real money through one.
+      CREATE TABLE dedicated_accounts (
+        id                  TEXT PRIMARY KEY,
+        provider            TEXT NOT NULL,
+        provider_account_id TEXT NOT NULL,
+        customer_id         TEXT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+        account_number      TEXT NOT NULL,
+        account_name        TEXT NOT NULL,
+        bank_name           TEXT NOT NULL,
+        bank_slug           TEXT NOT NULL,
+        currency            TEXT NOT NULL,
+        active              INTEGER NOT NULL DEFAULT 1,
+        assigned            INTEGER NOT NULL DEFAULT 1,
+        metadata            TEXT NOT NULL DEFAULT '{}',
+        created_at          TEXT NOT NULL,
+        updated_at          TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX idx_dva_provider_id
+        ON dedicated_accounts (provider, provider_account_id);
+      CREATE UNIQUE INDEX idx_dva_account_number
+        ON dedicated_accounts (provider, account_number);
+      CREATE INDEX idx_dva_customer ON dedicated_accounts (customer_id);
+    `,
+  },
 ];

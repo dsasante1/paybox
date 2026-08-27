@@ -4,6 +4,7 @@ import {
   type Authorization,
   type Clock,
   type Customer,
+  type DedicatedAccount,
   type IdFactory,
   type Metadata,
   type Payment,
@@ -723,6 +724,94 @@ export class PaymentEngine {
   }
 
   /* ---------------------------------------------------------------- *
+   * Dedicated virtual accounts
+   * ---------------------------------------------------------------- */
+
+  /**
+   * Bind a synthetic account number to a customer.
+   *
+   * One per customer: asking twice returns the existing account rather than
+   * minting a second, which is what a provider does -- a customer has one
+   * inbound rail, not a growing pile of them.
+   */
+  async createDedicatedAccount(input: {
+    provider: ProviderId;
+    customerId: string;
+    accountNumber: string;
+    accountName: string;
+    bankName: string;
+    bankSlug: string;
+    currency: string;
+    providerAccountId?: string;
+    metadata?: Metadata;
+  }): Promise<DedicatedAccount> {
+    const existing = await this.#storage.dedicatedAccounts.byCustomer(input.customerId);
+    if (existing) return existing;
+
+    const now = this.#clock.nowISO();
+    const account: DedicatedAccount = {
+      id: this.#ids.next('dva'),
+      provider: input.provider,
+      providerAccountId: input.providerAccountId ?? this.#ids.token(12),
+      customerId: input.customerId,
+      accountNumber: input.accountNumber,
+      accountName: input.accountName,
+      bankName: input.bankName,
+      bankSlug: input.bankSlug,
+      currency: input.currency.toUpperCase(),
+      active: true,
+      assigned: true,
+      metadata: input.metadata ?? {},
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const created = await tx.dedicatedAccounts.insert(account);
+      const event = await this.#appendEvent(tx, {
+        type: 'dedicated_account.assigned',
+        provider: created.provider,
+        resourceId: created.id,
+        resourceType: 'dedicated_account',
+        data: dedicatedAccountEventData(created),
+        previousStatus: null,
+        currentStatus: 'active',
+      });
+      return { result: created, events: [event] };
+    });
+
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
+  /**
+   * Record a failed assignment.
+   *
+   * Providers fail these for real reasons -- an unverified customer, an
+   * unavailable bank -- and the developer's integration has to handle the
+   * webhook. Nothing is persisted because nothing was created; the event
+   * exists purely so the failure webhook has something to carry.
+   */
+  async failDedicatedAccountAssignment(input: {
+    provider: ProviderId;
+    customerId: string;
+    reason: string;
+  }): Promise<void> {
+    const events = await this.#storage.transaction(async (tx) => [
+      await this.#appendEvent(tx, {
+        type: 'dedicated_account.assign_failed',
+        provider: input.provider,
+        resourceId: input.customerId,
+        resourceType: 'dedicated_account',
+        data: { customer_id: input.customerId, reason: input.reason },
+        previousStatus: null,
+        currentStatus: 'failed',
+      }),
+    ]);
+    await this.#bus.emitAll(events);
+  }
+
+  /* ---------------------------------------------------------------- *
    * Internals
    * ---------------------------------------------------------------- */
 
@@ -814,6 +903,17 @@ function authorizationEventData(authorization: Authorization): Metadata {
     reusable: authorization.reusable,
     active: authorization.active,
     customer_id: authorization.customerId,
+  };
+}
+
+function dedicatedAccountEventData(account: DedicatedAccount): Metadata {
+  return {
+    id: account.id,
+    account_number: account.accountNumber,
+    account_name: account.accountName,
+    bank: account.bankName,
+    currency: account.currency,
+    customer_id: account.customerId,
   };
 }
 

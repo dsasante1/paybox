@@ -50,6 +50,7 @@ export const PAYMENT_METHODS = [
   'bank',
   'bank_transfer',
   'ussd',
+  'eft',
   'qr',
 ] as const;
 export type PaymentMethod = (typeof PAYMENT_METHODS)[number];

@@ -143,6 +143,34 @@ export interface Authorization {
 }
 
 /**
+ * A dedicated virtual account: a bank account number minted for one customer,
+ * so money transferred into it is attributed to them automatically.
+ *
+ * Canonical rather than Paystack-specific -- Flutterwave and Kora both mint
+ * the same thing, and the engine models it as "an inbound rail bound to a
+ * customer" without knowing whose product it is.
+ *
+ * The account number is synthetic and belongs to no bank. Nothing in the
+ * emulator can move real money into or out of it (spec §29).
+ */
+export interface DedicatedAccount {
+  id: string;
+  provider: ProviderId;
+  providerAccountId: string;
+  customerId: string;
+  accountNumber: string;
+  accountName: string;
+  bankName: string;
+  bankSlug: string;
+  currency: string;
+  active: boolean;
+  assigned: boolean;
+  metadata: Metadata;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
  * An entry in the append-only event log (spec §8).
  *
  * The event log -- not the payment row -- is the source of truth for history.

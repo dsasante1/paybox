@@ -1,7 +1,12 @@
 import type { PayboxEvent } from '@paybox/shared';
 import type { FormattedWebhook, FormatterContext, WebhookFormatter } from '@paybox/webhooks';
 import { paystackSignatureHeaders } from './signature.js';
-import { serializeRefund, serializeTransaction, serializeTransfer } from './serializers.js';
+import {
+  serializeDedicatedAccount,
+  serializeRefund,
+  serializeTransaction,
+  serializeTransfer,
+} from './serializers.js';
 
 /**
  * Canonical event -> Paystack webhook event.
@@ -13,8 +18,10 @@ import { serializeRefund, serializeTransaction, serializeTransfer } from './seri
  * charge. Emitting one would teach developers to rely on a callback that will
  * never arrive in production, which is the opposite of what this tool is for.
  *
- * Verified against Paystack's webhook documentation, 2026-08-27. If Paystack
- * adds events, add them here after checking the docs -- not from memory.
+ * Event names verified 2026-08-27 against the Paystack AsyncAPI mirror at
+ * https://apis.io/asyncapis/paystack/paystack-webhooks-asyncapi/, since
+ * paystack.com/docs refuses automated fetches. If Paystack adds events, add
+ * them here after checking that source -- not from memory.
  */
 const EVENT_MAP: Record<string, string> = {
   'payment.successful': 'charge.success',
@@ -22,6 +29,8 @@ const EVENT_MAP: Record<string, string> = {
   'transfer.successful': 'transfer.success',
   'transfer.failed': 'transfer.failed',
   'transfer.reversed': 'transfer.reversed',
+  'dedicated_account.assigned': 'dedicatedaccount.assign.success',
+  'dedicated_account.assign_failed': 'dedicatedaccount.assign.failed',
 };
 
 export class PaystackWebhookFormatter implements WebhookFormatter {
@@ -64,6 +73,15 @@ export class PaystackWebhookFormatter implements WebhookFormatter {
       const transfer = await storage.transfers.byId(event.resourceId);
       if (!transfer) return null;
       return serializeTransfer(transfer);
+    }
+
+    if (event.resourceType === 'dedicated_account') {
+      const account = await storage.dedicatedAccounts.byId(event.resourceId);
+      // A failed assignment has no row, so the event's own payload -- the
+      // customer and the reason -- is all there is to send.
+      if (!account) return event.data;
+      const customer = await storage.customers.byId(account.customerId);
+      return serializeDedicatedAccount(account, customer);
     }
 
     return null;

@@ -1,6 +1,7 @@
 import type {
   Authorization,
   Customer,
+  DedicatedAccount,
   Metadata,
   Payment,
   PaymentMethod,
@@ -22,6 +23,7 @@ import type {
 } from '@paybox/core';
 import type {
   AuthorizationRow,
+  DedicatedAccountRow,
   TransferRecipientRow,
   CustomerRow,
   EventRow,
@@ -299,6 +301,51 @@ export function authorizationPatch(patch: Partial<Authorization>): Partial<Autho
   if (patch.customerId !== undefined) out.customer_id = patch.customerId;
   if (patch.reusable !== undefined) out.reusable = patch.reusable ? 1 : 0;
   if (patch.active !== undefined) out.active = patch.active ? 1 : 0;
+  if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
+  if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
+  return out;
+}
+
+export const toDedicatedAccount = (row: DedicatedAccountRow): DedicatedAccount => ({
+  id: row.id,
+  provider: row.provider as ProviderId,
+  providerAccountId: row.provider_account_id,
+  customerId: row.customer_id,
+  accountNumber: row.account_number,
+  accountName: row.account_name,
+  bankName: row.bank_name,
+  bankSlug: row.bank_slug,
+  currency: row.currency,
+  active: row.active === 1,
+  assigned: row.assigned === 1,
+  metadata: readJson(row.metadata),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+export const fromDedicatedAccount = (a: DedicatedAccount): DedicatedAccountRow => ({
+  id: a.id,
+  provider: a.provider,
+  provider_account_id: a.providerAccountId,
+  customer_id: a.customerId,
+  account_number: a.accountNumber,
+  account_name: a.accountName,
+  bank_name: a.bankName,
+  bank_slug: a.bankSlug,
+  currency: a.currency,
+  active: a.active ? 1 : 0,
+  assigned: a.assigned ? 1 : 0,
+  metadata: writeJson(a.metadata),
+  created_at: a.createdAt,
+  updated_at: a.updatedAt,
+});
+
+export function dedicatedAccountPatch(
+  patch: Partial<DedicatedAccount>,
+): Partial<DedicatedAccountRow> {
+  const out: Partial<DedicatedAccountRow> = {};
+  if (patch.active !== undefined) out.active = patch.active ? 1 : 0;
+  if (patch.assigned !== undefined) out.assigned = patch.assigned ? 1 : 0;
   if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
   if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
   return out;

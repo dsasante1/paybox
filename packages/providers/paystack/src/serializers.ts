@@ -1,6 +1,7 @@
 import type {
   Authorization,
   Customer,
+  DedicatedAccount,
   Payment,
   PayboxEvent,
   Refund,
@@ -155,6 +156,8 @@ export function paystackChannel(payment: Payment): string {
       return 'bank_transfer';
     case 'ussd':
       return 'ussd';
+    case 'eft':
+      return 'eft';
     case 'qr':
       return 'qr';
     default:
@@ -307,6 +310,42 @@ export function serializeTransfer(transfer: Transfer) {
         bank_name: null,
       },
     },
+  };
+}
+
+/**
+ * A dedicated virtual account, shaped as `DedicatedNubanCreateResponse.data`.
+ * The bank `id` is derived from the slug so it is stable across runs.
+ */
+export function serializeDedicatedAccount(
+  account: DedicatedAccount,
+  customer: Customer | null,
+) {
+  return {
+    bank: {
+      name: account.bankName,
+      id: numericTransactionId(account.bankSlug) % 1_000,
+      slug: account.bankSlug,
+    },
+    account_name: account.accountName,
+    account_number: account.accountNumber,
+    assigned: account.assigned,
+    currency: account.currency,
+    metadata: null,
+    active: account.active,
+    id: numericTransactionId(account.providerAccountId),
+    created_at: account.createdAt,
+    updated_at: account.updatedAt,
+    assignment: {
+      integration: 100_000,
+      assignee_id: customer ? numericTransactionId(customer.providerCustomerId) : null,
+      assignee_type: 'Customer',
+      expired: false,
+      account_type: 'PAY-WITH-TRANSFER-RECURRING',
+      assigned_at: account.createdAt,
+      expired_at: null,
+    },
+    ...(customer ? { customer: serializeCustomer(customer) } : {}),
   };
 }
 

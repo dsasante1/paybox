@@ -31,7 +31,12 @@ build time.
 | `GET /transaction/verify/:reference` | **Partially compatible** | Full transaction object. See the field table below. |
 | `GET /transaction/:id` | **Partially compatible** | Accepts the numeric id, the reference, or a paybox id. |
 | `GET /transaction` | **Partially compatible** | Supports `perPage`, `page`, `status`. No date filters. |
-| `POST /charge` | **Partially compatible** | `mobile_money`, `card`, `bank`. No USSD, QR, EFT or bank_transfer. |
+| `POST /charge` | **Partially compatible** | `mobile_money`, `card`, `bank`, `ussd`, `eft`. No QR. |
+| `POST /dedicated_account` | **Compatible** | One account per customer. |
+| `POST /dedicated_account/assign` | **Compatible** | Creates the customer, then assigns. |
+| `GET /dedicated_account` | **Partially compatible** | No query filters. |
+| `GET /dedicated_account/{id}` | **Compatible** | Accepts the numeric id, a paybox id, or the account number. |
+| `GET /dedicated_account/available_providers` | **Partially compatible** | Fixed list of three banks. |
 | `GET /charge/{reference}` | **Compatible** | Polls a charge that came back pending. |
 | `POST /transaction/charge_authorization` | **Compatible** | Settles inline; the customer is not present. |
 | `POST /transaction/partial_debit` | **Partially compatible** | Debits the full requested amount; see below. |
@@ -48,7 +53,7 @@ build time.
 | `POST /transferrecipient` | **Partially compatible** | `nuban` shape only; no bank-name resolution. |
 | `POST /transfer` | **Partially compatible** | Created in `pending`. Settle it from the dashboard or CLI. |
 | `GET /transfer/:id` | **Partially compatible** | |
-| Plans, subscriptions, invoices, split payments, disputes, settlements, bulk transfers, balance, integration, dedicated virtual accounts | **Not supported** | |
+| Plans, subscriptions, invoices, split payments, disputes, settlements, bulk transfers, balance, integration | **Not supported** | |
 
 ## Authentication
 
@@ -68,9 +73,10 @@ build time.
 | Mobile money (MTN, Telecel/Vodafone, AirtelTigo) | Implemented, asynchronous |
 | Card | Implemented, synthetic test cards only |
 | Bank | Implemented, minimal |
-| USSD | Not supported |
-| Bank transfer / virtual accounts | Not supported |
-| QR / EFT / Apple Pay | Not supported |
+| USSD | Implemented, asynchronous |
+| EFT | Implemented, asynchronous |
+| Bank transfer / dedicated virtual accounts | Implemented; credited from the control API |
+| QR / Apple Pay | Not supported |
 
 ### Test instruments
 
@@ -93,6 +99,45 @@ the Luhn check, and are not issued by any network.
 
 **CVV is never read, never stored, and appears nowhere in the data model.**
 A card number is reduced to its BIN and last four before anything is persisted.
+
+### Choosing an outcome where there is no instrument
+
+USSD carries only a three-digit bank code from a fixed enum, and EFT only a
+provider name — neither has last four digits to encode an outcome into. For
+those channels, name the outcome directly:
+
+```json
+{ "email": "…", "amount": 40000, "ussd": { "type": "737" },
+  "metadata": { "paybox_outcome": "insufficient_funds" } }
+```
+
+Accepted values are the outcome names in
+`packages/simulator/src/instruments.ts`. **This is emulator-specific and is not
+Paystack behaviour.** An unrecognised value is ignored rather than rejected, so
+a stray metadata key in your own payload cannot break a charge.
+
+### Dedicated virtual accounts
+
+Account numbers are synthetic, belong to no bank, and are derived from the
+customer code so they are stable under a fixed seed. A customer has exactly one
+account: asking twice returns the same one.
+
+`preferred_bank` is checked against a **fixed list of three** —
+`titan-paystack`, `wema-bank`, `paystack-mfb`. Anything else emits
+`dedicatedaccount.assign.failed` and returns an error, which is the failure
+path a real integration has to handle. The real list varies by integration and
+country.
+
+Nothing in the Paystack API can make money arrive in a DVA — in production
+someone makes a bank transfer. The emulator therefore exposes an
+**emulator-only control**, outside the provider surface:
+
+```
+POST /api/dedicated-accounts/{account_number}/credit  { "amount": 250000 }
+```
+
+The credit walks the ordinary state machine, so it appends the same events and
+fires the same `charge.success` webhook as any other payment.
 
 ## Stored authorizations
 
@@ -169,6 +214,8 @@ Envelope: `{ "event": "<name>", "data": { ... } }`
 | `transfer.successful` | `transfer.success` |
 | `transfer.failed` | `transfer.failed` |
 | `transfer.reversed` | `transfer.reversed` |
+| `dedicated_account.assigned` | `dedicatedaccount.assign.success` |
+| `dedicated_account.assign_failed` | `dedicatedaccount.assign.failed` |
 
 ### Events deliberately **not** emitted
 
@@ -205,10 +252,19 @@ fidelity:
 | `fees` | **Emulated approximation.** A flat percentage per currency, not Paystack's real pricing, which varies by country, channel, card origin and negotiated rate. Do not use for reconciliation testing. |
 | `ip_address`, `receipt_number`, `fees_split`, `fees_breakdown`, `split`, `plan`, `subaccount`, `pos_transaction_data`, `source`, `connect`, `order_id` | Always `null` / `{}` |
 
+## Response envelopes are modelled, not verified
+
+Paystack's OpenAPI specification types **every `/charge` response as a generic
+transaction object**. It contains no `pay_offline`, `send_otp`, `open_url` or
+`ussd_code` field anywhere. Those envelope strings — the `status` and
+`display_text` a charge returns, and the USSD dial code — are therefore
+**modelled from Paystack's prose documentation and cannot be machine-checked**
+against the authoritative source. Treat their exact values as approximate; the
+state transitions behind them are what this tool is actually asserting.
+
 ## Known limitations
 
-1. No USSD or bank-transfer/virtual-account channels.
-2. `GET /transaction` has no date-range filtering.
+1. `GET /transaction` has no date-range filtering.
 3. Transfers do not model a balance — a transfer never fails for insufficient
    funds unless you make it.
 4. Fees are approximate (above).
@@ -218,3 +274,4 @@ fidelity:
    which is what lets the test suite assert literal ids. A monotonic counter
    would be more faithful to Paystack and less useful here.
 6. `partial_debit` does not model a card balance (above).
+7. `GET /dedicated_account` ignores the documented query filters.

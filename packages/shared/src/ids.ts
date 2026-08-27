@@ -15,6 +15,7 @@ export const ID_PREFIXES = [
   'trf', // transfer
   'cus', // customer
   'aut', // stored authorization
+  'dva', // dedicated virtual account
   'whd', // webhook delivery
   'whe', // webhook endpoint
   'job', // scheduled job

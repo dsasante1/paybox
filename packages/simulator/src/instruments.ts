@@ -74,6 +74,38 @@ const DEFAULT: InstrumentResolution = {
   description: 'Unrecognised test instrument; defaulting to success',
 };
 
+/** Every outcome name, for validating the metadata escape hatch below. */
+const OUTCOME_NAMES = new Set(Object.values(SUFFIX_OUTCOMES).map((r) => r.outcome));
+
+/**
+ * The emulator-only override: `metadata.paybox_outcome` on a charge.
+ *
+ * Some channels have no instrument to encode an outcome into. A USSD charge
+ * carries only a three-digit bank code from a fixed enum, and an EFT charge
+ * carries only a provider name -- there are no last four digits to vary, so
+ * the suffix convention has nothing to work on. This names the outcome
+ * directly instead.
+ *
+ * It is **not** Paystack behaviour and must never be presented as such; it is
+ * documented as emulator-specific in docs/paystack.md. An unrecognised value
+ * is ignored rather than rejected, so a stray metadata key from a developer's
+ * own payload cannot break their charge.
+ */
+export const OUTCOME_METADATA_KEY = 'paybox_outcome';
+
+export function outcomeFromMetadata(
+  metadata: Record<string, unknown> | null | undefined,
+): SimulatedOutcome | null {
+  const raw = metadata?.[OUTCOME_METADATA_KEY];
+  if (typeof raw !== 'string') return null;
+  return OUTCOME_NAMES.has(raw as SimulatedOutcome) ? (raw as SimulatedOutcome) : null;
+}
+
+export interface ResolveOptions {
+  /** Wins over the identifier. Drawn from `metadata.paybox_outcome`. */
+  override?: SimulatedOutcome | null;
+}
+
 /**
  * Resolve an instrument to an outcome by its last four digits.
  * Unknown instruments succeed, so a developer pasting an arbitrary test number
@@ -82,7 +114,14 @@ const DEFAULT: InstrumentResolution = {
 export function resolveInstrument(
   identifier: string | null | undefined,
   method: PaymentMethod | null,
+  options: ResolveOptions = {},
 ): InstrumentResolution {
+  if (options.override) {
+    return {
+      outcome: options.override,
+      description: `Outcome requested via ${OUTCOME_METADATA_KEY} metadata`,
+    };
+  }
   if (!identifier) return DEFAULT;
   const digits = identifier.replace(/\D/g, '');
   if (digits.length < 4) return DEFAULT;

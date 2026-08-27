@@ -1,6 +1,7 @@
 import type {
   Authorization,
   Customer,
+  DedicatedAccount,
   Metadata,
   Payment,
   PayboxEvent,
@@ -194,6 +195,17 @@ export interface AuthorizationRepository {
   list(filter?: ListOptions & { provider?: ProviderId }): Promise<Page<Authorization>>;
 }
 
+export interface DedicatedAccountRepository {
+  insert(account: DedicatedAccount): Promise<DedicatedAccount>;
+  byId(id: string): Promise<DedicatedAccount | null>;
+  byProviderAccountId(provider: ProviderId, id: string): Promise<DedicatedAccount | null>;
+  /** The inbound rail: money arriving at this number belongs to its customer. */
+  byAccountNumber(provider: ProviderId, accountNumber: string): Promise<DedicatedAccount | null>;
+  byCustomer(customerId: string): Promise<DedicatedAccount | null>;
+  update(id: string, patch: Partial<DedicatedAccount>): Promise<DedicatedAccount>;
+  list(filter?: ListOptions & { provider?: ProviderId }): Promise<Page<DedicatedAccount>>;
+}
+
 export interface EventFilter extends ListOptions {
   provider?: ProviderId;
   type?: string;
@@ -259,6 +271,7 @@ export interface Storage {
   readonly transfers: TransferRepository;
   readonly customers: CustomerRepository;
   readonly authorizations: AuthorizationRepository;
+  readonly dedicatedAccounts: DedicatedAccountRepository;
   readonly recipients: RecipientRepository;
   readonly events: EventRepository;
   readonly webhooks: WebhookRepository;
