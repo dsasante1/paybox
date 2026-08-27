@@ -419,4 +419,34 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_ledger_resource ON balance_ledger (resource_id);
     `,
   },
+  {
+    id: '0007_disputes',
+    sql: `
+      CREATE TABLE disputes (
+        id                  TEXT PRIMARY KEY,
+        provider            TEXT NOT NULL,
+        provider_dispute_id TEXT NOT NULL,
+        payment_id          TEXT NOT NULL REFERENCES payments(id) ON DELETE CASCADE,
+        customer_id         TEXT REFERENCES customers(id) ON DELETE SET NULL,
+        category            TEXT NOT NULL,
+        status              TEXT NOT NULL,
+        provider_status     TEXT NOT NULL,
+        resolution          TEXT,
+        refund_amount       INTEGER NOT NULL CHECK (refund_amount >= 0),
+        currency            TEXT NOT NULL,
+        -- Virtual-time ISO: the response deadline is a scheduled job, so
+        -- "nobody answered in time" is one time advance away.
+        due_at              TEXT NOT NULL,
+        resolved_at         TEXT,
+        evidence            TEXT,
+        message             TEXT,
+        metadata            TEXT NOT NULL DEFAULT '{}',
+        created_at          TEXT NOT NULL,
+        updated_at          TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX idx_disputes_provider_id ON disputes (provider, provider_dispute_id);
+      CREATE INDEX idx_disputes_payment ON disputes (payment_id);
+      CREATE INDEX idx_disputes_status ON disputes (status);
+    `,
+  },
 ];

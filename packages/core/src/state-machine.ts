@@ -1,6 +1,7 @@
 import {
   PayboxError,
   TERMINAL_STATUSES,
+  type DisputeStatus,
   type InvoiceStatus,
   type PaymentStatus,
   type RefundStatus,
@@ -121,6 +122,34 @@ export function assertInvoiceTransition(from: InvoiceStatus, to: InvoiceStatus):
 /** A subscription only renews while it is in one of these states. */
 export function isRenewable(status: SubscriptionStatus): boolean {
   return status === 'active' || status === 'attention';
+}
+
+/**
+ * Dispute lifecycle.
+ *
+ *   awaiting_merchant_feedback ──> awaiting_bank_feedback ──> resolved
+ *              │                            │
+ *              └──> pending ────────────────┘
+ *
+ * `resolved` is terminal: a reopened chargeback is a new dispute at every
+ * provider we model, not a revived one.
+ */
+const DISPUTE_TRANSITIONS: Readonly<Record<DisputeStatus, readonly DisputeStatus[]>> = {
+  awaiting_merchant_feedback: ['awaiting_bank_feedback', 'pending', 'resolved'],
+  awaiting_bank_feedback: ['pending', 'resolved'],
+  pending: ['awaiting_bank_feedback', 'resolved'],
+  resolved: [],
+};
+
+export function assertDisputeTransition(from: DisputeStatus, to: DisputeStatus): void {
+  if (from !== to && DISPUTE_TRANSITIONS[from].includes(to)) return;
+  throw new PayboxError(
+    'invalid_state_transition',
+    `Cannot move a dispute from ${from} to ${to}. Allowed: ${
+      DISPUTE_TRANSITIONS[from].join(', ') || 'none (terminal)'
+    }.`,
+    { details: { from, to, allowed: DISPUTE_TRANSITIONS[from] } },
+  );
 }
 
 export function canTransitionPayment(from: PaymentStatus, to: PaymentStatus): boolean {

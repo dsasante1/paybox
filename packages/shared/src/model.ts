@@ -1,4 +1,6 @@
 import type {
+  DisputeResolution,
+  DisputeStatus,
   InvoiceStatus,
   PaymentStatus,
   PaymentMethod,
@@ -317,6 +319,37 @@ export interface LedgerEntry {
   /** The payment, refund or transfer that caused the movement. */
   resourceId: string | null;
   createdAt: string;
+}
+
+/**
+ * A chargeback raised against a payment.
+ *
+ * The merchant has a deadline to respond; missing it is itself an outcome, so
+ * `dueAt` is virtual-time ISO and a reminder is a scheduled job -- which makes
+ * "what happens if nobody answers in time" a `time advance` away.
+ */
+export interface Dispute {
+  id: string;
+  provider: ProviderId;
+  providerDisputeId: string;
+  paymentId: string;
+  customerId: string | null;
+  /** What the payer is disputing, e.g. `fraud` or `chargeback`. */
+  category: string;
+  status: DisputeStatus;
+  providerStatus: string;
+  resolution: DisputeResolution | null;
+  /** Amount under dispute; the refund raised on a merchant-accepted outcome. */
+  refundAmount: number;
+  currency: string;
+  dueAt: string;
+  resolvedAt: string | null;
+  /** Merchant-supplied rebuttal, shaped by `DisputeEvidence`. */
+  evidence: Metadata | null;
+  message: string | null;
+  metadata: Metadata;
+  createdAt: string;
+  updatedAt: string;
 }
 
 /**

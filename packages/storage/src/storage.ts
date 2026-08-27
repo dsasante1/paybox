@@ -4,6 +4,7 @@ import type {
   AuthorizationRepository,
   CustomerRepository,
   DedicatedAccountRepository,
+  DisputeRepository,
   InvoiceRepository,
   LedgerRepository,
   PlanRepository,
@@ -91,6 +92,7 @@ class SqliteStorage implements Storage {
       'invoices',
       'subscriptions',
       'plans',
+      'disputes',
       'split_subaccounts',
       'splits',
       'subaccounts',
@@ -943,6 +945,73 @@ class SqliteStorage implements Storage {
       .executeTakeFirst();
     return row ? map.toSplit(row, await this.#splitEntries(row.id)) : null;
   }
+
+  readonly disputes: DisputeRepository = {
+    insert: async (dispute) => {
+      await this.#db.insertInto('disputes').values(map.fromDispute(dispute)).execute();
+      return dispute;
+    },
+    byId: async (id) => {
+      const row = await this.#db
+        .selectFrom('disputes')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toDispute(row) : null;
+    },
+    byProviderDisputeId: async (provider, id) => {
+      const row = await this.#db
+        .selectFrom('disputes')
+        .selectAll()
+        .where('provider', '=', provider)
+        .where('provider_dispute_id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toDispute(row) : null;
+    },
+    listByPayment: async (paymentId) => {
+      const rows = await this.#db
+        .selectFrom('disputes')
+        .selectAll()
+        .where('payment_id', '=', paymentId)
+        .orderBy('created_at', 'asc')
+        .execute();
+      return rows.map(map.toDispute);
+    },
+    update: async (id, patch) => {
+      const columns = map.disputePatch(patch);
+      if (Object.keys(columns).length > 0) {
+        await this.#db.updateTable('disputes').set(columns).where('id', '=', id).execute();
+      }
+      const row = await this.#db
+        .selectFrom('disputes')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toDispute(row) : notFound('dispute', id);
+    },
+    list: async (filter) => {
+      const { limit, offset } = page(filter);
+      let query = this.#db.selectFrom('disputes').selectAll();
+      let count = this.#db
+        .selectFrom('disputes')
+        .select(({ fn }) => fn.countAll<number>().as('total'));
+      if (filter?.provider) {
+        query = query.where('provider', '=', filter.provider);
+        count = count.where('provider', '=', filter.provider);
+      }
+      if (filter?.status) {
+        query = query.where('status', '=', filter.status);
+        count = count.where('status', '=', filter.status);
+      }
+      const rows = await query
+        .orderBy('created_at', 'desc')
+        .limit(limit)
+        .offset(offset)
+        .execute();
+      const total = await count.executeTakeFirst();
+      return { items: rows.map(map.toDispute), total: Number(total?.total ?? 0) };
+    },
+  };
 
   readonly recipients: RecipientRepository = {
     insert: async (recipient) => {

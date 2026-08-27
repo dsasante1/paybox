@@ -5,6 +5,9 @@ import {
   type Clock,
   type Customer,
   type DedicatedAccount,
+  type Dispute,
+  type DisputeResolution,
+  type DisputeStatus,
   type IdFactory,
   type Invoice,
   type InvoiceStatus,
@@ -29,6 +32,7 @@ import {
 import type { Job, Storage } from './ports.js';
 import { EventBus } from './event-bus.js';
 import {
+  assertDisputeTransition,
   assertInvoiceTransition,
   assertPaymentTransition,
   assertRefundTransition,
@@ -1355,6 +1359,213 @@ export class PaymentEngine {
   }
 
   /* ---------------------------------------------------------------- *
+   * Disputes
+   * ---------------------------------------------------------------- */
+
+  /**
+   * Open a chargeback against a successful payment.
+   *
+   * Only a payment that actually collected money can be disputed -- there is
+   * nothing to charge back otherwise, and allowing it would let a test
+   * construct a state no provider can produce.
+   */
+  async createDispute(input: {
+    paymentId: string;
+    category?: string;
+    refundAmount?: number;
+    dueInMs?: number;
+    message?: string | null;
+    providerDisputeId?: string;
+    metadata?: Metadata;
+  }): Promise<Dispute> {
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const payment = await this.#requirePayment(tx, input.paymentId);
+      if (
+        payment.status !== 'successful' &&
+        payment.status !== 'partially_refunded' &&
+        payment.status !== 'refunded'
+      ) {
+        throw new PayboxError(
+          'invalid_state_transition',
+          `Only a payment that collected money can be disputed; this one is ${payment.status}.`,
+          { details: { paymentId: payment.id, status: payment.status } },
+        );
+      }
+
+      const refundAmount = input.refundAmount ?? payment.amount;
+      if (refundAmount > payment.amount) {
+        throw new PayboxError(
+          'validation_failed',
+          `Disputed amount ${refundAmount} exceeds the payment's ${payment.amount}.`,
+          { details: { refundAmount, amount: payment.amount } },
+        );
+      }
+
+      const now = this.#clock.nowISO();
+      const dispute: Dispute = {
+        id: this.#ids.next('dsp'),
+        provider: payment.provider,
+        providerDisputeId: input.providerDisputeId ?? this.#ids.token(12),
+        paymentId: payment.id,
+        customerId: payment.customerId,
+        category: input.category ?? 'chargeback',
+        status: 'awaiting_merchant_feedback',
+        providerStatus: 'awaiting-merchant-feedback',
+        resolution: null,
+        refundAmount,
+        currency: payment.currency,
+        // Providers give the merchant a window to respond. Default to a week.
+        dueAt: new Date(this.#clock.now() + (input.dueInMs ?? 7 * 24 * 60 * 60_000)).toISOString(),
+        resolvedAt: null,
+        evidence: null,
+        message: input.message ?? null,
+        metadata: input.metadata ?? {},
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      const created = await tx.disputes.insert(dispute);
+      const event = await this.#appendEvent(tx, {
+        type: 'dispute.created',
+        provider: created.provider,
+        resourceId: created.id,
+        resourceType: 'dispute',
+        data: disputeEventData(created),
+        previousStatus: null,
+        currentStatus: created.status,
+      });
+      return { result: created, events: [event] };
+    });
+
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
+  async transitionDispute(
+    disputeId: string,
+    to: DisputeStatus,
+    options: { eventType?: string } = {},
+  ): Promise<Dispute> {
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const dispute = await tx.disputes.byId(disputeId);
+      if (!dispute) throw new PayboxError('not_found', `No dispute with id ${disputeId}.`);
+      assertDisputeTransition(dispute.status, to);
+
+      const updated = await tx.disputes.update(disputeId, {
+        status: to,
+        providerStatus: to.replace(/_/g, '-'),
+        updatedAt: this.#clock.nowISO(),
+      });
+      const event = await this.#appendEvent(tx, {
+        type: options.eventType ?? `dispute.${to}`,
+        provider: updated.provider,
+        resourceId: updated.id,
+        resourceType: 'dispute',
+        data: disputeEventData(updated),
+        previousStatus: dispute.status,
+        currentStatus: to,
+      });
+      return { result: updated, events: [event] };
+    });
+
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
+  /** Attach the merchant's rebuttal. Does not by itself resolve anything. */
+  async addDisputeEvidence(disputeId: string, evidence: Metadata): Promise<Dispute> {
+    const dispute = await this.#storage.disputes.byId(disputeId);
+    if (!dispute) throw new PayboxError('not_found', `No dispute with id ${disputeId}.`);
+    return this.#storage.disputes.update(disputeId, {
+      evidence: { ...(dispute.evidence ?? {}), ...evidence },
+      updatedAt: this.#clock.nowISO(),
+    });
+  }
+
+  /**
+   * Close a dispute.
+   *
+   * `merchant-accepted` means the merchant conceded, so the money goes back:
+   * a real refund is raised and settled, which moves the payment to
+   * `refunded`/`partially_refunded` and debits the balance through the
+   * ordinary path. `declined` closes it with no money movement.
+   */
+  async resolveDispute(
+    disputeId: string,
+    input: { resolution: DisputeResolution; message: string; refundAmount?: number },
+  ): Promise<Dispute> {
+    const dispute = await this.#storage.disputes.byId(disputeId);
+    if (!dispute) throw new PayboxError('not_found', `No dispute with id ${disputeId}.`);
+    if (dispute.status === 'resolved') {
+      throw new PayboxError(
+        'invalid_state_transition',
+        'This dispute has already been resolved.',
+        { details: { disputeId } },
+      );
+    }
+
+    if (input.resolution === 'merchant-accepted') {
+      const amount = input.refundAmount ?? dispute.refundAmount;
+      if (amount > 0) {
+        const refund = await this.createRefund({
+          paymentId: dispute.paymentId,
+          amount,
+          reason: input.message,
+          metadata: { dispute_id: dispute.id },
+        });
+        await this.transitionRefund(refund.id, 'successful');
+      }
+    }
+
+    const now = this.#clock.nowISO();
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const current = await tx.disputes.byId(disputeId);
+      if (!current) throw new PayboxError('not_found', `No dispute with id ${disputeId}.`);
+      assertDisputeTransition(current.status, 'resolved');
+
+      const updated = await tx.disputes.update(disputeId, {
+        status: 'resolved',
+        providerStatus: 'resolved',
+        resolution: input.resolution,
+        message: input.message,
+        ...(input.refundAmount !== undefined ? { refundAmount: input.refundAmount } : {}),
+        resolvedAt: now,
+        updatedAt: now,
+      });
+      const event = await this.#appendEvent(tx, {
+        type: 'dispute.resolved',
+        provider: updated.provider,
+        resourceId: updated.id,
+        resourceType: 'dispute',
+        data: disputeEventData(updated),
+        previousStatus: current.status,
+        currentStatus: 'resolved',
+      });
+      return { result: updated, events: [event] };
+    });
+
+    // A resolved dispute has no deadline left to remind anyone about.
+    await this.#storage.jobs.cancelGroup(`dispute:${disputeId}`);
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
+  /** Schedule the deadline reminder a provider sends before a dispute expires. */
+  async scheduleDisputeReminder(dispute: Dispute, leadMs = 24 * 60 * 60_000): Promise<void> {
+    const remindAt = Date.parse(dispute.dueAt) - leadMs;
+    await this.#enqueue({
+      kind: 'dispute.remind',
+      payload: { disputeId: dispute.id },
+      runAt: new Date(Math.max(remindAt, this.#clock.now())).toISOString(),
+      groupKey: `dispute:${dispute.id}`,
+    });
+  }
+
+  async getDispute(id: string): Promise<Dispute | null> {
+    return this.#storage.disputes.byId(id);
+  }
+
+  /* ---------------------------------------------------------------- *
    * Internals
    * ---------------------------------------------------------------- */
 
@@ -1485,6 +1696,19 @@ function invoiceEventData(invoice: Invoice): Metadata {
     status: invoice.status,
     period_start: invoice.periodStart,
     period_end: invoice.periodEnd,
+  };
+}
+
+function disputeEventData(dispute: Dispute): Metadata {
+  return {
+    id: dispute.id,
+    payment_id: dispute.paymentId,
+    status: dispute.status,
+    category: dispute.category,
+    refund_amount: dispute.refundAmount,
+    currency: dispute.currency,
+    resolution: dispute.resolution,
+    due_at: dispute.dueAt,
   };
 }
 

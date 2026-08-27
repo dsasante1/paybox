@@ -22,6 +22,7 @@ export const ID_PREFIXES = [
   'sac', // subaccount
   'spl', // transaction split
   'led', // balance ledger entry
+  'dsp', // dispute
   'whd', // webhook delivery
   'whe', // webhook endpoint
   'job', // scheduled job

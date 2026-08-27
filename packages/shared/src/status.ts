@@ -82,6 +82,26 @@ export const PLAN_INTERVALS = [
 ] as const;
 export type PlanInterval = (typeof PLAN_INTERVALS)[number];
 
+/**
+ * Chargeback lifecycle.
+ *
+ * Canonical spelling is snake_case; Paystack hyphenates
+ * (`awaiting-merchant-feedback`) and the adapter maps to it. The four values
+ * are exactly the enum on `GET /dispute`'s `status` parameter in the pinned
+ * OpenAPI spec.
+ */
+export const DISPUTE_STATUSES = [
+  'awaiting_merchant_feedback',
+  'awaiting_bank_feedback',
+  'pending',
+  'resolved',
+] as const;
+export type DisputeStatus = (typeof DISPUTE_STATUSES)[number];
+
+/** Schema `DisputeResolve.resolution`. */
+export const DISPUTE_RESOLUTIONS = ['merchant-accepted', 'declined'] as const;
+export type DisputeResolution = (typeof DISPUTE_RESOLUTIONS)[number];
+
 export const PAYMENT_METHODS = [
   'card',
   'mobile_money',

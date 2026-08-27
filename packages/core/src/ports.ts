@@ -2,6 +2,8 @@ import type {
   Authorization,
   Customer,
   DedicatedAccount,
+  Dispute,
+  DisputeStatus,
   Invoice,
   InvoiceStatus,
   LedgerEntry,
@@ -279,6 +281,17 @@ export interface LedgerRepository {
   currencies(provider: ProviderId): Promise<string[]>;
 }
 
+export interface DisputeRepository {
+  insert(dispute: Dispute): Promise<Dispute>;
+  byId(id: string): Promise<Dispute | null>;
+  byProviderDisputeId(provider: ProviderId, id: string): Promise<Dispute | null>;
+  listByPayment(paymentId: string): Promise<Dispute[]>;
+  update(id: string, patch: Partial<Dispute>): Promise<Dispute>;
+  list(
+    filter?: ListOptions & { provider?: ProviderId; status?: DisputeStatus },
+  ): Promise<Page<Dispute>>;
+}
+
 export interface EventFilter extends ListOptions {
   provider?: ProviderId;
   type?: string;
@@ -351,6 +364,7 @@ export interface Storage {
   readonly subaccounts: SubaccountRepository;
   readonly splits: SplitRepository;
   readonly ledger: LedgerRepository;
+  readonly disputes: DisputeRepository;
   readonly recipients: RecipientRepository;
   readonly events: EventRepository;
   readonly webhooks: WebhookRepository;

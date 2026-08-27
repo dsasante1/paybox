@@ -22,6 +22,21 @@ const minorAmount = z
     return parsed;
   });
 
+/** Like `minorAmount`, but zero is a legitimate value. */
+const nonNegativeMinorAmount = z
+  .union([z.number(), z.string()])
+  .transform((value, ctx) => {
+    const parsed = typeof value === 'number' ? value : Number(value.trim());
+    if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 0) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'Amount must be a non-negative integer in the currency\'s minor unit.',
+      });
+      return z.NEVER;
+    }
+    return parsed;
+  });
+
 export const initializeSchema = z.object({
   email: z.string().email('A valid customer email is required.'),
   amount: minorAmount,
@@ -243,6 +258,36 @@ export const splitUpdateSchema = z.object({
 export const splitSubaccountSchema = z.object({
   subaccount: z.string().min(1),
   share: z.union([z.number(), z.string()]).transform(Number),
+});
+
+/** Schemas `DisputeResolve` and `DisputeEvidence` from the pinned OpenAPI spec. */
+export const disputeResolveSchema = z.object({
+  resolution: z.enum(['merchant-accepted', 'declined']),
+  message: z.string().min(1),
+  // Zero is meaningful here and must be accepted: a declined dispute refunds
+  // nothing, and `refund_amount` is a required field on DisputeResolve. The
+  // usual `minorAmount` insists on a positive integer, which is right
+  // everywhere money actually moves and wrong here.
+  refund_amount: nonNegativeMinorAmount.optional(),
+  uploaded_filename: z.string().optional(),
+  evidence: z.union([z.number(), z.string()]).optional(),
+});
+
+export const disputeEvidenceSchema = z.object({
+  customer_email: z.string().email(),
+  customer_name: z.string().min(1),
+  customer_phone: z.string().min(1),
+  service_details: z.string().min(1),
+  delivery_address: z.string().optional(),
+  delivery_date: z.string().optional(),
+});
+
+/** Emulator-only: opening a dispute is not something a merchant API can do. */
+export const disputeOpenSchema = z.object({
+  transaction: z.union([z.string(), z.number()]).transform(String),
+  category: z.string().optional(),
+  refund_amount: minorAmount.optional(),
+  message: z.string().optional(),
 });
 
 export const refundSchema = z.object({

@@ -59,6 +59,12 @@ build time.
 | `POST /subscription/enable` | **Compatible** | Resumes from now. |
 | `GET /subscription/{code}/manage/link` | **Partially compatible** | Returns a link; no hosted page behind it. |
 | `GET /subscription/{code}/invoices` | **Emulator-only** | Billing history; not a Paystack endpoint. |
+| `GET /dispute`, `GET /dispute/{id}` | **Compatible** | |
+| `GET /dispute/transaction/{id}` | **Compatible** | |
+| `PUT /dispute/{id}/resolve` | **Compatible** | PUT, per the spec. |
+| `POST /dispute/{id}/evidence` | **Compatible** | |
+| `GET /dispute/{id}/upload_url` | **Partially compatible** | Returns a URL; nothing is stored. |
+| `POST /dispute` | **Emulator-only** | Opens a dispute; see below. |
 | `POST /subaccount`, `GET /subaccount` | **Compatible** | |
 | `GET /subaccount/{code}`, `PUT /subaccount/{code}` | **Compatible** | |
 | `POST /split`, `GET /split` | **Compatible** | Percentage and flat. |
@@ -69,7 +75,7 @@ build time.
 | `POST /transferrecipient` | **Partially compatible** | `nuban` shape only; no bank-name resolution. |
 | `POST /transfer` | **Partially compatible** | Created in `pending`. Settle it from the dashboard or CLI. |
 | `GET /transfer/:id` | **Partially compatible** | |
-| Disputes, settlements, bulk transfers, integration | **Not supported** | |
+| Settlements, bulk transfers, integration | **Not supported** | |
 
 ## Authentication
 
@@ -295,6 +301,45 @@ or `enforce: false` to switch the check off entirely.
 emulator that is nothing, so it reports the opening float in NGN rather than an
 empty list.
 
+## Disputes
+
+A chargeback originates with the payer's bank, so Paystack has **no endpoint to
+open one**. The emulator adds `POST /dispute` because otherwise a dispute could
+never come into being locally and the whole flow would be untestable. It is
+emulator-only and must not be read as Paystack API surface.
+
+Only a payment that actually collected money can be disputed, and the disputed
+amount cannot exceed it.
+
+| Resolution | Effect |
+|---|---|
+| `merchant-accepted` | Raises and settles a **real refund** for `refund_amount`, so the payment moves to `refunded` / `partially_refunded` and the balance is debited through the ordinary path. |
+| `declined` | Closes the dispute; no money moves. `refund_amount: 0` is accepted here. |
+
+The response deadline is a **scheduled job**, not a timer, so "nobody answered
+in time" is one `paybox time advance` away:
+
+```bash
+paybox time advance 7d     # fires charge.dispute.remind
+```
+
+Default window is 7 days with the reminder a day before. A resolved dispute
+cancels its own reminder. `resolved` is terminal — a reopened chargeback is a
+new dispute, not a revived one.
+
+### Canonical vs Paystack status
+
+| Canonical | Paystack |
+|---|---|
+| `awaiting_merchant_feedback` | `awaiting-merchant-feedback` |
+| `awaiting_bank_feedback` | `awaiting-bank-feedback` |
+| `pending` | `pending` |
+| `resolved` | `resolved` |
+
+`GET /dispute/{id}/upload_url` returns a URL of the documented shape so an
+integration's upload step need not be branched around, but **the emulator
+stores no files** and nothing is ever uploaded there.
+
 ## Status mapping
 
 The emulator stores a canonical status and answers with Paystack's.
@@ -335,6 +380,9 @@ Envelope: `{ "event": "<name>", "data": { ... } }`
 | `invoice.created` | `invoice.create` |
 | `invoice.success` | `invoice.update` |
 | `invoice.payment_failed` | `invoice.payment_failed` |
+| `dispute.created` | `charge.dispute.create` |
+| `dispute.reminder` | `charge.dispute.remind` |
+| `dispute.resolved` | `charge.dispute.resolve` |
 
 ### Events deliberately **not** emitted
 
@@ -394,5 +442,5 @@ state transitions behind them are what this tool is actually asserting.
    is deliberate: hash-derived ids stay stable when operations are reordered,
    which is what lets the test suite assert literal ids. A monotonic counter
    would be more faithful to Paystack and less useful here.
-8. `partial_debit` does not model a card balance (above).
-9. `GET /dedicated_account` ignores the documented query filters.
+9. `partial_debit` does not model a card balance (above).
+10. `GET /dedicated_account` ignores the documented query filters.

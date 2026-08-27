@@ -2,6 +2,9 @@ import type {
   Authorization,
   Customer,
   DedicatedAccount,
+  Dispute,
+  DisputeResolution,
+  DisputeStatus,
   Invoice,
   InvoiceStatus,
   LedgerEntry,
@@ -34,6 +37,7 @@ import type {
 import type {
   AuthorizationRow,
   DedicatedAccountRow,
+  DisputeRow,
   InvoiceRow,
   LedgerEntryRow,
   PlanRow,
@@ -635,6 +639,64 @@ export const fromLedgerEntry = (entry: LedgerEntry): LedgerEntryRow => ({
   resource_id: entry.resourceId,
   created_at: entry.createdAt,
 });
+
+export const toDispute = (row: DisputeRow): Dispute => ({
+  id: row.id,
+  provider: row.provider as ProviderId,
+  providerDisputeId: row.provider_dispute_id,
+  paymentId: row.payment_id,
+  customerId: row.customer_id,
+  category: row.category,
+  status: row.status as DisputeStatus,
+  providerStatus: row.provider_status,
+  resolution: row.resolution as DisputeResolution | null,
+  refundAmount: row.refund_amount,
+  currency: row.currency,
+  dueAt: row.due_at,
+  resolvedAt: row.resolved_at,
+  evidence: row.evidence ? readJson(row.evidence) : null,
+  message: row.message,
+  metadata: readJson(row.metadata),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+export const fromDispute = (dispute: Dispute): DisputeRow => ({
+  id: dispute.id,
+  provider: dispute.provider,
+  provider_dispute_id: dispute.providerDisputeId,
+  payment_id: dispute.paymentId,
+  customer_id: dispute.customerId,
+  category: dispute.category,
+  status: dispute.status,
+  provider_status: dispute.providerStatus,
+  resolution: dispute.resolution,
+  refund_amount: dispute.refundAmount,
+  currency: dispute.currency,
+  due_at: dispute.dueAt,
+  resolved_at: dispute.resolvedAt,
+  evidence: dispute.evidence ? writeJson(dispute.evidence) : null,
+  message: dispute.message,
+  metadata: writeJson(dispute.metadata),
+  created_at: dispute.createdAt,
+  updated_at: dispute.updatedAt,
+});
+
+export function disputePatch(patch: Partial<Dispute>): Partial<DisputeRow> {
+  const out: Partial<DisputeRow> = {};
+  if (patch.status !== undefined) out.status = patch.status;
+  if (patch.providerStatus !== undefined) out.provider_status = patch.providerStatus;
+  if (patch.resolution !== undefined) out.resolution = patch.resolution;
+  if (patch.refundAmount !== undefined) out.refund_amount = patch.refundAmount;
+  if (patch.resolvedAt !== undefined) out.resolved_at = patch.resolvedAt;
+  if (patch.evidence !== undefined) {
+    out.evidence = patch.evidence ? writeJson(patch.evidence) : null;
+  }
+  if (patch.message !== undefined) out.message = patch.message;
+  if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
+  if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
+  return out;
+}
 
 export const toEvent = (row: EventRow): PayboxEvent => ({
   id: row.id,

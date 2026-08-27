@@ -25,6 +25,9 @@ import {
   deactivateAuthorizationSchema,
   dedicatedAccountAssignSchema,
   dedicatedAccountCreateSchema,
+  disputeEvidenceSchema,
+  disputeOpenSchema,
+  disputeResolveSchema,
   initializeSchema,
   normalizeMetadata,
   partialDebitSchema,
@@ -50,6 +53,7 @@ import {
   ok,
   serializeCustomer,
   serializeDedicatedAccount,
+  serializeDispute,
   serializeInvoice,
   serializePlan,
   serializeRefund,
@@ -1232,6 +1236,151 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
       const customer = await storage.customers.byId(account.customerId);
       return reply.send(
         ok('Dedicated account retrieved', serializeDedicatedAccount(account, customer)),
+      );
+    },
+  );
+
+  /* ---------------------------------------------------------------- *
+   * Disputes
+   * ---------------------------------------------------------------- */
+
+  async function requireDispute(handle: string) {
+    const dispute =
+      (await storage.disputes.byId(handle)) ??
+      (await storage.disputes.byProviderDisputeId(PROVIDER, handle));
+    if (dispute) return dispute;
+
+    // Paystack addresses disputes by numeric id, so accept that too.
+    const numeric = Number(handle);
+    if (Number.isFinite(numeric)) {
+      const { items } = await storage.disputes.list({ provider: PROVIDER, limit: 500 });
+      const match = items.find(
+        (d) => numericTransactionId(d.providerDisputeId) === numeric,
+      );
+      if (match) return match;
+    }
+    throw new PayboxError('not_found', `Dispute ${handle} not found.`);
+  }
+
+  async function decorateDispute(dispute: Awaited<ReturnType<typeof requireDispute>>) {
+    return serializeDispute(dispute, await storage.payments.byId(dispute.paymentId));
+  }
+
+  /**
+   * Open a dispute.
+   *
+   * **Emulator-only.** Paystack has no endpoint for this -- a chargeback
+   * originates with the payer's bank, not the merchant. It exists here because
+   * otherwise a dispute could never come into being locally, which would make
+   * the whole flow untestable. Documented as emulator-specific.
+   */
+  fastify.post('/dispute', async (request, reply) => {
+    authenticate(request);
+    const body = disputeOpenSchema.parse(request.body);
+    const payment = await loadTransaction(body.transaction);
+
+    const dispute = await engine.createDispute({
+      paymentId: payment.id,
+      ...(body.category ? { category: body.category } : {}),
+      ...(body.refund_amount !== undefined ? { refundAmount: body.refund_amount } : {}),
+      ...(body.message ? { message: body.message } : {}),
+    });
+    await engine.scheduleDisputeReminder(dispute);
+
+    return reply.status(201).send(ok('Dispute created', await decorateDispute(dispute)));
+  });
+
+  fastify.get<{ Querystring: { status?: string; perPage?: string; page?: string } }>(
+    '/dispute',
+    async (request, reply) => {
+      authenticate(request);
+      const perPage = Math.min(Number(request.query.perPage ?? 50) || 50, 200);
+      const pageNumber = Math.max(Number(request.query.page ?? 1) || 1, 1);
+      const canonical = request.query.status
+        ? (request.query.status.replace(/-/g, '_') as 'resolved')
+        : undefined;
+
+      const { items, total } = await storage.disputes.list({
+        provider: PROVIDER,
+        limit: perPage,
+        offset: (pageNumber - 1) * perPage,
+        ...(canonical ? { status: canonical } : {}),
+      });
+      const data = await Promise.all(items.map((d) => decorateDispute(d)));
+      return reply.send({
+        status: true,
+        message: 'Disputes retrieved',
+        data,
+        meta: { total, skipped: (pageNumber - 1) * perPage, perPage, page: pageNumber },
+      });
+    },
+  );
+
+  fastify.get<{ Params: { id: string } }>('/dispute/:id', async (request, reply) => {
+    authenticate(request);
+    return reply.send(
+      ok('Dispute retrieved', await decorateDispute(await requireDispute(request.params.id))),
+    );
+  });
+
+  fastify.get<{ Params: { id: string } }>(
+    '/dispute/transaction/:id',
+    async (request, reply) => {
+      authenticate(request);
+      const payment = await loadTransaction(request.params.id);
+      const disputes = await storage.disputes.listByPayment(payment.id);
+      const data = await Promise.all(disputes.map((d) => decorateDispute(d)));
+      return reply.send(ok('Dispute retrieved', data));
+    },
+  );
+
+  /** PUT, not POST -- the spec's `dispute_resolve` operation is a PUT. */
+  fastify.put<{ Params: { id: string } }>('/dispute/:id/resolve', async (request, reply) => {
+    authenticate(request);
+    const body = disputeResolveSchema.parse(request.body);
+    const dispute = await requireDispute(request.params.id);
+
+    const resolved = await engine.resolveDispute(dispute.id, {
+      resolution: body.resolution,
+      message: body.message,
+      ...(body.refund_amount !== undefined ? { refundAmount: body.refund_amount } : {}),
+    });
+    return reply.send(ok('Dispute successfully resolved', await decorateDispute(resolved)));
+  });
+
+  fastify.post<{ Params: { id: string } }>('/dispute/:id/evidence', async (request, reply) => {
+    authenticate(request);
+    const body = disputeEvidenceSchema.parse(request.body);
+    const dispute = await requireDispute(request.params.id);
+    const updated = await engine.addDisputeEvidence(dispute.id, { ...body });
+    return reply.send(
+      ok('Evidence created', {
+        id: numericTransactionId(updated.providerDisputeId),
+        ...body,
+        dispute: numericTransactionId(updated.providerDisputeId),
+        createdAt: updated.createdAt,
+        updatedAt: updated.updatedAt,
+      }),
+    );
+  });
+
+  /**
+   * Upload URL for dispute attachments.
+   *
+   * The emulator stores no files. It returns a URL of the documented shape so
+   * an integration's upload step does not have to be branched around, and
+   * docs/paystack.md states that nothing is actually stored there.
+   */
+  fastify.get<{ Params: { id: string } }>(
+    '/dispute/:id/upload_url',
+    async (request, reply) => {
+      authenticate(request);
+      const dispute = await requireDispute(request.params.id);
+      return reply.send(
+        ok('Upload url generated', {
+          signedUrl: `${options.baseUrl}${options.basePath}/dispute/${dispute.id}/upload`,
+          fileName: `${dispute.providerDisputeId}.pdf`,
+        }),
       );
     },
   );

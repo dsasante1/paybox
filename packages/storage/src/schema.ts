@@ -318,6 +318,27 @@ export interface LedgerEntryRow {
   created_at: string;
 }
 
+export interface DisputeRow {
+  id: string;
+  provider: string;
+  provider_dispute_id: string;
+  payment_id: string;
+  customer_id: string | null;
+  category: string;
+  status: string;
+  provider_status: string;
+  resolution: string | null;
+  refund_amount: number;
+  currency: string;
+  due_at: string;
+  resolved_at: string | null;
+  evidence: string | null;
+  message: string | null;
+  metadata: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface MigrationRow {
   id: string;
   applied_at: string;
@@ -342,6 +363,7 @@ export interface Database {
   splits: SplitRow;
   split_subaccounts: SplitSubaccountRow;
   balance_ledger: LedgerEntryRow;
+  disputes: DisputeRow;
   transfer_recipients: TransferRecipientRow;
   event_sequences: EventSequenceRow;
   schema_migrations: MigrationRow;

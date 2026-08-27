@@ -3,6 +3,7 @@ import type { FormattedWebhook, FormatterContext, WebhookFormatter } from '@payb
 import { paystackSignatureHeaders } from './signature.js';
 import {
   serializeDedicatedAccount,
+  serializeDispute,
   serializeInvoice,
   serializeRefund,
   serializeSubscription,
@@ -44,6 +45,9 @@ const EVENT_MAP: Record<string, string> = {
   'invoice.created': 'invoice.create',
   'invoice.success': 'invoice.update',
   'invoice.payment_failed': 'invoice.payment_failed',
+  'dispute.created': 'charge.dispute.create',
+  'dispute.reminder': 'charge.dispute.remind',
+  'dispute.resolved': 'charge.dispute.resolve',
 };
 
 export class PaystackWebhookFormatter implements WebhookFormatter {
@@ -109,6 +113,12 @@ export class PaystackWebhookFormatter implements WebhookFormatter {
         ...serializeInvoice(invoice, payment),
         ...(subscription ? { subscription: serializeSubscription(subscription) } : {}),
       };
+    }
+
+    if (event.resourceType === 'dispute') {
+      const dispute = await storage.disputes.byId(event.resourceId);
+      if (!dispute) return null;
+      return serializeDispute(dispute, await storage.payments.byId(dispute.paymentId));
     }
 
     if (event.resourceType === 'dedicated_account') {

@@ -2,6 +2,7 @@ import type {
   Authorization,
   Customer,
   DedicatedAccount,
+  Dispute,
   Invoice,
   Plan,
   Split,
@@ -518,6 +519,33 @@ export function serializeSplit(split: Split, subaccounts: Map<string, Subaccount
       };
     }),
     total_subaccounts: split.entries.length,
+  };
+}
+
+/** Schema `DisputeFetchResponse.data`. */
+export function serializeDispute(dispute: Dispute, payment?: Payment | null) {
+  return {
+    id: numericTransactionId(dispute.providerDisputeId),
+    refund_amount: dispute.refundAmount,
+    currency: dispute.currency,
+    status: dispute.providerStatus,
+    resolution: dispute.resolution,
+    domain: 'test',
+    transaction: payment ? serializeTransaction(payment) : null,
+    transaction_reference: payment?.reference ?? null,
+    category: dispute.category,
+    customer: null,
+    bin: null,
+    last4: null,
+    dueAt: dispute.dueAt,
+    resolvedAt: dispute.resolvedAt,
+    evidence: dispute.evidence,
+    attachments: null,
+    note: dispute.message,
+    history: [],
+    messages: [],
+    createdAt: dispute.createdAt,
+    updatedAt: dispute.updatedAt,
   };
 }
 

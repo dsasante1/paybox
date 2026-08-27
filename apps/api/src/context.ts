@@ -178,6 +178,22 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
     if (!paymentId || !outcome) return;
     await simulator.apply(paymentId, outcome);
   });
+  /**
+   * The deadline reminder a provider sends before a dispute expires.
+   *
+   * A scheduled job rather than a timer, so "nobody answered in time" is one
+   * `paybox time advance` away.
+   */
+  scheduler.register('dispute.remind', async (job) => {
+    const disputeId = String(job.payload.disputeId ?? '');
+    const dispute = await engine.getDispute(disputeId);
+    // Nothing to remind anyone about once it has been settled.
+    if (!dispute || dispute.status === 'resolved') return;
+    await engine.transitionDispute(dispute.id, 'awaiting_bank_feedback', {
+      eventType: 'dispute.reminder',
+    });
+  });
+
   scheduler.register('payment.expire', async (job) => {
     const paymentId = String(job.payload.paymentId ?? '');
     const payment = await engine.getPayment(paymentId);
