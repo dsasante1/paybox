@@ -19,6 +19,10 @@ webhooks:
   retry:
     enabled: true
     maxAttempts: 5
+    # "exponential" (default) or "paystack" for the provider's real ladder:
+    # hourly for ten hours. Unhelpful live, free under a frozen clock --
+    # `paybox time advance 12h` runs it to exhaustion instantly.
+    schedule: exponential
   timeoutMs: 10000
 
 providers:

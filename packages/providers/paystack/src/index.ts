@@ -1,5 +1,10 @@
 export { paystackPlugin, registerPaystack, type PaystackPluginOptions } from './routes.js';
-export { PaystackWebhookFormatter, PAYSTACK_TEST_MODE_MAX_ATTEMPTS } from './webhook.js';
+export {
+  PaystackWebhookFormatter,
+  paystackRetrySchedule,
+  PAYSTACK_TEST_MODE_MAX_ATTEMPTS,
+  PAYSTACK_LIVE_MODE_MAX_ATTEMPTS,
+} from './webhook.js';
 export {
   signPaystackPayload,
   verifyPaystackSignature,

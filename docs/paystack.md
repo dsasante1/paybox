@@ -1,6 +1,6 @@
 # Paystack compatibility
 
-**Coverage: partial.** This document is the authoritative statement of what is
+**Coverage: broad, and honestly bounded.** This document is the authoritative statement of what is
 and is not implemented. Where behaviour is modelled rather than verified
 against Paystack's documentation, it says so.
 
@@ -30,7 +30,10 @@ build time.
 | `POST /transaction/initialize` | **Compatible** | Returns `authorization_url`, `access_code`, `reference`. The URL points at the emulator's own checkout page. |
 | `GET /transaction/verify/:reference` | **Partially compatible** | Full transaction object. See the field table below. |
 | `GET /transaction/:id` | **Partially compatible** | Accepts the numeric id, the reference, or a paybox id. |
-| `GET /transaction` | **Partially compatible** | Supports `perPage`, `page`, `status`. No date filters. |
+| `GET /transaction` | **Compatible** | `perPage`, `page`, `status`, `from`, `to`. |
+| `GET /transaction/timeline/{id}` | **Compatible** | Built from the real event log. |
+| `GET /transaction/totals` | **Partially compatible** | Volume only; no pending-transfer totals. |
+| `GET /transaction/export` | **Partially compatible** | Rows returned inline; see below. |
 | `POST /charge` | **Partially compatible** | `mobile_money`, `card`, `bank`, `ussd`, `eft`. No QR. |
 | `POST /dedicated_account` | **Compatible** | One account per customer. |
 | `POST /dedicated_account/assign` | **Compatible** | Creates the customer, then assigns. |
@@ -49,7 +52,7 @@ build time.
 | `GET /refund/:id` | **Compatible** | |
 | `POST /customer` | **Compatible** | |
 | `GET /customer/:code` | **Compatible** | Accepts `CUS_...` or a paybox id. |
-| `GET /customer` | **Partially compatible** | No pagination or search. |
+| `GET /customer` | **Compatible** | `perPage`, `page`, `search`. |
 | `POST /plan` | **Compatible** | Documented interval enum only. |
 | `GET /plan`, `GET /plan/{code}` | **Compatible** | |
 | `PUT /plan/{code}` | **Partially compatible** | Amount and interval are not updatable; see below. |
@@ -72,10 +75,13 @@ build time.
 | `POST /split/{id}/subaccount/add`\|`remove` | **Compatible** | Re-checks the 100% ceiling. |
 | `GET /balance` | **Partially compatible** | Folded from the ledger; see below. |
 | `GET /balance/ledger` | **Partially compatible** | `balance` is null on each row. |
-| `POST /transferrecipient` | **Partially compatible** | `nuban` shape only; no bank-name resolution. |
+| `POST /transferrecipient` | **Partially compatible** | `nuban` shape only; resolves bank names from a fixed list. |
+| `GET /bank` | **Partially compatible** | Eight banks, not Paystack's full directory. |
+| `GET /country` | **Partially compatible** | Four countries. |
 | `POST /transfer` | **Partially compatible** | Created in `pending`. Settle it from the dashboard or CLI. |
 | `GET /transfer/:id` | **Partially compatible** | |
-| Settlements, bulk transfers, integration | **Not supported** | |
+| Settlements, bulk transfers, integration | **Not supported** | Settlements: see limitation 1. |
+| Payment requests, products, storefronts, orders, pages, terminals, virtual terminals, Apple Pay, direct debit, customer identification, transfer OTP | **Not supported** | Out of scope; not planned. |
 
 ## Authentication
 
@@ -368,7 +374,10 @@ Envelope: `{ "event": "<name>", "data": { ... } }`
 | Canonical event | Paystack event |
 |---|---|
 | `payment.successful` | `charge.success` |
+| `refund.created` | `refund.pending` |
+| `refund.processing` | `refund.processing` |
 | `refund.successful` | `refund.processed` |
+| `refund.failed` | `refund.failed` |
 | `transfer.successful` | `transfer.success` |
 | `transfer.failed` | `transfer.failed` |
 | `transfer.reversed` | `transfer.reversed` |
@@ -403,10 +412,19 @@ Paystack's documented schedule is: **test mode** — hourly for 10 hours;
 **live mode** — every 3 minutes for the first 4 attempts, then hourly for up to
 72 hours. Requests time out after 30 seconds.
 
-The emulator defaults to 5 attempts with exponential backoff, configurable via
-`webhooks.retry.maxAttempts`. It does **not** reproduce Paystack's exact
-schedule by default, because a 10-hour ladder is unhelpful interactively — use
-`paybox time advance 12h` to run one to exhaustion instantly.
+The emulator defaults to 5 attempts with exponential backoff. Paystack's real
+ladder is available opt-in:
+
+```yaml
+webhooks:
+  retry:
+    schedule: paystack   # PAYBOX_WEBHOOK_SCHEDULE
+```
+
+which forces 10 attempts an hour apart, ignoring `maxAttempts` — half a ladder
+is neither schedule. It is not the default because ten hours is unhelpful when
+you are watching it happen; under a frozen clock it costs nothing, and
+`paybox time advance 12h` runs it to exhaustion instantly.
 
 ## Response fields
 
@@ -420,7 +438,8 @@ fidelity:
 | `authorization.*` | Synthetic; masked instrument data only |
 | `customer.*` | Accurate for customers created through the API |
 | `fees` | **Emulated approximation.** A flat percentage per currency, not Paystack's real pricing, which varies by country, channel, card origin and negotiated rate. Do not use for reconciliation testing. |
-| `ip_address`, `receipt_number`, `fees_split`, `fees_breakdown`, `split`, `plan`, `subaccount`, `pos_transaction_data`, `source`, `connect`, `order_id` | Always `null` / `{}` |
+| `split`, `fees_split` | **Real** when the transaction carries a `split_code` |
+| `ip_address`, `receipt_number`, `fees_breakdown`, `plan`, `subaccount`, `pos_transaction_data`, `source`, `connect`, `order_id` | Always `null` / `{}` |
 
 ## Response envelopes are modelled, not verified
 
@@ -434,13 +453,31 @@ state transitions behind them are what this tool is actually asserting.
 
 ## Known limitations
 
-1. `GET /transaction` has no date-range filtering.
-3. Fees are approximate (above), and `fees_split` reports the **split**
-   breakdown rather than a breakdown of processing fees.
-5. Transaction ids are derived deterministically from the reference rather than
+1. **Settlements are not implemented.** Paystack's OpenAPI specification types
+   `GET /settlement` as a generic `Ok` with no response schema at all, so there
+   is nothing to emulate faithfully; inventing a shape would be worse than the
+   gap.
+2. **Charge response envelopes are modelled, not verified** (above): `status`,
+   `display_text` and `ussd_code` cannot be checked against the spec.
+3. Fees are approximate (above). `fees_split` reports the **split** breakdown,
+   not a breakdown of processing fees, and `bearer_type` is stored and echoed
+   but does not change who absorbs the emulated fee.
+4. `partial_debit` does not model a card balance, so it always debits the full
+   requested amount.
+5. Dispute attachments are not stored; `upload_url` returns a URL that accepts
+   nothing.
+6. `GET /transaction/export` returns rows inline under `data.rows`; the `path`
+   it reports is **not fetchable**, because the emulator writes no files.
+7. `GET /transaction/totals` reports volume only; pending-transfer totals are
+   always zero.
+8. `GET /bank` and `GET /country` return short fixed lists, not Paystack's full
+   directories. `GET /dedicated_account` ignores the documented query filters.
+9. Transaction ids are derived deterministically from the reference rather than
    allocated by a counter, so they are stable but not monotonic over time. This
    is deliberate: hash-derived ids stay stable when operations are reordered,
    which is what lets the test suite assert literal ids. A monotonic counter
    would be more faithful to Paystack and less useful here.
-9. `partial_debit` does not model a card balance (above).
-10. `GET /dedicated_account` ignores the documented query filters.
+10. Opening a dispute (`POST /dispute`) and crediting a dedicated virtual
+    account (`POST /api/dedicated-accounts/:number/credit`) are
+    **emulator-only**. Neither exists at Paystack, because neither originates
+    with the merchant — but without them the flows could not be tested locally.

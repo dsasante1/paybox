@@ -30,6 +30,8 @@ import {
   PaystackWebhookFormatter,
   generateLocalKeys,
   paystackAuthorizationMinter,
+  paystackRetrySchedule,
+  PAYSTACK_TEST_MODE_MAX_ATTEMPTS,
   toPaystackStatus,
 } from '@paybox/paystack';
 import type { PayboxConfig } from './config.js';
@@ -128,7 +130,15 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
     ...(options.transport ? { transport: options.transport } : {}),
     retry: createRetryPolicy({
       enabled: config.webhooks.retry.enabled,
-      maxAttempts: config.webhooks.retry.maxAttempts,
+      // Paystack's own ladder is a fixed ten attempts; overriding maxAttempts
+      // alongside it would produce a schedule that is neither.
+      maxAttempts:
+        config.webhooks.retry.schedule === 'paystack'
+          ? PAYSTACK_TEST_MODE_MAX_ATTEMPTS
+          : config.webhooks.retry.maxAttempts,
+      ...(config.webhooks.retry.schedule === 'paystack'
+        ? { backoff: (attempt: number) => paystackRetrySchedule(attempt, 'test') }
+        : {}),
       jitter: () => random.fork('webhook-jitter').next(),
     }),
     timeoutMs: config.webhooks.timeoutMs,

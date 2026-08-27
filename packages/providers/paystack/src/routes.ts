@@ -66,7 +66,7 @@ import {
 import { toPaystackError } from './errors.js';
 import { assertPaystackCredentials } from './auth.js';
 import { renderCheckoutPage, renderCheckoutResult } from './checkout.js';
-import { fromPaystackStatus } from './status.js';
+import { fromPaystackStatus, toPaystackStatus } from './status.js';
 import { paystackAuthorizationMinter } from './authorization.js';
 
 export interface PaystackPluginOptions {
@@ -337,7 +337,16 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
     return reply.send(ok('Transaction retrieved', await decorate(payment)));
   });
 
-  fastify.get<{ Querystring: { perPage?: string; page?: string; status?: string } }>(
+  fastify.get<{
+    Querystring: {
+      perPage?: string;
+      page?: string;
+      status?: string;
+      from?: string;
+      to?: string;
+      customer?: string;
+    };
+  }>(
     '/transaction',
     async (request, reply) => {
       authenticate(request);
@@ -352,6 +361,7 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
         limit: perPage,
         offset: (pageNumber - 1) * perPage,
         ...(canonical ? { status: canonical } : {}),
+        ...normalizeDateRange(request.query.from, request.query.to),
       });
       const data = await Promise.all(items.map((p) => decorate(p)));
       return reply.send({
@@ -360,6 +370,108 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
         data,
         meta: { total, skipped: (pageNumber - 1) * perPage, perPage, page: pageNumber },
       });
+    },
+  );
+
+  /**
+   * The transaction's own history.
+   *
+   * Paystack's `log` object, served on its own. It is built from the canonical
+   * event timeline, so it is genuinely the sequence the payment went through
+   * rather than a stub.
+   */
+  fastify.get<{ Params: { id: string } }>(
+    '/transaction/timeline/:id',
+    async (request, reply) => {
+      authenticate(request);
+      const payment = await loadTransaction(request.params.id);
+      const decorated = await decorate(payment);
+      return reply.send(ok('Timeline retrieved', decorated.log));
+    },
+  );
+
+  /**
+   * Volume totals.
+   *
+   * Only successful transactions count toward a total -- an attempted charge
+   * that failed moved no money, and including it would overstate revenue.
+   */
+  fastify.get<{ Querystring: { from?: string; to?: string } }>(
+    '/transaction/totals',
+    async (request, reply) => {
+      authenticate(request);
+      const { items, total } = await storage.payments.list({
+        provider: PROVIDER,
+        limit: 500,
+        ...normalizeDateRange(request.query.from, request.query.to),
+      });
+
+      const settled = items.filter(
+        (p) =>
+          p.status === 'successful' ||
+          p.status === 'partially_refunded' ||
+          p.status === 'refunded',
+      );
+      const byCurrency = new Map<string, number>();
+      for (const payment of settled) {
+        byCurrency.set(
+          payment.currency,
+          (byCurrency.get(payment.currency) ?? 0) + payment.amount,
+        );
+      }
+      const volumes = [...byCurrency].map(([currency, amount]) => ({ currency, amount }));
+
+      return reply.send(
+        ok('Transaction totals', {
+          total_transactions: total,
+          total_volume: volumes.reduce((sum, v) => sum + v.amount, 0),
+          total_volume_by_currency: volumes,
+          pending_transfers: 0,
+          pending_transfers_by_currency: [],
+        }),
+      );
+    },
+  );
+
+  /**
+   * Export.
+   *
+   * Paystack answers with a link to a generated CSV. The emulator writes no
+   * files, so it returns the rows inline under `data.rows` alongside the
+   * documented `path`. docs/paystack.md says the path is not fetchable.
+   */
+  fastify.get<{ Querystring: { from?: string; to?: string; status?: string } }>(
+    '/transaction/export',
+    async (request, reply) => {
+      authenticate(request);
+      const canonical = request.query.status
+        ? fromPaystackStatus(request.query.status)
+        : undefined;
+      const { items } = await storage.payments.list({
+        provider: PROVIDER,
+        limit: 500,
+        ...(canonical ? { status: canonical } : {}),
+        ...normalizeDateRange(request.query.from, request.query.to),
+      });
+
+      const rows = items.map((payment) => ({
+        id: numericTransactionId(payment.providerTransactionId),
+        reference: payment.reference,
+        amount: payment.amount,
+        currency: payment.currency,
+        status: toPaystackStatus(payment.status),
+        channel: payment.paymentMethod,
+        paid_at: payment.paidAt,
+        created_at: payment.createdAt,
+      }));
+
+      return reply.send(
+        ok('Export successful', {
+          path: `${options.baseUrl}${options.basePath}/transaction/export.csv`,
+          expiresAt: new Date(clock.now() + 60 * 60_000).toISOString(),
+          rows,
+        }),
+      );
     },
   );
 
@@ -821,16 +933,29 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
     return reply.send(ok('Customer retrieved', serializeCustomer(customer)));
   });
 
-  fastify.get('/customer', async (request, reply) => {
-    authenticate(request);
-    const { items, total } = await storage.customers.list({ limit: 100 });
-    return reply.send({
-      status: true,
-      message: 'Customers retrieved',
-      data: items.filter((c) => c.provider === PROVIDER).map(serializeCustomer),
-      meta: { total, skipped: 0, perPage: 100, page: 1 },
-    });
-  });
+  fastify.get<{ Querystring: { perPage?: string; page?: string; search?: string } }>(
+    '/customer',
+    async (request, reply) => {
+      authenticate(request);
+      const perPage = Math.min(Number(request.query.perPage ?? 50) || 50, 200);
+      const pageNumber = Math.max(Number(request.query.page ?? 1) || 1, 1);
+      // Filtering and paging in SQL, not in memory: the previous version
+      // fetched 100 rows and filtered afterwards, so page 2 was wrong and a
+      // provider filter could silently drop rows out of the page.
+      const { items, total } = await storage.customers.list({
+        provider: PROVIDER,
+        limit: perPage,
+        offset: (pageNumber - 1) * perPage,
+        ...(request.query.search ? { search: request.query.search } : {}),
+      });
+      return reply.send({
+        status: true,
+        message: 'Customers retrieved',
+        data: items.map(serializeCustomer),
+        meta: { total, skipped: (pageNumber - 1) * perPage, perPage, page: pageNumber },
+      });
+    },
+  );
 
   /**
    * Deactivate a stored authorization.
@@ -1621,6 +1746,76 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
   );
 
   /* ---------------------------------------------------------------- *
+   * Reference data
+   *
+   * A small fixed list, not Paystack's full directory. It exists so that
+   * `transferrecipient` can resolve a bank name instead of returning null,
+   * and so an integration that populates a bank dropdown has something to
+   * populate it from. docs/paystack.md states the list is not exhaustive.
+   * ---------------------------------------------------------------- */
+
+  const BANKS = [
+    { name: 'Access Bank', slug: 'access-bank', code: '044', country: 'Nigeria', currency: 'NGN', type: 'nuban' },
+    { name: 'Guaranty Trust Bank', slug: 'guaranty-trust-bank', code: '058', country: 'Nigeria', currency: 'NGN', type: 'nuban' },
+    { name: 'Zenith Bank', slug: 'zenith-bank', code: '057', country: 'Nigeria', currency: 'NGN', type: 'nuban' },
+    { name: 'United Bank For Africa', slug: 'united-bank-for-africa', code: '033', country: 'Nigeria', currency: 'NGN', type: 'nuban' },
+    { name: 'First Bank of Nigeria', slug: 'first-bank-of-nigeria', code: '011', country: 'Nigeria', currency: 'NGN', type: 'nuban' },
+    { name: 'MTN Mobile Money', slug: 'mtn', code: 'MTN', country: 'Ghana', currency: 'GHS', type: 'mobile_money' },
+    { name: 'Telecel Cash', slug: 'telecel', code: 'VOD', country: 'Ghana', currency: 'GHS', type: 'mobile_money' },
+    { name: 'AirtelTigo Money', slug: 'airteltigo', code: 'ATL', country: 'Ghana', currency: 'GHS', type: 'mobile_money' },
+  ] as const;
+
+  /** Look up a bank name for a code, for recipient enrichment. */
+  function bankName(code: string | null): string | null {
+    if (!code) return null;
+    return BANKS.find((bank) => bank.code === code)?.name ?? null;
+  }
+
+  fastify.get<{ Querystring: { country?: string; currency?: string; type?: string } }>(
+    '/bank',
+    async (request, reply) => {
+      authenticate(request);
+      const country = request.query.country?.toLowerCase();
+      const currency = request.query.currency?.toUpperCase();
+      const type = request.query.type;
+
+      const data = BANKS.filter(
+        (bank) =>
+          (!country || bank.country.toLowerCase() === country) &&
+          (!currency || bank.currency === currency) &&
+          (!type || bank.type === type),
+      ).map((bank) => ({
+        id: numericTransactionId(bank.code) % 1_000,
+        name: bank.name,
+        slug: bank.slug,
+        code: bank.code,
+        longcode: bank.code,
+        gateway: null,
+        pay_with_bank: false,
+        active: true,
+        country: bank.country,
+        currency: bank.currency,
+        type: bank.type,
+        is_deleted: false,
+      }));
+
+      return reply.send(ok('Banks retrieved', data));
+    },
+  );
+
+  fastify.get('/country', async (request, reply) => {
+    authenticate(request);
+    return reply.send(
+      ok('Countries retrieved', [
+        { id: 1, name: 'Nigeria', iso_code: 'NG', default_currency_code: 'NGN' },
+        { id: 2, name: 'Ghana', iso_code: 'GH', default_currency_code: 'GHS' },
+        { id: 3, name: 'South Africa', iso_code: 'ZA', default_currency_code: 'ZAR' },
+        { id: 4, name: 'Kenya', iso_code: 'KE', default_currency_code: 'KES' },
+      ]),
+    );
+  });
+
+  /* ---------------------------------------------------------------- *
    * Transfers
    * ---------------------------------------------------------------- */
 
@@ -1636,7 +1831,7 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
       name: body.name,
       accountNumber: body.account_number,
       bankCode: body.bank_code,
-      bankName: null,
+      bankName: bankName(body.bank_code),
       currency: body.currency.toUpperCase(),
       metadata: body.metadata ?? {},
       createdAt: now,
@@ -1702,6 +1897,24 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
   });
 
 };
+
+/**
+ * Normalise Paystack's `from`/`to` query parameters into repository bounds.
+ *
+ * A bare date means the whole day: `to=2026-03-01` has to include everything
+ * that happened on the 1st, so it is widened to the end of that day. Taking it
+ * literally as midnight would silently exclude the day the caller asked for.
+ */
+function normalizeDateRange(
+  from: string | undefined,
+  to: string | undefined,
+): { from?: string; to?: string } {
+  const dateOnly = /^\d{4}-\d{2}-\d{2}$/;
+  const range: { from?: string; to?: string } = {};
+  if (from) range.from = dateOnly.test(from) ? `${from}T00:00:00.000Z` : from;
+  if (to) range.to = dateOnly.test(to) ? `${to}T23:59:59.999Z` : to;
+  return range;
+}
 
 /**
  * The dial string a USSD charge asks the payer to enter.

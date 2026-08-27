@@ -179,6 +179,16 @@ class SqliteStorage implements Storage {
         query = query.where('customer_id', '=', filter.customerId);
         count = count.where('customer_id', '=', filter.customerId);
       }
+      // Inclusive bounds. Timestamps are ISO-8601 UTC, which sorts
+      // lexicographically, so a string comparison is a date comparison.
+      if (filter?.from) {
+        query = query.where('created_at', '>=', filter.from);
+        count = count.where('created_at', '>=', filter.from);
+      }
+      if (filter?.to) {
+        query = query.where('created_at', '<=', filter.to);
+        count = count.where('created_at', '<=', filter.to);
+      }
       const rows = await query
         .orderBy('created_at', 'desc')
         .orderBy('id', 'desc')
@@ -368,17 +378,41 @@ class SqliteStorage implements Storage {
     },
     list: async (filter) => {
       const { limit, offset } = page(filter);
-      const rows = await this.#db
+      let query = this.#db.selectFrom('customers').selectAll();
+      let count = this.#db
         .selectFrom('customers')
-        .selectAll()
+        .select(({ fn }) => fn.countAll<number>().as('total'));
+      if (filter?.provider) {
+        query = query.where('provider', '=', filter.provider);
+        count = count.where('provider', '=', filter.provider);
+      }
+      if (filter?.search) {
+        // SQLite's LIKE is already case-insensitive for ASCII, which is what
+        // an email search needs; lowering the term keeps it predictable.
+        const term = `%${filter.search.toLowerCase()}%`;
+        const matches = (qb: typeof query) =>
+          qb.where((eb) =>
+            eb.or([
+              eb('email', 'like', term),
+              eb('first_name', 'like', term),
+              eb('last_name', 'like', term),
+            ]),
+          );
+        query = matches(query);
+        count = count.where((eb) =>
+          eb.or([
+            eb('email', 'like', term),
+            eb('first_name', 'like', term),
+            eb('last_name', 'like', term),
+          ]),
+        );
+      }
+      const rows = await query
         .orderBy('created_at', 'desc')
         .limit(limit)
         .offset(offset)
         .execute();
-      const total = await this.#db
-        .selectFrom('customers')
-        .select(({ fn }) => fn.countAll<number>().as('total'))
-        .executeTakeFirst();
+      const total = await count.executeTakeFirst();
       return { items: rows.map(map.toCustomer), total: Number(total?.total ?? 0) };
     },
   };

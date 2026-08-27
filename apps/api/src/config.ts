@@ -11,7 +11,19 @@ export interface PayboxConfig {
   freezeClock: boolean;
   startAt: string | null;
   webhooks: {
-    retry: { enabled: boolean; maxAttempts: number };
+    retry: {
+      enabled: boolean;
+      maxAttempts: number;
+      /**
+       * `exponential` (default) or `paystack`.
+       *
+       * Paystack's real ladder is hourly for ten hours, which is unhelpful
+       * when you are watching it happen -- but costs nothing under a frozen
+       * clock, where `paybox time advance 12h` runs it to exhaustion
+       * instantly. That is exactly when you want the real timings.
+       */
+      schedule: 'exponential' | 'paystack';
+    };
     timeoutMs: number;
   };
   providers: Record<string, { enabled: boolean }>;
@@ -48,7 +60,7 @@ const DEFAULTS: PayboxConfig = {
   freezeClock: false,
   startAt: null,
   webhooks: {
-    retry: { enabled: true, maxAttempts: 5 },
+    retry: { enabled: true, maxAttempts: 5, schedule: 'exponential' },
     timeoutMs: 10_000,
   },
   providers: { paystack: { enabled: true } },
@@ -106,6 +118,10 @@ export function loadConfig(options: { configPath?: string; cwd?: string } = {}):
             fromFile.webhooks?.retry?.maxAttempts ??
             DEFAULTS.webhooks.retry.maxAttempts,
         ),
+        schedule:
+          (env.PAYBOX_WEBHOOK_SCHEDULE as 'paystack' | undefined) ??
+          fromFile.webhooks?.retry?.schedule ??
+          DEFAULTS.webhooks.retry.schedule,
       },
       timeoutMs: Number(
         env.PAYBOX_WEBHOOK_TIMEOUT_MS ?? fromFile.webhooks?.timeoutMs ?? DEFAULTS.webhooks.timeoutMs,

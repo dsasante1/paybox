@@ -139,6 +139,9 @@ export interface PaymentFilter extends ListOptions {
   status?: PaymentStatus;
   reference?: string;
   customerId?: string;
+  /** Inclusive ISO bounds on `createdAt`. */
+  from?: string;
+  to?: string;
 }
 
 export interface Page<T> {
@@ -183,13 +186,19 @@ export interface RecipientRepository {
   list(filter?: ListOptions): Promise<Page<TransferRecipient>>;
 }
 
+export interface CustomerFilter extends ListOptions {
+  provider?: ProviderId;
+  /** Case-insensitive substring match on email, first name or last name. */
+  search?: string;
+}
+
 export interface CustomerRepository {
   insert(customer: Customer): Promise<Customer>;
   byId(id: string): Promise<Customer | null>;
   byProviderCustomerId(provider: ProviderId, id: string): Promise<Customer | null>;
   byEmail(provider: ProviderId, email: string): Promise<Customer | null>;
   update(id: string, patch: Partial<Customer>): Promise<Customer>;
-  list(filter?: ListOptions): Promise<Page<Customer>>;
+  list(filter?: CustomerFilter): Promise<Page<Customer>>;
 }
 
 export interface AuthorizationRepository {

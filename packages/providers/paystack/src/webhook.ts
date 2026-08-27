@@ -32,7 +32,12 @@ import {
  */
 const EVENT_MAP: Record<string, string> = {
   'payment.successful': 'charge.success',
+  // All four documented refund events, not just the settled one. A refund
+  // that fails is a thing integrations have to handle.
+  'refund.created': 'refund.pending',
+  'refund.processing': 'refund.processing',
   'refund.successful': 'refund.processed',
+  'refund.failed': 'refund.failed',
   'transfer.successful': 'transfer.success',
   'transfer.failed': 'transfer.failed',
   'transfer.reversed': 'transfer.reversed',
@@ -139,14 +144,24 @@ export class PaystackWebhookFormatter implements WebhookFormatter {
 }
 
 /**
- * Paystack's documented retry schedule, for use as this provider's default.
+ * Paystack's documented retry schedule.
  *
- * Test mode retries hourly for 10 hours; live mode retries every 3 minutes for
- * the first 4 attempts and then hourly for up to 72 hours. We model test mode,
- * since that is what a local emulator corresponds to. Verified 2026-08-27.
+ * Test mode retries **hourly for 10 hours**. Live mode retries every 3 minutes
+ * for the first 4 attempts, then hourly for up to 72 hours. Verified
+ * 2026-08-27.
+ *
+ * This is opt-in (`webhooks.retry.schedule: paystack`) rather than the
+ * default, because a ten-hour ladder is unhelpful when you are watching it
+ * happen. With a frozen clock it costs nothing -- `paybox time advance 12h`
+ * runs the whole thing to exhaustion instantly -- which is exactly when you
+ * want the real timings.
  */
-export function paystackRetrySchedule(attempt: number): number {
-  return 3_600_000 * Math.max(1, attempt === 0 ? 1 : 1);
+export function paystackRetrySchedule(attempt: number, mode: 'test' | 'live' = 'test'): number {
+  const HOUR = 3_600_000;
+  if (mode === 'test') return HOUR;
+  // Live: the first four attempts are three minutes apart, then hourly.
+  return attempt < 4 ? 3 * 60_000 : HOUR;
 }
 
 export const PAYSTACK_TEST_MODE_MAX_ATTEMPTS = 10;
+export const PAYSTACK_LIVE_MODE_MAX_ATTEMPTS = 72;
