@@ -4,6 +4,7 @@ import type {
   DedicatedAccount,
   Invoice,
   InvoiceStatus,
+  LedgerEntry,
   Metadata,
   Payment,
   PayboxEvent,
@@ -12,6 +13,8 @@ import type {
   ProviderId,
   Refund,
   RefundStatus,
+  Split,
+  Subaccount,
   Subscription,
   SubscriptionStatus,
   Transfer,
@@ -242,6 +245,40 @@ export interface InvoiceRepository {
   ): Promise<Page<Invoice>>;
 }
 
+export interface SubaccountRepository {
+  insert(subaccount: Subaccount): Promise<Subaccount>;
+  byId(id: string): Promise<Subaccount | null>;
+  byCode(provider: ProviderId, code: string): Promise<Subaccount | null>;
+  update(id: string, patch: Partial<Subaccount>): Promise<Subaccount>;
+  list(filter?: ListOptions & { provider?: ProviderId }): Promise<Page<Subaccount>>;
+}
+
+export interface SplitRepository {
+  /** Writes the split and its subaccount entries in one transaction. */
+  insert(split: Split): Promise<Split>;
+  byId(id: string): Promise<Split | null>;
+  byCode(provider: ProviderId, code: string): Promise<Split | null>;
+  update(id: string, patch: Partial<Omit<Split, 'entries'>>): Promise<Split>;
+  addSubaccount(splitId: string, subaccountId: string, share: number): Promise<Split>;
+  removeSubaccount(splitId: string, subaccountId: string): Promise<Split>;
+  list(filter?: ListOptions & { provider?: ProviderId }): Promise<Page<Split>>;
+}
+
+/**
+ * The balance ledger. Append-only: there is no update or delete, because the
+ * balance is a fold over these rows rather than a stored number.
+ */
+export interface LedgerRepository {
+  append(entry: LedgerEntry): Promise<LedgerEntry>;
+  /** Net of credits and debits, per currency. Excludes any opening float. */
+  net(provider: ProviderId, currency: string): Promise<number>;
+  list(
+    filter?: ListOptions & { provider?: ProviderId; currency?: string },
+  ): Promise<Page<LedgerEntry>>;
+  /** Distinct currencies that have seen movement. */
+  currencies(provider: ProviderId): Promise<string[]>;
+}
+
 export interface EventFilter extends ListOptions {
   provider?: ProviderId;
   type?: string;
@@ -311,6 +348,9 @@ export interface Storage {
   readonly plans: PlanRepository;
   readonly subscriptions: SubscriptionRepository;
   readonly invoices: InvoiceRepository;
+  readonly subaccounts: SubaccountRepository;
+  readonly splits: SplitRepository;
+  readonly ledger: LedgerRepository;
   readonly recipients: RecipientRepository;
   readonly events: EventRepository;
   readonly webhooks: WebhookRepository;

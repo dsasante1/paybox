@@ -8,6 +8,7 @@ import {
   type IdFactory,
   type Invoice,
   type InvoiceStatus,
+  type LedgerEntry,
   type Metadata,
   type Payment,
   type PaymentMethod,
@@ -18,6 +19,8 @@ import {
   type ProviderId,
   type Refund,
   type RefundStatus,
+  type Split,
+  type Subaccount,
   type Subscription,
   type SubscriptionStatus,
   type Transfer,
@@ -120,6 +123,21 @@ export interface EngineDeps {
   bus: EventBus;
   providerStatus?: ProviderStatusResolver;
   mintAuthorization?: AuthorizationMinter;
+  /**
+   * Refuse a transfer that the balance cannot cover.
+   *
+   * On by default, because that is what a provider does. The opening float
+   * below is what stops it being infuriating: a fresh emulator can pay out
+   * before it has collected anything.
+   */
+  enforceBalance?: boolean;
+  /**
+   * Starting test float per currency, in minor units.
+   *
+   * Not a ledger row: keeping it out of the table means `paybox reset` cannot
+   * wipe it, and the ledger stays a pure record of what this run actually did.
+   */
+  openingBalance?: number;
 }
 
 /**
@@ -138,6 +156,8 @@ export class PaymentEngine {
   readonly #bus: EventBus;
   readonly #providerStatus: ProviderStatusResolver;
   readonly #mintAuthorization: AuthorizationMinter;
+  readonly #enforceBalance: boolean;
+  readonly #openingBalance: number;
 
   constructor(deps: EngineDeps) {
     this.#storage = deps.storage;
@@ -146,6 +166,8 @@ export class PaymentEngine {
     this.#bus = deps.bus;
     this.#providerStatus = deps.providerStatus ?? ((_provider, status) => status);
     this.#mintAuthorization = deps.mintAuthorization ?? (() => null);
+    this.#enforceBalance = deps.enforceBalance ?? true;
+    this.#openingBalance = deps.openingBalance ?? 0;
   }
 
   /* ---------------------------------------------------------------- *
@@ -291,6 +313,16 @@ export class PaymentEngine {
       if (to === 'successful') {
         const minted = await this.#mintFor(tx, updated);
         if (minted) emitted.push(minted);
+
+        // Money collected lands in the balance. Inside the transaction, so a
+        // rolled-back success cannot leave a phantom credit behind.
+        await this.#ledgerIn(tx, 'credit', {
+          provider: updated.provider,
+          currency: updated.currency,
+          amount: updated.amount,
+          reason: 'charge',
+          resourceId: updated.id,
+        });
       }
 
       return { result: updated, events: emitted };
@@ -434,6 +466,15 @@ export class PaymentEngine {
           amountRefunded: totalRefunded,
           updatedAt: now,
         });
+
+        // Refunded money leaves the balance.
+        await this.#ledgerIn(tx, 'debit', {
+          provider: updated.provider,
+          currency: updated.currency,
+          amount: updated.amount,
+          reason: 'refund',
+          resourceId: updated.id,
+        });
         emitted.push(
           await this.#appendEvent(tx, {
             type: `payment.${nextStatus}`,
@@ -493,7 +534,32 @@ export class PaymentEngine {
     };
 
     const { result, events } = await this.#storage.transaction(async (tx) => {
+      // Check and reserve inside one transaction, so two transfers racing for
+      // the same funds cannot both pass the check.
+      if (this.#enforceBalance) {
+        const net = await tx.ledger.net(transfer.provider, transfer.currency);
+        const available = this.#openingBalance + net;
+        if (transfer.amount > available) {
+          throw new PayboxError(
+            'insufficient_funds',
+            `Transfer of ${transfer.amount} exceeds the available balance of ${available} ${transfer.currency}.`,
+            { details: { amount: transfer.amount, available, currency: transfer.currency } },
+          );
+        }
+      }
+
       const created = await tx.transfers.insert(transfer);
+      // Reserve immediately rather than on success: a queued payout has
+      // already committed the funds, and waiting would let a second transfer
+      // spend the same money.
+      await this.#ledgerIn(tx, 'debit', {
+        provider: created.provider,
+        currency: created.currency,
+        amount: created.amount,
+        reason: 'transfer',
+        resourceId: created.id,
+      });
+
       const event = await this.#appendEvent(tx, {
         type: `transfer.${status}`,
         provider: created.provider,
@@ -529,6 +595,17 @@ export class PaymentEngine {
           ? { failureReason: options.failureReason }
           : {}),
       });
+
+      // A payout that did not happen releases the funds it reserved.
+      if (to === 'failed' || to === 'reversed') {
+        await this.#ledgerIn(tx, 'credit', {
+          provider: updated.provider,
+          currency: updated.currency,
+          amount: updated.amount,
+          reason: `transfer_${to}`,
+          resourceId: updated.id,
+        });
+      }
       const event = await this.#appendEvent(tx, {
         type: `transfer.${to}`,
         provider: updated.provider,
@@ -1088,6 +1165,193 @@ export class PaymentEngine {
 
   async getSubscription(id: string): Promise<Subscription | null> {
     return this.#storage.subscriptions.byId(id);
+  }
+
+  /* ---------------------------------------------------------------- *
+   * Marketplace: subaccounts, splits and the balance ledger
+   * ---------------------------------------------------------------- */
+
+  async createSubaccount(input: {
+    provider: ProviderId;
+    businessName: string;
+    settlementBank: string;
+    accountNumber: string;
+    percentageCharge: number;
+    currency: string;
+    description?: string | null;
+    primaryContactEmail?: string | null;
+    primaryContactName?: string | null;
+    primaryContactPhone?: string | null;
+    providerSubaccountCode?: string;
+    metadata?: Metadata;
+  }): Promise<Subaccount> {
+    if (input.percentageCharge < 0 || input.percentageCharge > 100) {
+      throw new PayboxError(
+        'validation_failed',
+        `percentage_charge must be between 0 and 100; received ${input.percentageCharge}.`,
+        { details: { percentageCharge: input.percentageCharge } },
+      );
+    }
+
+    const now = this.#clock.nowISO();
+    return this.#storage.subaccounts.insert({
+      id: this.#ids.next('sac'),
+      provider: input.provider,
+      providerSubaccountCode: input.providerSubaccountCode ?? this.#ids.token(12),
+      businessName: input.businessName,
+      settlementBank: input.settlementBank,
+      accountNumber: input.accountNumber,
+      percentageCharge: input.percentageCharge,
+      description: input.description ?? null,
+      primaryContactEmail: input.primaryContactEmail ?? null,
+      primaryContactName: input.primaryContactName ?? null,
+      primaryContactPhone: input.primaryContactPhone ?? null,
+      currency: input.currency.toUpperCase(),
+      active: true,
+      metadata: input.metadata ?? {},
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  /**
+   * Define how a transaction is divided.
+   *
+   * A percentage split whose shares exceed 100 is rejected. Providers reject
+   * it too, and letting it through would produce subaccount payouts larger
+   * than the payment that funded them.
+   */
+  async createSplit(input: {
+    provider: ProviderId;
+    name: string;
+    type: Split['type'];
+    currency: string;
+    entries: { subaccountId: string; subaccountCode: string; share: number }[];
+    bearerType?: Split['bearerType'];
+    bearerSubaccountId?: string | null;
+    providerSplitCode?: string;
+  }): Promise<Split> {
+    if (input.entries.length === 0) {
+      throw new PayboxError('validation_failed', 'A split needs at least one subaccount.');
+    }
+    const total = input.entries.reduce((sum, entry) => sum + entry.share, 0);
+    if (input.type === 'percentage' && total > 100) {
+      throw new PayboxError(
+        'validation_failed',
+        `Percentage shares total ${total}, which exceeds 100.`,
+        { details: { total } },
+      );
+    }
+
+    const now = this.#clock.nowISO();
+    return this.#storage.splits.insert({
+      id: this.#ids.next('spl'),
+      provider: input.provider,
+      providerSplitCode: input.providerSplitCode ?? this.#ids.token(12),
+      name: input.name,
+      type: input.type,
+      currency: input.currency.toUpperCase(),
+      bearerType: input.bearerType ?? 'account',
+      bearerSubaccountId: input.bearerSubaccountId ?? null,
+      active: true,
+      entries: input.entries,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  /**
+   * What each subaccount receives from an amount under a split.
+   *
+   * Flat shares are taken as-is and capped at the amount; percentage shares
+   * are rounded down so the parts can never sum to more than the whole. The
+   * remainder is the merchant's.
+   */
+  computeSplit(split: Split, amount: number): { entries: { subaccountCode: string; amount: number }[]; merchant: number } {
+    let allocated = 0;
+    const entries = split.entries.map((entry) => {
+      const raw =
+        split.type === 'percentage'
+          ? Math.floor((amount * entry.share) / 100)
+          : Math.floor(entry.share);
+      const share = Math.max(0, Math.min(raw, amount - allocated));
+      allocated += share;
+      return { subaccountCode: entry.subaccountCode, amount: share };
+    });
+    return { entries, merchant: amount - allocated };
+  }
+
+  /** Current balance for a currency, including the opening test float. */
+  async getBalance(provider: ProviderId, currency: string): Promise<number> {
+    const net = await this.#storage.ledger.net(provider, currency.toUpperCase());
+    return this.#openingBalance + net;
+  }
+
+  async creditBalance(input: {
+    provider: ProviderId;
+    currency: string;
+    amount: number;
+    reason: string;
+    resourceId?: string | null;
+  }): Promise<LedgerEntry> {
+    return this.#appendLedger('credit', input);
+  }
+
+  async debitBalance(input: {
+    provider: ProviderId;
+    currency: string;
+    amount: number;
+    reason: string;
+    resourceId?: string | null;
+  }): Promise<LedgerEntry> {
+    return this.#appendLedger('debit', input);
+  }
+
+  /** Ledger append bound to an open transaction. */
+  async #ledgerIn(
+    tx: Storage,
+    direction: LedgerEntry['direction'],
+    input: {
+      provider: ProviderId;
+      currency: string;
+      amount: number;
+      reason: string;
+      resourceId?: string | null;
+    },
+  ): Promise<void> {
+    await tx.ledger.append({
+      id: this.#ids.next('led'),
+      provider: input.provider,
+      currency: input.currency.toUpperCase(),
+      direction,
+      amount: input.amount,
+      reason: input.reason,
+      resourceId: input.resourceId ?? null,
+      createdAt: this.#clock.nowISO(),
+    });
+  }
+
+  async #appendLedger(
+    direction: LedgerEntry['direction'],
+    input: {
+      provider: ProviderId;
+      currency: string;
+      amount: number;
+      reason: string;
+      resourceId?: string | null;
+    },
+  ): Promise<LedgerEntry> {
+    validateAmount(input.amount);
+    return this.#storage.ledger.append({
+      id: this.#ids.next('led'),
+      provider: input.provider,
+      currency: input.currency.toUpperCase(),
+      direction,
+      amount: input.amount,
+      reason: input.reason,
+      resourceId: input.resourceId ?? null,
+      createdAt: this.#clock.nowISO(),
+    });
   }
 
   /* ---------------------------------------------------------------- *

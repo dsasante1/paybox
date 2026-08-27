@@ -5,7 +5,10 @@ import type {
   CustomerRepository,
   DedicatedAccountRepository,
   InvoiceRepository,
+  LedgerRepository,
   PlanRepository,
+  SplitRepository,
+  SubaccountRepository,
   SubscriptionRepository,
   EventFilter,
   EventRepository,
@@ -88,6 +91,10 @@ class SqliteStorage implements Storage {
       'invoices',
       'subscriptions',
       'plans',
+      'split_subaccounts',
+      'splits',
+      'subaccounts',
+      'balance_ledger',
       // Before payments and customers: these reference both.
       'authorizations',
       'dedicated_accounts',
@@ -722,6 +729,220 @@ class SqliteStorage implements Storage {
       return { items: rows.map(map.toInvoice), total: Number(total?.total ?? 0) };
     },
   };
+
+  readonly subaccounts: SubaccountRepository = {
+    insert: async (subaccount) => {
+      await this.#db.insertInto('subaccounts').values(map.fromSubaccount(subaccount)).execute();
+      return subaccount;
+    },
+    byId: async (id) => {
+      const row = await this.#db
+        .selectFrom('subaccounts')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toSubaccount(row) : null;
+    },
+    byCode: async (provider, code) => {
+      const row = await this.#db
+        .selectFrom('subaccounts')
+        .selectAll()
+        .where('provider', '=', provider)
+        .where('provider_subaccount_code', '=', code)
+        .executeTakeFirst();
+      return row ? map.toSubaccount(row) : null;
+    },
+    update: async (id, patch) => {
+      const columns = map.subaccountPatch(patch);
+      if (Object.keys(columns).length > 0) {
+        await this.#db.updateTable('subaccounts').set(columns).where('id', '=', id).execute();
+      }
+      const row = await this.#db
+        .selectFrom('subaccounts')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toSubaccount(row) : notFound('subaccount', id);
+    },
+    list: async (filter) => {
+      const { limit, offset } = page(filter);
+      let query = this.#db.selectFrom('subaccounts').selectAll();
+      let count = this.#db
+        .selectFrom('subaccounts')
+        .select(({ fn }) => fn.countAll<number>().as('total'));
+      if (filter?.provider) {
+        query = query.where('provider', '=', filter.provider);
+        count = count.where('provider', '=', filter.provider);
+      }
+      const rows = await query
+        .orderBy('created_at', 'desc')
+        .limit(limit)
+        .offset(offset)
+        .execute();
+      const total = await count.executeTakeFirst();
+      return { items: rows.map(map.toSubaccount), total: Number(total?.total ?? 0) };
+    },
+  };
+
+  readonly splits: SplitRepository = {
+    insert: async (split) => {
+      return this.transaction(async (tx) => {
+        const inner = (tx as SqliteStorage).#db;
+        await inner.insertInto('splits').values(map.fromSplit(split)).execute();
+        for (const entry of split.entries) {
+          await inner
+            .insertInto('split_subaccounts')
+            .values({
+              split_id: split.id,
+              subaccount_id: entry.subaccountId,
+              share: entry.share,
+            })
+            .execute();
+        }
+        return split;
+      });
+    },
+    byId: async (id) => this.#loadSplit('id', id),
+    byCode: async (provider, code) => {
+      const row = await this.#db
+        .selectFrom('splits')
+        .selectAll()
+        .where('provider', '=', provider)
+        .where('provider_split_code', '=', code)
+        .executeTakeFirst();
+      return row ? map.toSplit(row, await this.#splitEntries(row.id)) : null;
+    },
+    update: async (id, patch) => {
+      const columns: Record<string, unknown> = {};
+      if (patch.name !== undefined) columns.name = patch.name;
+      if (patch.bearerType !== undefined) columns.bearer_type = patch.bearerType;
+      if (patch.bearerSubaccountId !== undefined) {
+        columns.bearer_subaccount_id = patch.bearerSubaccountId;
+      }
+      if (patch.active !== undefined) columns.active = patch.active ? 1 : 0;
+      if (patch.updatedAt !== undefined) columns.updated_at = patch.updatedAt;
+      if (Object.keys(columns).length > 0) {
+        await this.#db
+          .updateTable('splits')
+          .set(columns as never)
+          .where('id', '=', id)
+          .execute();
+      }
+      return (await this.#loadSplit('id', id)) ?? notFound('split', id);
+    },
+    addSubaccount: async (splitId, subaccountId, share) => {
+      await sql`
+        INSERT INTO split_subaccounts (split_id, subaccount_id, share)
+        VALUES (${splitId}, ${subaccountId}, ${share})
+        ON CONFLICT (split_id, subaccount_id) DO UPDATE SET share = ${share}
+      `.execute(this.#db);
+      return (await this.#loadSplit('id', splitId)) ?? notFound('split', splitId);
+    },
+    removeSubaccount: async (splitId, subaccountId) => {
+      await this.#db
+        .deleteFrom('split_subaccounts')
+        .where('split_id', '=', splitId)
+        .where('subaccount_id', '=', subaccountId)
+        .execute();
+      return (await this.#loadSplit('id', splitId)) ?? notFound('split', splitId);
+    },
+    list: async (filter) => {
+      const { limit, offset } = page(filter);
+      let query = this.#db.selectFrom('splits').selectAll();
+      let count = this.#db
+        .selectFrom('splits')
+        .select(({ fn }) => fn.countAll<number>().as('total'));
+      if (filter?.provider) {
+        query = query.where('provider', '=', filter.provider);
+        count = count.where('provider', '=', filter.provider);
+      }
+      const rows = await query
+        .orderBy('created_at', 'desc')
+        .limit(limit)
+        .offset(offset)
+        .execute();
+      const items = await Promise.all(
+        rows.map(async (row) => map.toSplit(row, await this.#splitEntries(row.id))),
+      );
+      const total = await count.executeTakeFirst();
+      return { items, total: Number(total?.total ?? 0) };
+    },
+  };
+
+  readonly ledger: LedgerRepository = {
+    append: async (entry) => {
+      await this.#db.insertInto('balance_ledger').values(map.fromLedgerEntry(entry)).execute();
+      return entry;
+    },
+    net: async (provider, currency) => {
+      const row = await sql<{ net: number }>`
+        SELECT COALESCE(SUM(CASE WHEN direction = 'credit' THEN amount ELSE -amount END), 0)
+               AS net
+          FROM balance_ledger
+         WHERE provider = ${provider} AND currency = ${currency}
+      `.execute(this.#db);
+      return Number(row.rows[0]?.net ?? 0);
+    },
+    list: async (filter) => {
+      const { limit, offset } = page(filter);
+      let query = this.#db.selectFrom('balance_ledger').selectAll();
+      let count = this.#db
+        .selectFrom('balance_ledger')
+        .select(({ fn }) => fn.countAll<number>().as('total'));
+      if (filter?.provider) {
+        query = query.where('provider', '=', filter.provider);
+        count = count.where('provider', '=', filter.provider);
+      }
+      if (filter?.currency) {
+        query = query.where('currency', '=', filter.currency);
+        count = count.where('currency', '=', filter.currency);
+      }
+      const rows = await query
+        .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
+        .limit(limit)
+        .offset(offset)
+        .execute();
+      const total = await count.executeTakeFirst();
+      return { items: rows.map(map.toLedgerEntry), total: Number(total?.total ?? 0) };
+    },
+    currencies: async (provider) => {
+      const rows = await this.#db
+        .selectFrom('balance_ledger')
+        .select('currency')
+        .distinct()
+        .where('provider', '=', provider)
+        .execute();
+      return rows.map((r) => r.currency);
+    },
+  };
+
+  async #splitEntries(splitId: string) {
+    const rows = await this.#db
+      .selectFrom('split_subaccounts')
+      .innerJoin('subaccounts', 'subaccounts.id', 'split_subaccounts.subaccount_id')
+      .select([
+        'split_subaccounts.subaccount_id as subaccountId',
+        'subaccounts.provider_subaccount_code as subaccountCode',
+        'split_subaccounts.share as share',
+      ])
+      .where('split_subaccounts.split_id', '=', splitId)
+      .execute();
+    return rows.map((r) => ({
+      subaccountId: r.subaccountId,
+      subaccountCode: r.subaccountCode,
+      share: r.share,
+    }));
+  }
+
+  async #loadSplit(column: 'id', value: string) {
+    const row = await this.#db
+      .selectFrom('splits')
+      .selectAll()
+      .where(column, '=', value)
+      .executeTakeFirst();
+    return row ? map.toSplit(row, await this.#splitEntries(row.id)) : null;
+  }
 
   readonly recipients: RecipientRepository = {
     insert: async (recipient) => {

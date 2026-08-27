@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import { z } from 'zod';
 import {
   PayboxError,
   isSupportedCurrency,
@@ -34,6 +35,11 @@ import {
   submitBirthdaySchema,
   submitOtpSchema,
   submitPhoneSchema,
+  splitCreateSchema,
+  splitSubaccountSchema,
+  splitUpdateSchema,
+  subaccountCreateSchema,
+  subaccountUpdateSchema,
   submitPinSchema,
   subscriptionCreateSchema,
   subscriptionToggleSchema,
@@ -47,6 +53,8 @@ import {
   serializeInvoice,
   serializePlan,
   serializeRefund,
+  serializeSplit,
+  serializeSubaccount,
   serializeSubscription,
   serializeTransaction,
   serializeTransfer,
@@ -140,12 +148,26 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
   async function decorate(payment: Payment) {
     const customer = payment.customerId ? await storage.customers.byId(payment.customerId) : null;
     const events = await storage.events.listByResource(payment.id);
+    const split = await splitFor(payment);
     return serializeTransaction(payment, {
       customer,
       events,
       includeFees,
       authorization: await storedAuthorization(payment),
+      split,
+      // Only report a breakdown once money actually moved. Showing shares of
+      // a payment that never succeeded would misrepresent what was settled.
+      ...(split && payment.status === 'successful'
+        ? { splitBreakdown: engine.computeSplit(split, payment.amount) }
+        : {}),
     });
+  }
+
+  /** The split a transaction was created under, recorded in its metadata. */
+  async function splitFor(payment: Payment) {
+    const code = payment.metadata.split_code;
+    if (typeof code !== 'string' || code.length === 0) return null;
+    return storage.splits.byCode(PROVIDER, code.replace(/^SPL_/, ''));
   }
 
   /**
@@ -271,7 +293,12 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
       reference: body.reference,
       customerId: customer.id,
       callbackUrl: body.callback_url ?? null,
-      metadata: { ...normalizeMetadata(body.metadata), email: body.email },
+      metadata: {
+        ...normalizeMetadata(body.metadata),
+        email: body.email,
+        ...(body.split_code ? { split_code: body.split_code } : {}),
+        ...(body.subaccount ? { subaccount: body.subaccount } : {}),
+      },
       status: 'pending',
       providerStatus: 'pending',
       // Paystack checkout links are time-limited; modelling that is what makes
@@ -346,7 +373,11 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
       amount: body.amount,
       currency,
       reference: body.reference,
-      metadata: normalizeMetadata(body.metadata),
+      metadata: {
+        ...normalizeMetadata(body.metadata),
+        ...(body.split_code ? { split_code: body.split_code } : {}),
+        ...(body.subaccount ? { subaccount: body.subaccount } : {}),
+      },
     });
     return reply.send(ok('Charge attempted', await decorate(payment)));
   });
@@ -511,7 +542,12 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
       customerId: customer.id,
       paymentMethod: method,
       paymentMethodDetails: details,
-      metadata: { ...metadata, email: body.email },
+      metadata: {
+        ...metadata,
+        email: body.email,
+        ...(body.split_code ? { split_code: body.split_code } : {}),
+        ...(body.subaccount ? { subaccount: body.subaccount } : {}),
+      },
       status: 'pending',
       providerStatus: 'pending',
       expiresInMs: 10 * 60_000,
@@ -1197,6 +1233,241 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
       return reply.send(
         ok('Dedicated account retrieved', serializeDedicatedAccount(account, customer)),
       );
+    },
+  );
+
+  /* ---------------------------------------------------------------- *
+   * Marketplace: subaccounts, splits and balance
+   * ---------------------------------------------------------------- */
+
+  fastify.post('/subaccount', async (request, reply) => {
+    authenticate(request);
+    const body = subaccountCreateSchema.parse(request.body);
+    const subaccount = await engine.createSubaccount({
+      provider: PROVIDER,
+      businessName: body.business_name,
+      settlementBank: body.settlement_bank,
+      accountNumber: body.account_number,
+      percentageCharge: body.percentage_charge,
+      currency: (body.currency ?? 'NGN').toUpperCase(),
+      description: body.description ?? null,
+      primaryContactEmail: body.primary_contact_email ?? null,
+      primaryContactName: body.primary_contact_name ?? null,
+      primaryContactPhone: body.primary_contact_phone ?? null,
+      metadata: normalizeMetadata(body.metadata),
+    });
+    return reply.status(201).send(ok('Subaccount created', serializeSubaccount(subaccount)));
+  });
+
+  fastify.get('/subaccount', async (request, reply) => {
+    authenticate(request);
+    const { items, total } = await storage.subaccounts.list({ provider: PROVIDER, limit: 100 });
+    return reply.send({
+      status: true,
+      message: 'Subaccounts retrieved',
+      data: items.map(serializeSubaccount),
+      meta: { total, skipped: 0, perPage: 100, page: 1 },
+    });
+  });
+
+  async function requireSubaccount(handle: string) {
+    const code = handle.replace(/^ACCT_/, '');
+    const subaccount =
+      (await storage.subaccounts.byCode(PROVIDER, code)) ??
+      (await storage.subaccounts.byId(handle));
+    if (!subaccount) throw new PayboxError('not_found', `Subaccount ${handle} not found.`);
+    return subaccount;
+  }
+
+  fastify.get<{ Params: { code: string } }>('/subaccount/:code', async (request, reply) => {
+    authenticate(request);
+    const subaccount = await requireSubaccount(request.params.code);
+    return reply.send(ok('Subaccount retrieved', serializeSubaccount(subaccount)));
+  });
+
+  fastify.put<{ Params: { code: string } }>('/subaccount/:code', async (request, reply) => {
+    authenticate(request);
+    const body = subaccountUpdateSchema.parse(request.body);
+    const subaccount = await requireSubaccount(request.params.code);
+    const updated = await storage.subaccounts.update(subaccount.id, {
+      ...(body.business_name !== undefined ? { businessName: body.business_name } : {}),
+      ...(body.settlement_bank !== undefined ? { settlementBank: body.settlement_bank } : {}),
+      ...(body.account_number !== undefined ? { accountNumber: body.account_number } : {}),
+      ...(body.percentage_charge !== undefined
+        ? { percentageCharge: body.percentage_charge }
+        : {}),
+      ...(body.description !== undefined ? { description: body.description } : {}),
+      updatedAt: clock.nowISO(),
+    });
+    return reply.send(ok('Subaccount updated', serializeSubaccount(updated)));
+  });
+
+  /** Resolve `ACCT_...` codes to rows, preserving the caller's order. */
+  async function resolveSplitEntries(
+    entries: { subaccount: string; share: number }[],
+  ): Promise<{ subaccountId: string; subaccountCode: string; share: number }[]> {
+    const resolved = [];
+    for (const entry of entries) {
+      const subaccount = await requireSubaccount(entry.subaccount);
+      resolved.push({
+        subaccountId: subaccount.id,
+        subaccountCode: subaccount.providerSubaccountCode,
+        share: entry.share,
+      });
+    }
+    return resolved;
+  }
+
+  async function decorateSplit(split: Awaited<ReturnType<typeof engine.createSplit>>) {
+    const map = new Map<string, Awaited<ReturnType<typeof requireSubaccount>>>();
+    for (const entry of split.entries) {
+      const subaccount = await storage.subaccounts.byId(entry.subaccountId);
+      if (subaccount) map.set(entry.subaccountId, subaccount);
+    }
+    return serializeSplit(split, map);
+  }
+
+  fastify.post('/split', async (request, reply) => {
+    authenticate(request);
+    const body = splitCreateSchema.parse(request.body);
+    const split = await engine.createSplit({
+      provider: PROVIDER,
+      name: body.name,
+      type: body.type,
+      currency: body.currency,
+      entries: await resolveSplitEntries(body.subaccounts),
+      ...(body.bearer_type ? { bearerType: body.bearer_type } : {}),
+      ...(body.bearer_subaccount
+        ? { bearerSubaccountId: (await requireSubaccount(body.bearer_subaccount)).id }
+        : {}),
+    });
+    return reply.status(201).send(ok('Split created', await decorateSplit(split)));
+  });
+
+  fastify.get('/split', async (request, reply) => {
+    authenticate(request);
+    const { items, total } = await storage.splits.list({ provider: PROVIDER, limit: 100 });
+    const data = await Promise.all(items.map((split) => decorateSplit(split)));
+    return reply.send({
+      status: true,
+      message: 'Splits retrieved',
+      data,
+      meta: { total, skipped: 0, perPage: 100, page: 1 },
+    });
+  });
+
+  async function requireSplit(handle: string) {
+    const code = handle.replace(/^SPL_/, '');
+    const split =
+      (await storage.splits.byCode(PROVIDER, code)) ?? (await storage.splits.byId(handle));
+    if (!split) throw new PayboxError('not_found', `Split ${handle} not found.`);
+    return split;
+  }
+
+  fastify.get<{ Params: { id: string } }>('/split/:id', async (request, reply) => {
+    authenticate(request);
+    return reply.send(ok('Split retrieved', await decorateSplit(await requireSplit(request.params.id))));
+  });
+
+  fastify.put<{ Params: { id: string } }>('/split/:id', async (request, reply) => {
+    authenticate(request);
+    const body = splitUpdateSchema.parse(request.body);
+    const split = await requireSplit(request.params.id);
+    const updated = await storage.splits.update(split.id, {
+      ...(body.name !== undefined ? { name: body.name } : {}),
+      ...(body.active !== undefined ? { active: body.active } : {}),
+      ...(body.bearer_type !== undefined ? { bearerType: body.bearer_type } : {}),
+      updatedAt: clock.nowISO(),
+    });
+    return reply.send(ok('Split group updated', await decorateSplit(updated)));
+  });
+
+  fastify.post<{ Params: { id: string } }>(
+    '/split/:id/subaccount/add',
+    async (request, reply) => {
+      authenticate(request);
+      const body = splitSubaccountSchema.parse(request.body);
+      const split = await requireSplit(request.params.id);
+      const subaccount = await requireSubaccount(body.subaccount);
+
+      // Re-check the total, or repeated adds could push a percentage split
+      // past 100 one subaccount at a time.
+      const others = split.entries.filter((e) => e.subaccountId !== subaccount.id);
+      const total = others.reduce((sum, e) => sum + e.share, 0) + body.share;
+      if (split.type === 'percentage' && total > 100) {
+        throw new PayboxError(
+          'validation_failed',
+          `Adding ${body.share}% would bring the split to ${total}%, which exceeds 100.`,
+          { details: { total } },
+        );
+      }
+
+      const updated = await storage.splits.addSubaccount(split.id, subaccount.id, body.share);
+      return reply.send(ok('Subaccount added', await decorateSplit(updated)));
+    },
+  );
+
+  fastify.post<{ Params: { id: string } }>(
+    '/split/:id/subaccount/remove',
+    async (request, reply) => {
+      authenticate(request);
+      const body = z.object({ subaccount: z.string().min(1) }).parse(request.body);
+      const split = await requireSplit(request.params.id);
+      const subaccount = await requireSubaccount(body.subaccount);
+      const updated = await storage.splits.removeSubaccount(split.id, subaccount.id);
+      return reply.send(ok('Subaccount removed', await decorateSplit(updated)));
+    },
+  );
+
+  /**
+   * Balance, folded from the ledger.
+   *
+   * `GET /balance` reports every currency that has seen movement. A fresh
+   * emulator has none, so it reports the opening float in the default
+   * currency rather than an empty list, which would read as "broke".
+   */
+  fastify.get('/balance', async (request, reply) => {
+    authenticate(request);
+    const currencies = await storage.ledger.currencies(PROVIDER);
+    const listed = currencies.length > 0 ? currencies : ['NGN'];
+    const data = await Promise.all(
+      listed.map(async (currency) => ({
+        currency,
+        balance: await engine.getBalance(PROVIDER, currency),
+      })),
+    );
+    return reply.send(ok('Balances retrieved', data));
+  });
+
+  fastify.get<{ Querystring: { perPage?: string; page?: string; currency?: string } }>(
+    '/balance/ledger',
+    async (request, reply) => {
+      authenticate(request);
+      const perPage = Math.min(Number(request.query.perPage ?? 50) || 50, 200);
+      const pageNumber = Math.max(Number(request.query.page ?? 1) || 1, 1);
+      const { items, total } = await storage.ledger.list({
+        provider: PROVIDER,
+        limit: perPage,
+        offset: (pageNumber - 1) * perPage,
+        ...(request.query.currency ? { currency: request.query.currency.toUpperCase() } : {}),
+      });
+      return reply.send({
+        status: true,
+        message: 'Balance ledger retrieved',
+        data: items.map((entry) => ({
+          integration: 100_000,
+          domain: 'test',
+          balance: null,
+          currency: entry.currency,
+          difference: entry.direction === 'credit' ? entry.amount : -entry.amount,
+          reason: entry.reason,
+          model_responsible: entry.resourceId,
+          model_row: entry.resourceId,
+          created_at: entry.createdAt,
+          updated_at: entry.createdAt,
+        })),
+        meta: { total, skipped: (pageNumber - 1) * perPage, perPage, page: pageNumber },
+      });
     },
   );
 

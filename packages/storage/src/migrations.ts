@@ -357,4 +357,66 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_invoices_subscription ON invoices (subscription_id);
     `,
   },
+  {
+    id: '0006_marketplace',
+    sql: `
+      CREATE TABLE subaccounts (
+        id                      TEXT PRIMARY KEY,
+        provider                TEXT NOT NULL,
+        provider_subaccount_code TEXT NOT NULL,
+        business_name           TEXT NOT NULL,
+        settlement_bank         TEXT NOT NULL,
+        account_number          TEXT NOT NULL,
+        percentage_charge       REAL NOT NULL DEFAULT 0,
+        description             TEXT,
+        primary_contact_email   TEXT,
+        primary_contact_name    TEXT,
+        primary_contact_phone   TEXT,
+        currency                TEXT NOT NULL,
+        active                  INTEGER NOT NULL DEFAULT 1,
+        metadata                TEXT NOT NULL DEFAULT '{}',
+        created_at              TEXT NOT NULL,
+        updated_at              TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX idx_subaccounts_provider_code
+        ON subaccounts (provider, provider_subaccount_code);
+
+      CREATE TABLE splits (
+        id                   TEXT PRIMARY KEY,
+        provider             TEXT NOT NULL,
+        provider_split_code  TEXT NOT NULL,
+        name                 TEXT NOT NULL,
+        type                 TEXT NOT NULL,
+        currency             TEXT NOT NULL,
+        bearer_type          TEXT NOT NULL DEFAULT 'account',
+        bearer_subaccount_id TEXT REFERENCES subaccounts(id) ON DELETE SET NULL,
+        active               INTEGER NOT NULL DEFAULT 1,
+        created_at           TEXT NOT NULL,
+        updated_at           TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX idx_splits_provider_code ON splits (provider, provider_split_code);
+
+      CREATE TABLE split_subaccounts (
+        split_id      TEXT NOT NULL REFERENCES splits(id) ON DELETE CASCADE,
+        subaccount_id TEXT NOT NULL REFERENCES subaccounts(id) ON DELETE CASCADE,
+        share         REAL NOT NULL,
+        PRIMARY KEY (split_id, subaccount_id)
+      );
+
+      -- Append-only, like events. The balance is a fold over this table and is
+      -- never stored as a mutable number.
+      CREATE TABLE balance_ledger (
+        id          TEXT PRIMARY KEY,
+        provider    TEXT NOT NULL,
+        currency    TEXT NOT NULL,
+        direction   TEXT NOT NULL CHECK (direction IN ('credit', 'debit')),
+        amount      INTEGER NOT NULL CHECK (amount > 0),
+        reason      TEXT NOT NULL,
+        resource_id TEXT,
+        created_at  TEXT NOT NULL
+      );
+      CREATE INDEX idx_ledger_provider_currency ON balance_ledger (provider, currency);
+      CREATE INDEX idx_ledger_resource ON balance_ledger (resource_id);
+    `,
+  },
 ];

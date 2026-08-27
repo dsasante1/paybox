@@ -4,6 +4,7 @@ import type {
   DedicatedAccount,
   Invoice,
   InvoiceStatus,
+  LedgerEntry,
   Metadata,
   Payment,
   PaymentMethod,
@@ -14,6 +15,9 @@ import type {
   ProviderId,
   Refund,
   RefundStatus,
+  Split,
+  SplitEntry,
+  Subaccount,
   Subscription,
   SubscriptionStatus,
   Transfer,
@@ -31,7 +35,10 @@ import type {
   AuthorizationRow,
   DedicatedAccountRow,
   InvoiceRow,
+  LedgerEntryRow,
   PlanRow,
+  SplitRow,
+  SubaccountRow,
   SubscriptionRow,
   TransferRecipientRow,
   CustomerRow,
@@ -518,6 +525,116 @@ export function invoicePatch(patch: Partial<Invoice>): Partial<InvoiceRow> {
   if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
   return out;
 }
+
+export const toSubaccount = (row: SubaccountRow): Subaccount => ({
+  id: row.id,
+  provider: row.provider as ProviderId,
+  providerSubaccountCode: row.provider_subaccount_code,
+  businessName: row.business_name,
+  settlementBank: row.settlement_bank,
+  accountNumber: row.account_number,
+  percentageCharge: row.percentage_charge,
+  description: row.description,
+  primaryContactEmail: row.primary_contact_email,
+  primaryContactName: row.primary_contact_name,
+  primaryContactPhone: row.primary_contact_phone,
+  currency: row.currency,
+  active: row.active === 1,
+  metadata: readJson(row.metadata),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+export const fromSubaccount = (a: Subaccount): SubaccountRow => ({
+  id: a.id,
+  provider: a.provider,
+  provider_subaccount_code: a.providerSubaccountCode,
+  business_name: a.businessName,
+  settlement_bank: a.settlementBank,
+  account_number: a.accountNumber,
+  percentage_charge: a.percentageCharge,
+  description: a.description,
+  primary_contact_email: a.primaryContactEmail,
+  primary_contact_name: a.primaryContactName,
+  primary_contact_phone: a.primaryContactPhone,
+  currency: a.currency,
+  active: a.active ? 1 : 0,
+  metadata: writeJson(a.metadata),
+  created_at: a.createdAt,
+  updated_at: a.updatedAt,
+});
+
+export function subaccountPatch(patch: Partial<Subaccount>): Partial<SubaccountRow> {
+  const out: Partial<SubaccountRow> = {};
+  if (patch.businessName !== undefined) out.business_name = patch.businessName;
+  if (patch.settlementBank !== undefined) out.settlement_bank = patch.settlementBank;
+  if (patch.accountNumber !== undefined) out.account_number = patch.accountNumber;
+  if (patch.percentageCharge !== undefined) out.percentage_charge = patch.percentageCharge;
+  if (patch.description !== undefined) out.description = patch.description;
+  if (patch.primaryContactEmail !== undefined) {
+    out.primary_contact_email = patch.primaryContactEmail;
+  }
+  if (patch.primaryContactName !== undefined) out.primary_contact_name = patch.primaryContactName;
+  if (patch.primaryContactPhone !== undefined) {
+    out.primary_contact_phone = patch.primaryContactPhone;
+  }
+  if (patch.active !== undefined) out.active = patch.active ? 1 : 0;
+  if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
+  if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
+  return out;
+}
+
+/** Splits are assembled from two tables; `entries` comes from the join. */
+export const toSplit = (row: SplitRow, entries: SplitEntry[]): Split => ({
+  id: row.id,
+  provider: row.provider as ProviderId,
+  providerSplitCode: row.provider_split_code,
+  name: row.name,
+  type: row.type as Split['type'],
+  currency: row.currency,
+  bearerType: row.bearer_type as Split['bearerType'],
+  bearerSubaccountId: row.bearer_subaccount_id,
+  active: row.active === 1,
+  entries,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+export const fromSplit = (split: Split): SplitRow => ({
+  id: split.id,
+  provider: split.provider,
+  provider_split_code: split.providerSplitCode,
+  name: split.name,
+  type: split.type,
+  currency: split.currency,
+  bearer_type: split.bearerType,
+  bearer_subaccount_id: split.bearerSubaccountId,
+  active: split.active ? 1 : 0,
+  created_at: split.createdAt,
+  updated_at: split.updatedAt,
+});
+
+export const toLedgerEntry = (row: LedgerEntryRow): LedgerEntry => ({
+  id: row.id,
+  provider: row.provider as ProviderId,
+  currency: row.currency,
+  direction: row.direction as LedgerEntry['direction'],
+  amount: row.amount,
+  reason: row.reason,
+  resourceId: row.resource_id,
+  createdAt: row.created_at,
+});
+
+export const fromLedgerEntry = (entry: LedgerEntry): LedgerEntryRow => ({
+  id: entry.id,
+  provider: entry.provider,
+  currency: entry.currency,
+  direction: entry.direction,
+  amount: entry.amount,
+  reason: entry.reason,
+  resource_id: entry.resourceId,
+  created_at: entry.createdAt,
+});
 
 export const toEvent = (row: EventRow): PayboxEvent => ({
   id: row.id,

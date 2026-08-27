@@ -36,4 +36,11 @@ simulation:
   autoAdvance: true
   autoAdvanceDelayMs: 3000
 
+balance:
+  # Refuse a transfer the balance cannot cover, as a real provider does.
+  enforce: true
+  # Opening test float per currency, in minor units. Set to 0 to start empty
+  # and exercise the insufficient-funds path from the very first transfer.
+  opening: 10000000
+
 logLevel: info

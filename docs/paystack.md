@@ -59,10 +59,17 @@ build time.
 | `POST /subscription/enable` | **Compatible** | Resumes from now. |
 | `GET /subscription/{code}/manage/link` | **Partially compatible** | Returns a link; no hosted page behind it. |
 | `GET /subscription/{code}/invoices` | **Emulator-only** | Billing history; not a Paystack endpoint. |
+| `POST /subaccount`, `GET /subaccount` | **Compatible** | |
+| `GET /subaccount/{code}`, `PUT /subaccount/{code}` | **Compatible** | |
+| `POST /split`, `GET /split` | **Compatible** | Percentage and flat. |
+| `GET /split/{id}`, `PUT /split/{id}` | **Compatible** | |
+| `POST /split/{id}/subaccount/add`\|`remove` | **Compatible** | Re-checks the 100% ceiling. |
+| `GET /balance` | **Partially compatible** | Folded from the ledger; see below. |
+| `GET /balance/ledger` | **Partially compatible** | `balance` is null on each row. |
 | `POST /transferrecipient` | **Partially compatible** | `nuban` shape only; no bank-name resolution. |
 | `POST /transfer` | **Partially compatible** | Created in `pending`. Settle it from the dashboard or CLI. |
 | `GET /transfer/:id` | **Partially compatible** | |
-| Split payments, disputes, settlements, bulk transfers, balance, integration | **Not supported** | |
+| Disputes, settlements, bulk transfers, integration | **Not supported** | |
 
 ## Authentication
 
@@ -236,6 +243,58 @@ Repricing a plan with live subscriptions would silently reprice them.
 | `completed` | `complete` |
 | `cancelled` | `cancelled` |
 
+## Splits and the balance
+
+A transaction carries a split by passing `split_code` (or `subaccount`) to
+`/transaction/initialize`, `/charge` or `/transaction/charge_authorization`.
+The breakdown appears on the transaction as `fees_split`, and **only once the
+transaction has succeeded** — showing shares of a payment that never settled
+would misrepresent what was actually divided.
+
+| Split type | Behaviour |
+|---|---|
+| `percentage` | Each share is rounded **down**, so the parts can never sum to more than the whole. |
+| `flat` | Taken as-is, but **capped at the transaction amount**. |
+
+Shares totalling more than 100% are rejected at creation *and* on
+`subaccount/add`, so a split cannot be pushed past the ceiling one subaccount
+at a time.
+
+### Balance
+
+The balance is a **fold over an append-only ledger**, never a stored number —
+the same reasoning as the event log. Movements:
+
+| Event | Direction |
+|---|---|
+| Payment succeeds | credit |
+| Refund settles | debit |
+| Transfer created | debit (reserved immediately) |
+| Transfer fails or is reversed | credit (reservation released) |
+
+A transfer is **reserved when it is queued**, not when it settles. Waiting
+would let two queued payouts spend the same money; reserving inside the same
+transaction as the balance check is what stops that.
+
+**Transfers are refused when the balance cannot cover them** (HTTP 400,
+`insufficient_funds`), which is what a provider does. To make that usable, the
+emulator starts with an opening test float per currency:
+
+```yaml
+balance:
+  enforce: true
+  opening: 10000000   # PAYBOX_OPENING_BALANCE
+```
+
+The float is **not a ledger row**, so `paybox reset` cannot wipe it and the
+ledger stays a pure record of what the run actually did. Set `opening: 0` to
+start empty and exercise the insufficient-funds path from the first transfer,
+or `enforce: false` to switch the check off entirely.
+
+`GET /balance` reports every currency that has seen movement; on a fresh
+emulator that is nothing, so it reports the opening float in NGN rather than an
+empty list.
+
 ## Status mapping
 
 The emulator stores a canonical status and answers with Paystack's.
@@ -328,13 +387,12 @@ state transitions behind them are what this tool is actually asserting.
 ## Known limitations
 
 1. `GET /transaction` has no date-range filtering.
-3. Transfers do not model a balance — a transfer never fails for insufficient
-   funds unless you make it.
-4. Fees are approximate (above).
+3. Fees are approximate (above), and `fees_split` reports the **split**
+   breakdown rather than a breakdown of processing fees.
 5. Transaction ids are derived deterministically from the reference rather than
    allocated by a counter, so they are stable but not monotonic over time. This
    is deliberate: hash-derived ids stay stable when operations are reordered,
    which is what lets the test suite assert literal ids. A monotonic counter
    would be more faithful to Paystack and less useful here.
-6. `partial_debit` does not model a card balance (above).
-7. `GET /dedicated_account` ignores the documented query filters.
+8. `partial_debit` does not model a card balance (above).
+9. `GET /dedicated_account` ignores the documented query filters.

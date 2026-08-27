@@ -268,6 +268,56 @@ export interface InvoiceRow {
   updated_at: string;
 }
 
+export interface SubaccountRow {
+  id: string;
+  provider: string;
+  provider_subaccount_code: string;
+  business_name: string;
+  settlement_bank: string;
+  account_number: string;
+  percentage_charge: number;
+  description: string | null;
+  primary_contact_email: string | null;
+  primary_contact_name: string | null;
+  primary_contact_phone: string | null;
+  currency: string;
+  active: number;
+  metadata: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SplitRow {
+  id: string;
+  provider: string;
+  provider_split_code: string;
+  name: string;
+  type: string;
+  currency: string;
+  bearer_type: string;
+  bearer_subaccount_id: string | null;
+  active: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SplitSubaccountRow {
+  split_id: string;
+  subaccount_id: string;
+  share: number;
+}
+
+export interface LedgerEntryRow {
+  id: string;
+  provider: string;
+  currency: string;
+  direction: string;
+  amount: number;
+  reason: string;
+  resource_id: string | null;
+  created_at: string;
+}
+
 export interface MigrationRow {
   id: string;
   applied_at: string;
@@ -288,6 +338,10 @@ export interface Database {
   plans: PlanRow;
   subscriptions: SubscriptionRow;
   invoices: InvoiceRow;
+  subaccounts: SubaccountRow;
+  splits: SplitRow;
+  split_subaccounts: SplitSubaccountRow;
+  balance_ledger: LedgerEntryRow;
   transfer_recipients: TransferRecipientRow;
   event_sequences: EventSequenceRow;
   schema_migrations: MigrationRow;

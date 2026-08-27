@@ -111,6 +111,8 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
     bus,
     providerStatus,
     mintAuthorization,
+    enforceBalance: config.balance.enforce,
+    openingBalance: config.balance.opening,
   });
   const simulator = new PaymentSimulator({ engine, clock });
   const scenarios = new ScenarioRunner({ storage, clock, ids, simulator, engine });

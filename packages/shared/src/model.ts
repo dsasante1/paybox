@@ -250,6 +250,76 @@ export interface Invoice {
 }
 
 /**
+ * A marketplace participant that receives a share of transactions.
+ *
+ * Canonical: Stripe calls it a connected account, Flutterwave a subaccount.
+ * The bank details are synthetic and nothing is ever settled to them for real.
+ */
+export interface Subaccount {
+  id: string;
+  provider: ProviderId;
+  providerSubaccountCode: string;
+  businessName: string;
+  settlementBank: string;
+  accountNumber: string;
+  /** Percentage of each transaction this subaccount keeps. */
+  percentageCharge: number;
+  description: string | null;
+  primaryContactEmail: string | null;
+  primaryContactName: string | null;
+  primaryContactPhone: string | null;
+  currency: string;
+  active: boolean;
+  metadata: Metadata;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** How a transaction is divided between subaccounts. */
+export interface Split {
+  id: string;
+  provider: ProviderId;
+  providerSplitCode: string;
+  name: string;
+  type: 'percentage' | 'flat';
+  currency: string;
+  /** Who absorbs the processing fee. */
+  bearerType: 'subaccount' | 'account' | 'all-proportional' | 'all';
+  bearerSubaccountId: string | null;
+  active: boolean;
+  entries: SplitEntry[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One subaccount's stake in a split. `share` is a percent or a flat amount. */
+export interface SplitEntry {
+  subaccountId: string;
+  subaccountCode: string;
+  share: number;
+}
+
+/**
+ * One movement in the merchant's balance.
+ *
+ * Append-only, and the balance is a fold over it -- never a stored mutable
+ * number. Same reasoning as the event log: a running total you can only
+ * recompute is a total you can always audit, and one you cannot silently
+ * corrupt with a missed update.
+ */
+export interface LedgerEntry {
+  id: string;
+  provider: ProviderId;
+  currency: string;
+  direction: 'credit' | 'debit';
+  amount: number;
+  reason: string;
+  /** The payment, refund or transfer that caused the movement. */
+  resourceId: string | null;
+  createdAt: string;
+}
+
+/**
  * An entry in the append-only event log (spec §8).
  *
  * The event log -- not the payment row -- is the source of truth for history.

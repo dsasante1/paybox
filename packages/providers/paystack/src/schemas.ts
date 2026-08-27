@@ -31,6 +31,10 @@ export const initializeSchema = z.object({
   metadata: z.union([z.record(z.string(), z.unknown()), z.string()]).optional(),
   channels: z.array(z.string()).optional(),
   label: z.string().optional(),
+  split_code: z.string().optional(),
+  subaccount: z.string().optional(),
+  transaction_charge: z.union([z.number(), z.string()]).optional(),
+  bearer: z.enum(['account', 'subaccount']).optional(),
 });
 
 export const chargeSchema = z.object({
@@ -39,6 +43,8 @@ export const chargeSchema = z.object({
   currency: z.string().length(3).optional(),
   reference: z.string().min(1).max(100).optional(),
   metadata: z.union([z.record(z.string(), z.unknown()), z.string()]).optional(),
+  split_code: z.string().optional(),
+  subaccount: z.string().optional(),
   mobile_money: z
     .object({
       phone: z.string().min(6),
@@ -193,6 +199,50 @@ export const subscriptionCreateSchema = z.object({
 export const subscriptionToggleSchema = z.object({
   code: z.string().min(1),
   token: z.string().min(1),
+});
+
+/** Schemas `SubaccountCreate` and `SplitCreate` from the pinned OpenAPI spec. */
+export const subaccountCreateSchema = z.object({
+  business_name: z.string().min(1),
+  settlement_bank: z.string().min(1),
+  account_number: z.string().min(4),
+  percentage_charge: z.union([z.number(), z.string()]).transform(Number),
+  description: z.string().optional(),
+  primary_contact_email: z.string().email().optional(),
+  primary_contact_name: z.string().optional(),
+  primary_contact_phone: z.string().optional(),
+  currency: z.string().length(3).optional(),
+  metadata: z.union([z.record(z.string(), z.unknown()), z.string()]).optional(),
+});
+
+export const subaccountUpdateSchema = subaccountCreateSchema.partial();
+
+export const splitCreateSchema = z.object({
+  name: z.string().min(1),
+  type: z.enum(['percentage', 'flat']),
+  currency: z.enum(['NGN', 'GHS', 'ZAR', 'USD']),
+  subaccounts: z
+    .array(
+      z.object({
+        subaccount: z.string().min(1),
+        share: z.union([z.number(), z.string()]).transform(Number),
+      }),
+    )
+    .min(1),
+  bearer_type: z.enum(['subaccount', 'account', 'all-proportional', 'all']).optional(),
+  bearer_subaccount: z.string().optional(),
+});
+
+export const splitUpdateSchema = z.object({
+  name: z.string().optional(),
+  active: z.boolean().optional(),
+  bearer_type: z.enum(['subaccount', 'account', 'all-proportional', 'all']).optional(),
+  bearer_subaccount: z.string().optional(),
+});
+
+export const splitSubaccountSchema = z.object({
+  subaccount: z.string().min(1),
+  share: z.union([z.number(), z.string()]).transform(Number),
 });
 
 export const refundSchema = z.object({

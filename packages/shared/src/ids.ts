@@ -19,6 +19,9 @@ export const ID_PREFIXES = [
   'pln', // plan
   'sub', // subscription
   'inv', // invoice
+  'sac', // subaccount
+  'spl', // transaction split
+  'led', // balance ledger entry
   'whd', // webhook delivery
   'whe', // webhook endpoint
   'job', // scheduled job

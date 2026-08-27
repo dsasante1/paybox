@@ -4,6 +4,8 @@ import type {
   DedicatedAccount,
   Invoice,
   Plan,
+  Split,
+  Subaccount,
   Subscription,
   Payment,
   PayboxEvent,
@@ -66,6 +68,10 @@ export interface SerializeOptions {
   /** Canonical events for this payment, rendered into Paystack's `log`. */
   events?: PayboxEvent[];
   includeFees?: boolean;
+  /** The split this transaction was divided under, if any. */
+  split?: Split | null;
+  /** What each subaccount received, computed by the engine. */
+  splitBreakdown?: { entries: { subaccountCode: string; amount: number }[]; merchant: number };
   /**
    * The authorization minted when this payment succeeded, if there is one.
    * Preferred over the synthesised shape below, so the `authorization_code` a
@@ -225,11 +231,16 @@ export function serializeTransaction(payment: Payment, options: SerializeOptions
     metadata: payment.metadata,
     log: paystackLog(payment, options.events),
     fees,
-    fees_split: null,
+    fees_split: options.splitBreakdown
+      ? {
+          subaccounts: options.splitBreakdown.entries,
+          merchant: options.splitBreakdown.merchant,
+        }
+      : null,
     authorization: paystackAuthorization(payment, options.authorization),
     customer: paystackCustomer(payment, options.customer),
     plan: null,
-    split: {},
+    split: options.split ? serializeSplit(options.split) : {},
     order_id: null,
     // Paystack returns both snake_case and camelCase spellings of these two.
     paidAt: payment.paidAt,
@@ -451,6 +462,62 @@ export function serializeInvoice(invoice: Invoice, payment?: Payment | null) {
     created_at: invoice.createdAt,
     updated_at: invoice.updatedAt,
     transaction: payment ? serializeTransaction(payment) : null,
+  };
+}
+
+/** Schema `SubaccountCreateResponse.data`. */
+export function serializeSubaccount(subaccount: Subaccount) {
+  return {
+    id: numericTransactionId(subaccount.providerSubaccountCode),
+    subaccount_code: `ACCT_${subaccount.providerSubaccountCode}`,
+    business_name: subaccount.businessName,
+    description: subaccount.description,
+    primary_contact_name: subaccount.primaryContactName,
+    primary_contact_email: subaccount.primaryContactEmail,
+    primary_contact_phone: subaccount.primaryContactPhone,
+    metadata: subaccount.metadata,
+    percentage_charge: subaccount.percentageCharge,
+    is_verified: true,
+    settlement_bank: subaccount.settlementBank,
+    account_number: subaccount.accountNumber,
+    settlement_schedule: 'AUTO',
+    active: subaccount.active,
+    migrate: false,
+    integration: 100_000,
+    domain: 'test',
+    currency: subaccount.currency,
+    createdAt: subaccount.createdAt,
+    updatedAt: subaccount.updatedAt,
+  };
+}
+
+/** Schema `SplitCreateResponse.data`. */
+export function serializeSplit(split: Split, subaccounts: Map<string, Subaccount> = new Map()) {
+  return {
+    id: numericTransactionId(split.providerSplitCode),
+    name: split.name,
+    type: split.type,
+    currency: split.currency,
+    integration: 100_000,
+    domain: 'test',
+    split_code: `SPL_${split.providerSplitCode}`,
+    active: split.active,
+    bearer_type: split.bearerType,
+    bearer_subaccount: split.bearerSubaccountId
+      ? numericTransactionId(split.bearerSubaccountId)
+      : null,
+    createdAt: split.createdAt,
+    updatedAt: split.updatedAt,
+    subaccounts: split.entries.map((entry) => {
+      const subaccount = subaccounts.get(entry.subaccountId);
+      return {
+        subaccount: subaccount
+          ? serializeSubaccount(subaccount)
+          : { subaccount_code: `ACCT_${entry.subaccountCode}` },
+        share: entry.share,
+      };
+    }),
+    total_subaccounts: split.entries.length,
   };
 }
 

@@ -18,6 +18,10 @@ const HTTP_STATUS: Partial<Record<ErrorCode, number>> = {
   duplicate_reference: 400,
   idempotency_conflict: 409,
   invalid_state_transition: 400,
+  // A transfer the balance cannot cover is a rejected request, not a decline:
+  // nothing was attempted. Declines never reach here -- they settle the
+  // payment as failed and return 200 with the failure on the transaction.
+  insufficient_funds: 400,
   unsupported_operation: 501,
   rate_limited: 429,
   safety_violation: 403,
