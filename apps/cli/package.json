@@ -1,0 +1,20 @@
+{
+  "name": "@paybox/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@paybox/shared": "0.1.0",
+    "@paybox/core": "0.1.0",
+    "commander": "^15.0.0",
+    "picocolors": "^1.1.1",
+    "cli-table3": "^0.6.5",
+    "@paybox/api": "0.1.0"
+  },
+  "bin": {
+    "paybox": "./src/main.ts"
+  }
+}
