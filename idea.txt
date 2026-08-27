@@ -1,0 +1,1871 @@
+# Build a “paybox” — Local Payment Infrastructure Emulator
+
+## Objective
+
+Build a developer-focused local payment infrastructure emulator inspired by Floci.
+
+The product should allow developers to run a complete, deterministic, local version of common payment-provider integrations without making real API calls or requiring access to provider sandbox environments.
+
+The primary goal is:
+
+> A developer should be able to point an existing application from Stripe, Paystack, Flutterwave, Kora, or another supported payment provider to a local endpoint and test realistic payment flows entirely on their machine.
+
+The system should emulate the provider's API behavior closely enough that existing SDKs or applications can be configured to communicate with the emulator with minimal or no code changes.
+
+The emulator must support:
+
+* Payment initialization
+* Payment authorization
+* Payment confirmation
+* Payment verification
+* Payment capture
+* Payment failure
+* Payment cancellation
+* Payment expiration
+* Refunds
+* Partial refunds
+* Transfers/payouts
+* Mobile-money payments
+* Card payments
+* Bank payments
+* Virtual accounts where applicable
+* Customers
+* Payment methods
+* Transactions
+* Webhooks
+* Webhook retries
+* Idempotency
+* Provider-specific response formats
+* Provider-specific error formats
+* Configurable latency
+* Deterministic failure scenarios
+* Dashboard for inspecting and controlling transactions
+* CLI for scripting simulations
+* REST API
+* Persistent local storage
+* Docker support
+* Automated tests
+
+---
+
+# 1. Product Vision
+
+The product should feel like:
+
+```text
+                    Payment Emulator
+                          │
+       ┌──────────────────┼──────────────────┐
+       │                  │                  │
+       ▼                  ▼                  ▼
+    Stripe             Paystack          Flutterwave
+    Adapter             Adapter             Adapter
+       │                  │                  │
+       └──────────────────┬──────────────────┘
+                          │
+                          ▼
+                    Emulator Core
+                          │
+             ┌────────────┼────────────┐
+             ▼            ▼            ▼
+          Payments      Webhooks     Events
+             │            │            │
+             └────────────┼────────────┘
+                          ▼
+                    Local Database
+```
+
+The core engine should be provider-independent.
+
+Provider adapters should translate between:
+
+```text
+Provider API
+     ↓
+Provider Adapter
+     ↓
+Canonical Payment Model
+     ↓
+Payment Engine
+     ↓
+Provider Adapter
+     ↓
+Provider API Response
+```
+
+This separation is extremely important.
+
+Do NOT implement each provider as an independent application.
+
+---
+
+# 2. Core Architecture
+
+Use a modular architecture.
+
+Recommended structure:
+
+```text
+payment-emulator/
+├── apps/
+│   ├── api/
+│   ├── dashboard/
+│   └── cli/
+│
+├── packages/
+│   ├── core/
+│   ├── providers/
+│   │   ├── stripe/
+│   │   ├── paystack/
+│   │   ├── flutterwave/
+│   │   └── kora/
+│   │
+│   ├── webhooks/
+│   ├── storage/
+│   ├── simulator/
+│   └── shared/
+│
+├── docker/
+├── docs/
+├── examples/
+└── tests/
+```
+
+Use TypeScript throughout unless there is a strong technical reason not to.
+
+Recommended stack:
+
+* Node.js
+* TypeScript
+* Fastify or Express
+* PostgreSQL or SQLite for local persistence
+* Redis optionally for queues/events
+* BullMQ for webhook/event scheduling if Redis is used
+* React for dashboard
+* Vite for frontend
+* Docker
+* Vitest/Jest for tests
+* Zod for request/response validation
+
+The architecture should allow SQLite for the simplest local installation and PostgreSQL for advanced/Docker deployments.
+
+---
+
+# 3. Provider Adapter Architecture
+
+Create a provider interface.
+
+Conceptually:
+
+```typescript
+interface PaymentProvider {
+  initializePayment(input): Promise<ProviderPayment>;
+  verifyPayment(reference): Promise<ProviderPayment>;
+  authorizePayment(input): Promise<ProviderPayment>;
+  capturePayment(input): Promise<ProviderPayment>;
+  cancelPayment(input): Promise<ProviderPayment>;
+  refundPayment(input): Promise<ProviderRefund>;
+  createTransfer(input): Promise<ProviderTransfer>;
+}
+```
+
+Provider adapters implement this interface.
+
+Example:
+
+```text
+StripeAdapter
+PaystackAdapter
+FlutterwaveAdapter
+KoraAdapter
+```
+
+However, provider-specific behavior must NOT be unnecessarily normalized away.
+
+For example:
+
+* Paystack has its own reference model
+* Stripe has PaymentIntent/Charge concepts
+* Flutterwave has its own transaction model
+* Kora has its own transaction/payment models
+
+The emulator should preserve provider-specific semantics at the API boundary while internally maintaining a canonical model.
+
+---
+
+# 4. Canonical Payment Model
+
+Create an internal transaction model.
+
+Example:
+
+```typescript
+Payment {
+  id
+  provider
+  providerTransactionId
+  reference
+  amount
+  currency
+  status
+  paymentMethod
+  customer
+  metadata
+  createdAt
+  updatedAt
+}
+```
+
+Statuses should include at minimum:
+
+```text
+created
+pending
+processing
+requires_action
+authorized
+successful
+failed
+cancelled
+expired
+refunded
+partially_refunded
+```
+
+Do not assume every provider supports every status.
+
+The adapter should map provider-specific states into canonical states while retaining the original provider status.
+
+Store both:
+
+```text
+canonical_status
+provider_status
+```
+
+---
+
+# 5. Payment Methods
+
+Support:
+
+## Cards
+
+Examples:
+
+```text
+Visa
+Mastercard
+Verve
+```
+
+Simulate:
+
+```text
+successful card
+declined card
+expired card
+insufficient funds
+authentication required
+3DS required
+3DS failed
+```
+
+Do NOT process real card information.
+
+The emulator must never be capable of charging a real card.
+
+Use obvious test card numbers or synthetic identifiers only.
+
+Never store CVV or other sensitive authentication data.
+
+---
+
+## Mobile Money
+
+This is particularly important for African payment providers.
+
+Support providers/methods such as:
+
+```text
+MTN Mobile Money
+Vodafone/Cash
+AirtelTigo
+```
+
+Simulate:
+
+```text
+payment initiated
+awaiting customer authorization
+customer approved
+customer rejected
+timeout
+insufficient balance
+network failure
+provider failure
+```
+
+Example:
+
+```text
+POST /payment
+       │
+       ▼
+pending
+       │
+       ▼
+awaiting_authorization
+       │
+       ├── approve
+       │      ↓
+       │   successful
+       │
+       ├── reject
+       │      ↓
+       │   failed
+       │
+       └── timeout
+              ↓
+           expired
+```
+
+---
+
+# 6. Bank Payments
+
+Support simulated:
+
+```text
+bank transfer
+bank authorization
+bank account verification
+bank payment pending
+bank payment successful
+bank payment failed
+```
+
+The implementation should be provider-specific where required.
+
+---
+
+# 7. Payment State Machine
+
+Implement an explicit transaction state machine.
+
+For example:
+
+```text
+created
+   ↓
+pending
+   ↓
+processing
+   ├───────────────┐
+   ▼               ▼
+successful       failed
+   │
+   ▼
+refunded
+```
+
+Some payments may follow:
+
+```text
+created
+ ↓
+requires_action
+ ↓
+authorized
+ ↓
+captured
+ ↓
+successful
+```
+
+Invalid transitions must be rejected.
+
+For example:
+
+```text
+failed → successful
+```
+
+should not be allowed unless explicitly simulated as a provider reversal/retry event.
+
+All state transitions must produce events.
+
+---
+
+# 8. Event System
+
+Every meaningful state change should generate an internal event.
+
+Example:
+
+```text
+payment.created
+payment.pending
+payment.processing
+payment.requires_action
+payment.authorized
+payment.successful
+payment.failed
+payment.cancelled
+payment.expired
+payment.refunded
+payment.partially_refunded
+transfer.created
+transfer.processing
+transfer.successful
+transfer.failed
+```
+
+Events should contain:
+
+```json
+{
+  "id": "evt_xxx",
+  "type": "payment.successful",
+  "payment_id": "pay_xxx",
+  "provider": "paystack",
+  "timestamp": "...",
+  "data": {}
+}
+```
+
+---
+
+# 9. Webhook Engine
+
+Webhooks are one of the most important parts of the product.
+
+A developer should be able to configure:
+
+```text
+Webhook URL:
+http://localhost:3000/webhooks/paystack
+```
+
+When a payment succeeds, the emulator should send the appropriate provider-formatted webhook.
+
+Example:
+
+```text
+Payment successful
+       ↓
+Event generated
+       ↓
+Webhook dispatcher
+       ↓
+POST /webhooks/paystack
+       ↓
+Developer application
+```
+
+Support:
+
+* Webhook signing
+* Provider-specific signature formats
+* Retry policies
+* Exponential backoff
+* Failed webhook delivery
+* Timeout simulation
+* Duplicate webhook delivery
+* Out-of-order webhook delivery
+* Manual retry
+* Webhook delivery history
+
+The dashboard should show:
+
+```text
+Webhook
+Status
+HTTP status
+Attempts
+Duration
+Created
+Next retry
+Response
+```
+
+---
+
+# 10. Webhook Failure Simulation
+
+Developers must be able to simulate real-world webhook problems.
+
+Examples:
+
+```text
+return HTTP 500
+return HTTP 400
+timeout
+connection refused
+slow response
+duplicate delivery
+deliver events out of order
+```
+
+CLI examples:
+
+```bash
+payemu webhook retry evt_123
+payemu webhook replay evt_123
+payemu webhook fail evt_123
+```
+
+---
+
+# 11. Payment Simulation Engine
+
+Create a powerful simulation engine.
+
+Developers should be able to specify:
+
+```text
+success
+failure
+delay
+timeout
+decline
+insufficient_funds
+provider_error
+network_error
+authentication_required
+```
+
+Example:
+
+```bash
+payemu simulate payment \
+  --reference=test_123 \
+  --result=success
+```
+
+Or:
+
+```bash
+payemu simulate payment \
+  --reference=test_123 \
+  --result=insufficient_funds
+```
+
+The simulation should trigger the correct:
+
+1. State transition
+2. Provider response
+3. Event
+4. Webhook
+5. Database update
+
+---
+
+# 12. Scenario System
+
+Implement reusable scenarios.
+
+Example:
+
+```yaml
+name: mobile-money-success
+
+steps:
+  - status: pending
+    delay: 0ms
+
+  - status: processing
+    delay: 2s
+
+  - status: successful
+    delay: 5s
+
+  - webhook: payment.successful
+    delay: 1s
+```
+
+Another:
+
+```yaml
+name: payment-timeout
+
+steps:
+  - status: pending
+  - delay: 30s
+  - status: expired
+  - webhook: payment.expired
+```
+
+Allow developers to create custom scenarios.
+
+---
+
+# 13. API Compatibility
+
+Provider endpoints should resemble the real provider APIs as closely as practical.
+
+For example:
+
+```text
+/api/paystack/transaction/initialize
+/api/paystack/transaction/verify/:reference
+
+/api/flutterwave/transactions
+/api/flutterwave/transactions/:id
+
+/api/kora/payments
+```
+
+The exact endpoint structure should be based on the current official provider documentation.
+
+Do not invent provider API behavior when official documentation is available.
+
+Create compatibility tests based on provider documentation.
+
+---
+
+# 14. SDK Compatibility
+
+Allow configuration like:
+
+```typescript
+const paystack = new Paystack({
+  secretKey: "test_key",
+  baseURL: "http://localhost:8080/paystack"
+});
+```
+
+The objective should be that an existing integration can switch to the emulator by changing:
+
+```text
+API base URL
+```
+
+and potentially credentials.
+
+Where provider SDKs do not support custom base URLs, provide a documented adapter/proxy approach.
+
+---
+
+# 15. API Keys
+
+Implement fake local credentials.
+
+For example:
+
+```text
+pk_test_local_xxx
+sk_test_local_xxx
+```
+
+Never allow the emulator to accidentally send requests to real payment providers.
+
+The emulator should reject real-looking production credentials unless explicitly configured otherwise.
+
+---
+
+# 16. Idempotency
+
+Implement realistic idempotency behavior.
+
+For requests containing:
+
+```text
+Idempotency-Key
+```
+
+return the same logical response for repeated requests.
+
+Test:
+
+```text
+Request A
+Request A again
+Request A again
+```
+
+The application should receive the same result rather than creating duplicate transactions.
+
+Support provider-specific idempotency semantics.
+
+---
+
+# 17. Currency
+
+Support multiple currencies.
+
+At minimum:
+
+```text
+GHS
+USD
+NGN
+KES
+ZAR
+GBP
+EUR
+```
+
+Do not perform real FX conversions unless explicitly requested.
+
+The emulator should preserve the amount/currency supplied by the developer.
+
+---
+
+# 18. Refunds
+
+Support:
+
+```text
+full refund
+partial refund
+multiple partial refunds
+refund failure
+refund pending
+refund successful
+```
+
+Enforce:
+
+```text
+total_refunded <= original_amount
+```
+
+Generate appropriate events/webhooks.
+
+---
+
+# 19. Transfers / Payouts
+
+Where supported by the provider, implement:
+
+```text
+create transfer
+transfer pending
+transfer processing
+transfer successful
+transfer failed
+transfer reversed
+```
+
+Support simulated recipients.
+
+Never send actual money.
+
+---
+
+# 20. Customers
+
+Implement provider-compatible customer APIs where relevant.
+
+Support:
+
+```text
+create customer
+retrieve customer
+update customer
+list customers
+```
+
+Store:
+
+```text
+name
+email
+phone
+metadata
+provider_customer_id
+```
+
+Avoid storing unnecessary sensitive information.
+
+---
+
+# 21. Dashboard
+
+Build a local web dashboard.
+
+Example:
+
+```text
+http://localhost:8080
+```
+
+Dashboard sections:
+
+```text
+Overview
+Payments
+Transactions
+Customers
+Refunds
+Transfers
+Webhooks
+Events
+Providers
+Scenarios
+Settings
+```
+
+---
+
+# 22. Payment Dashboard
+
+Show:
+
+```text
+Reference
+Provider
+Amount
+Currency
+Method
+Status
+Created
+Updated
+```
+
+Clicking a payment should show:
+
+```text
+Payment details
+State history
+Events
+Webhook deliveries
+Provider response
+Metadata
+Simulation controls
+```
+
+Example controls:
+
+```text
+[ Mark Successful ]
+[ Mark Failed ]
+[ Simulate Timeout ]
+[ Refund ]
+[ Replay Webhook ]
+```
+
+---
+
+# 23. Timeline
+
+Every transaction should have a visual event timeline.
+
+Example:
+
+```text
+13:01:22  Payment created
+13:01:23  Payment pending
+13:01:25  Payment processing
+13:01:29  Payment successful
+13:01:30  Webhook delivered
+13:01:30  Application returned HTTP 200
+```
+
+This will be extremely useful for debugging integrations.
+
+---
+
+# 24. CLI
+
+Create a CLI:
+
+```bash
+payemu
+```
+
+Commands:
+
+```bash
+payemu start
+payemu stop
+payemu status
+
+payemu payment list
+payemu payment get <id>
+
+payemu payment success <id>
+payemu payment fail <id>
+payemu payment refund <id>
+
+payemu webhook list
+payemu webhook retry <id>
+payemu webhook replay <id>
+
+payemu scenario list
+payemu scenario run <scenario>
+
+payemu provider list
+```
+
+Also support:
+
+```bash
+payemu logs
+payemu reset
+payemu seed
+```
+
+---
+
+# 25. Configuration
+
+Configuration should support:
+
+```yaml
+port: 8080
+
+database:
+  type: sqlite
+  path: ./data/payment-emulator.db
+
+webhooks:
+  retry:
+    enabled: true
+    max_attempts: 5
+
+providers:
+  stripe:
+    enabled: true
+
+  paystack:
+    enabled: true
+
+  flutterwave:
+    enabled: true
+
+  kora:
+    enabled: true
+```
+
+Environment variables should also be supported.
+
+---
+
+# 26. Docker
+
+Provide a Docker image.
+
+Example:
+
+```bash
+docker run -p 8080:8080 payment-emulator
+```
+
+Also provide:
+
+```text
+docker-compose.yml
+```
+
+for:
+
+```text
+payment emulator
+postgres
+redis
+dashboard
+```
+
+The simplest installation should NOT require Kubernetes.
+
+---
+
+# 27. Persistence
+
+Data should survive restarts when persistence is enabled.
+
+Persist:
+
+```text
+payments
+transactions
+customers
+refunds
+transfers
+events
+webhooks
+scenarios
+provider configuration
+```
+
+Provide:
+
+```bash
+payemu reset
+```
+
+to delete local state.
+
+---
+
+# 28. Seed Data
+
+Provide test data generation.
+
+Example:
+
+```bash
+payemu seed
+```
+
+Generate:
+
+```text
+successful payment
+failed payment
+pending payment
+mobile-money payment
+card payment
+refund
+transfer
+failed webhook
+```
+
+---
+
+# 29. Security
+
+The emulator must be safe by design.
+
+Important rules:
+
+* Never process real payments.
+* Never send real payment requests by default.
+* Never require real provider credentials.
+* Never store real card details.
+* Never store CVV.
+* Clearly label all generated credentials as TEST/LOCAL.
+* Bind to localhost by default.
+* Require explicit configuration to expose the server externally.
+* Warn when binding to `0.0.0.0`.
+* Prevent accidental production API calls.
+
+---
+
+# 30. Provider Isolation
+
+Provider implementations must be isolated.
+
+Example:
+
+```text
+providers/
+  stripe/
+  paystack/
+  flutterwave/
+  kora/
+```
+
+Each adapter should contain:
+
+```text
+routes
+controllers
+schemas
+models
+mappers
+webhook formatter
+signature implementation
+error mapper
+fixtures
+tests
+```
+
+Do not let provider-specific logic leak into the core engine.
+
+---
+
+# 31. Provider Documentation
+
+Create documentation for each provider.
+
+For every supported provider document:
+
+```text
+Supported endpoints
+Supported payment methods
+Supported statuses
+Webhook events
+Signature verification
+Error responses
+Idempotency
+Refunds
+Transfers
+Known limitations
+```
+
+Clearly distinguish:
+
+```text
+Compatible
+Partially compatible
+Not supported
+```
+
+Never claim full compatibility if the implementation does not provide it.
+
+---
+
+# 32. Stripe
+
+Implement the most important Stripe payment flows first.
+
+Prioritize:
+
+```text
+PaymentIntents
+Charges
+PaymentMethods
+Customers
+Refunds
+Webhooks
+```
+
+Support common states such as:
+
+```text
+requires_payment_method
+requires_confirmation
+requires_action
+processing
+succeeded
+canceled
+```
+
+Preserve Stripe-like response structures.
+
+---
+
+# 33. Paystack
+
+Prioritize:
+
+```text
+transaction initialization
+transaction verification
+transaction listing
+transaction charge
+refunds
+transfers where applicable
+webhooks
+```
+
+Support realistic:
+
+```text
+card
+bank
+mobile money
+USSD
+```
+
+where appropriate.
+
+Implement Paystack-compatible webhook payloads and signatures.
+
+---
+
+# 34. Flutterwave
+
+Prioritize:
+
+```text
+payment initialization
+payment verification
+transactions
+refunds
+transfers
+webhooks
+```
+
+Support realistic payment methods including:
+
+```text
+cards
+mobile money
+bank transfer
+```
+
+Implement provider-compatible response and webhook structures.
+
+---
+
+# 35. Kora
+
+Implement the core payment flows supported by Kora.
+
+Prioritize:
+
+```text
+payment initialization
+payment verification
+mobile money
+cards
+bank payments
+webhooks
+refunds
+transfers where applicable
+```
+
+Use the official Kora documentation to determine exact endpoint structures and supported behavior.
+
+---
+
+# 36. Provider Test Fixtures
+
+Create fixtures for common scenarios.
+
+Example:
+
+```text
+fixtures/
+  paystack/
+    success.json
+    failed.json
+    pending.json
+    webhook-success.json
+
+  flutterwave/
+    success.json
+    failed.json
+    pending.json
+
+  stripe/
+    payment-intent-success.json
+    payment-intent-failed.json
+
+  kora/
+    success.json
+    failed.json
+```
+
+These should be used by automated compatibility tests.
+
+---
+
+# 37. Testing Strategy
+
+Create three levels of tests.
+
+## Unit tests
+
+Test:
+
+```text
+state machine
+provider adapters
+mappers
+webhook signatures
+idempotency
+refund calculations
+scenario engine
+```
+
+## Integration tests
+
+Test:
+
+```text
+HTTP API
+database
+webhooks
+CLI
+dashboard API
+```
+
+## Provider compatibility tests
+
+Test that the emulator's responses match documented provider structures.
+
+Do NOT test against production payment APIs.
+
+Where sandbox testing is useful, keep it as an optional separate integration suite.
+
+---
+
+# 38. Example Developer Experience
+
+The ideal experience should look like:
+
+```bash
+npm install -g payemu
+```
+
+Then:
+
+```bash
+payemu start
+```
+
+Output:
+
+```text
+Payment Emulator running
+
+API:       http://localhost:8080
+Dashboard: http://localhost:8080/dashboard
+
+Providers:
+✓ Stripe
+✓ Paystack
+✓ Flutterwave
+✓ Kora
+```
+
+Developer then changes:
+
+```env
+PAYSTACK_BASE_URL=http://localhost:8080/paystack
+```
+
+Their existing backend runs normally.
+
+They initialize a payment.
+
+The dashboard immediately shows:
+
+```text
+Payment
+--------------------------------
+Reference: order_123
+Provider: Paystack
+Amount: GHS 100.00
+Status: pending
+Method: mobile_money
+```
+
+The developer clicks:
+
+```text
+[ Simulate Success ]
+```
+
+The emulator transitions:
+
+```text
+pending
+   ↓
+processing
+   ↓
+successful
+```
+
+and sends:
+
+```text
+POST /webhooks/paystack
+```
+
+Their application receives the webhook exactly as it would from the provider.
+
+---
+
+# 39. Advanced Feature: Time Control
+
+Implement controllable time for deterministic testing.
+
+For example:
+
+```bash
+payemu time freeze
+payemu time advance 30s
+payemu time advance 5m
+```
+
+This allows developers to test:
+
+```text
+payment expiration
+webhook retry
+authorization timeout
+pending payment timeout
+scheduled refunds
+```
+
+without actually waiting.
+
+This should be implemented carefully so that production-like application behavior remains predictable.
+
+---
+
+# 40. Advanced Feature: Network Simulation
+
+Allow developers to simulate:
+
+```text
+latency
+packet failure
+connection reset
+HTTP 500
+HTTP 429
+timeout
+```
+
+Example:
+
+```bash
+payemu network latency 3000
+```
+
+or through the dashboard:
+
+```text
+Latency: 3000ms
+Failure rate: 10%
+```
+
+This helps test resilient payment integrations.
+
+---
+
+# 41. Advanced Feature: Chaos Testing
+
+Provide optional chaos scenarios.
+
+Examples:
+
+```text
+webhook arrives before API response
+duplicate webhook
+webhook arrives twice
+payment succeeds but API times out
+payment fails after appearing pending
+provider returns 500
+provider returns malformed response
+network disconnects during payment
+```
+
+This is particularly important because payment systems must be designed around uncertain outcomes.
+
+---
+
+# 42. Observability
+
+Provide structured logs.
+
+Example:
+
+```json
+{
+  "timestamp": "...",
+  "event": "payment.successful",
+  "provider": "paystack",
+  "payment_id": "pay_123",
+  "reference": "order_123"
+}
+```
+
+Add:
+
+```text
+request logs
+response logs
+event logs
+webhook logs
+state transition logs
+```
+
+The dashboard should expose these logs.
+
+---
+
+# 43. Localhost Safety
+
+By default:
+
+```text
+127.0.0.1
+```
+
+Only.
+
+If the user configures:
+
+```text
+0.0.0.0
+```
+
+display a warning.
+
+Never expose the emulator publicly without explicit configuration.
+
+---
+
+# 44. API Documentation
+
+Provide OpenAPI documentation.
+
+Expose:
+
+```text
+/docs
+```
+
+Document:
+
+* endpoints
+* authentication
+* request bodies
+* responses
+* errors
+* webhooks
+* simulation APIs
+
+---
+
+# 45. Developer Examples
+
+Create complete example applications:
+
+```text
+examples/
+  express-paystack/
+  express-flutterwave/
+  express-stripe/
+  express-kora/
+  nextjs-payments/
+```
+
+Each example should demonstrate:
+
+```text
+initialize payment
+redirect/authorization simulation
+verify payment
+receive webhook
+handle success
+handle failure
+refund
+```
+
+---
+
+# 46. Important Design Principle
+
+Do NOT build this as merely:
+
+```text
+if request == X:
+    return fake response
+```
+
+The system must model actual payment behavior.
+
+It should have:
+
+```text
+API
+ ↓
+Provider Adapter
+ ↓
+Payment Engine
+ ↓
+State Machine
+ ↓
+Event Bus
+ ↓
+Webhook Engine
+ ↓
+Database
+```
+
+This allows realistic integration testing.
+
+---
+
+# 47. MVP Priorities
+
+Do not attempt to implement every provider and every feature simultaneously.
+
+Build in this order.
+
+## Phase 1 — Core Engine
+
+Implement:
+
+* canonical payment model
+* transaction state machine
+* SQLite persistence
+* REST API
+* webhook engine
+* event system
+* simulation engine
+* CLI
+* basic dashboard
+
+## Phase 2 — Paystack
+
+Implement:
+
+* initialize transaction
+* verify transaction
+* success/failure simulation
+* webhooks
+* cards
+* mobile money
+* refunds
+
+## Phase 3 — Stripe
+
+Implement:
+
+* PaymentIntents
+* PaymentMethods
+* Customers
+* refunds
+* webhooks
+* common failure scenarios
+
+## Phase 4 — Flutterwave
+
+Implement:
+
+* payment initialization
+* verification
+* cards
+* mobile money
+* transfers
+* webhooks
+
+## Phase 5 — Kora
+
+Implement:
+
+* payments
+* verification
+* mobile money
+* cards
+* webhooks
+* refunds/transfers where applicable
+
+## Phase 6 — Advanced Simulation
+
+Implement:
+
+* scenarios
+* time control
+* network failures
+* latency
+* chaos testing
+* webhook replay
+* deterministic test mode
+
+---
+
+# 48. CLI Examples
+
+The final CLI should support commands similar to:
+
+```bash
+payemu start
+```
+
+```bash
+payemu payment create \
+  --provider paystack \
+  --amount 10000 \
+  --currency GHS \
+  --method mobile_money
+```
+
+```bash
+payemu payment success pay_123
+```
+
+```bash
+payemu payment fail pay_123 \
+  --reason insufficient_funds
+```
+
+```bash
+payemu payment refund pay_123 \
+  --amount 5000
+```
+
+```bash
+payemu webhook replay evt_123
+```
+
+```bash
+payemu scenario run mobile-money-timeout
+```
+
+---
+
+# 49. Dashboard UX
+
+The dashboard should prioritize developer productivity over visual decoration.
+
+Main dashboard:
+
+```text
+Payments       128
+Successful     91
+Pending        17
+Failed         20
+
+Webhook deliveries
+Successful     104
+Failed          8
+Pending         3
+```
+
+Recent activity:
+
+```text
+13:21 Payment successful     pay_123
+13:20 Webhook delivered      evt_456
+13:19 Payment failed         pay_122
+13:18 Refund created         ref_12
+```
+
+Clicking any item should expose full technical details.
+
+---
+
+# 50. Documentation
+
+Create:
+
+```text
+README.md
+ARCHITECTURE.md
+CONTRIBUTING.md
+SECURITY.md
+docs/getting-started.md
+docs/paystack.md
+docs/stripe.md
+docs/flutterwave.md
+docs/kora.md
+docs/webhooks.md
+docs/scenarios.md
+docs/cli.md
+docs/docker.md
+```
+
+The README should allow a developer to go from zero to a simulated successful payment in under five minutes.
+
+---
+
+# 51. Definition of Done
+
+The project is considered complete when a developer can:
+
+1. Install the emulator locally.
+2. Start it with one command.
+3. Point an existing payment integration at localhost.
+4. Initialize a payment.
+5. See the payment in the dashboard.
+6. Simulate success/failure.
+7. Receive a provider-compatible webhook.
+8. Verify the transaction.
+9. Refund the transaction.
+10. Inspect the complete transaction timeline.
+11. Replay webhooks.
+12. Simulate failures.
+13. Restart the emulator without losing persistent data.
+14. Run the entire environment with Docker.
+15. Run automated tests.
+16. Switch between providers without changing the core application architecture.
+
+---
+
+# 52. Implementation Instructions
+
+Before writing code:
+
+1. Inspect the repository.
+2. Determine whether an existing architecture should be preserved.
+3. Create an implementation plan.
+4. Identify the smallest viable MVP.
+5. Research the current official API documentation for each provider.
+6. Do not rely on memory for provider-specific API behavior.
+7. Clearly document any behavior that cannot be accurately emulated.
+8. Design the canonical payment engine before implementing provider adapters.
+
+Then implement incrementally.
+
+After each major component:
+
+```text
+implement
+→ test
+→ inspect
+→ fix
+→ document
+```
+
+Do not create placeholder implementations that appear functional but do not actually model the payment lifecycle.
+
+---
+
+# 53. Quality Requirements
+
+The resulting project must be:
+
+* modular
+* strongly typed
+* testable
+* deterministic
+* extensible
+* documented
+* Docker-compatible
+* secure by default
+* provider-agnostic internally
+* provider-compatible externally
+
+Avoid:
+
+* unnecessary abstractions
+* premature microservices
+* hard-coded provider responses
+* duplicated business logic
+* real payment credentials
+* real payment processing
+* provider-specific logic in the core engine
+
+The system should initially run as a **single local application**.
+
+Do not introduce distributed infrastructure unless it provides a clear benefit.
+
+---
+
+# Final Goal
+
+The final product should feel like:
+
+```text
+                 YOUR APPLICATION
+                       │
+                       ▼
+              ┌──────────────────┐
+              │ Payment Emulator │
+              │                  │
+              │ Stripe           │
+              │ Paystack         │
+              │ Flutterwave      │
+              │ Kora             │
+              └────────┬─────────┘
+                       │
+             ┌─────────┴─────────┐
+             │                   │
+             ▼                   ▼
+        Payment Engine       Webhook Engine
+             │                   │
+             ▼                   ▼
+        Local Database       Your Webhook
+             │
+             ▼
+          Dashboard
+```
+
+The key differentiator should be **realistic payment behavior rather than static mocks**.
+
+A developer should be able to test the difficult parts of payment integration—pending transactions, asynchronous mobile-money authorization, duplicate webhooks, retries, timeouts, failed payments, refunds, idempotency and inconsistent network behavior—entirely on localhost.
+
+Build the project with this principle:
+
+> **“If my production payment integration can encounter it, I should be able to reproduce it locally.”**
+
