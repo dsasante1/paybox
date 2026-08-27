@@ -1,0 +1,30 @@
+{
+  "name": "paybox-monorepo",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "workspaces": [
+    "packages/*",
+    "packages/providers/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "tsx watch apps/api/src/main.ts",
+    "start": "tsx apps/api/src/main.ts",
+    "cli": "tsx apps/cli/src/main.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -b --pretty",
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "eslint": "^9.0.0",
+    "tsx": "^4.23.12",
+    "typescript": "~5.9.0",
+    "typescript-eslint": "^8.68.0",
+    "vitest": "^4.1.11"
+  }
+}
