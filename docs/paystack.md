@@ -15,11 +15,14 @@ adapter:
 - Webhook event names cross-checked against the Paystack AsyncAPI mirror at
   <https://apis.io/asyncapis/paystack/paystack-webhooks-asyncapi/>.
 
-Note that <https://paystack.com/docs> returns HTTP 403 to automated fetches, so
-the docs site cannot be machine-verified; the OpenAPI spec above is used
-instead. Re-verify against a current SHA before relying on any of this.
-Provider APIs change, and nothing here is generated from a live schema at
-build time.
+The prose pages at <https://paystack.com/docs> are also used, and were read on
+2026-08-27. They reject header-incomplete HTTP clients with a 403 — a request
+carrying a full browser header set (`Sec-Fetch-*`, `Accept-Language`) is served
+normally. The spec remains the authority for field shapes; the prose is what
+documents behaviour the spec types generically.
+
+Re-verify against a current SHA before relying on any of this. Provider APIs
+change, and nothing here is generated from a live schema at build time.
 
 ---
 
@@ -128,6 +131,22 @@ the Luhn check, and are not issued by any network.
 **CVV is never read, never stored, and appears nowhere in the data model.**
 A card number is reduced to its BIN and last four before anything is persisted.
 
+### ⚠️ These are not Paystack's test cards
+
+Paystack publishes its own test cards at `/docs/payments/test-payments/`, and
+they are **different numbers** — `4084 0840 8408 4081` (success),
+`4084 0800 0000 5408` (declined), `4084 0800 0067 0037` (insufficient funds),
+`5060 6666 6666 6666 666` (PIN + OTP), and others.
+
+paybox does **not** recognise them. An unknown instrument falls through to
+success, so pasting Paystack's *declined* test card into paybox produces a
+**successful** payment. That is the one failure mode this tool exists to
+prevent, so treat it as a real limitation and use the paybox numbers above.
+
+Paystack also documents refund-outcome cards (`…1803` fails a refund, `…1902`
+sends it to "needs attention") and mobile-money numbers with their own OTP
+(`070 000 000 0`, OTP `1234`). None of those are modelled either.
+
 ### Choosing an outcome where there is no instrument
 
 USSD carries only a three-digit bank code from a fixed enum, and EFT only a
@@ -197,8 +216,14 @@ Paystack's card flow can come back asking for a PIN and then an OTP. The
 | OTP | `123456` — anything else fails the charge with `authentication_required` |
 | PIN | `1234` — anything else fails the charge |
 
-These fixed values are **emulator-specific**. Paystack has no universal test
-OTP; do not read them as provider behaviour.
+**These are Paystack's own documented test values**, not emulator inventions:
+their PIN + OTP test card (`5060 6666 6666 6666 666`) is documented with
+`Pin 1234` and `OTP 123456`. An earlier version of this file claimed they were
+emulator-specific, which was wrong.
+
+What *is* emulator-specific is that paybox accepts them on **any** card that
+parks awaiting a step-up, rather than only on the specific cards Paystack
+pairs them with.
 
 `submit_pin`, `submit_phone` and `submit_birthday` answer `send_otp` and leave
 the payment parked — only `submit_otp` settles it. `submit_otp` returns the
@@ -441,15 +466,25 @@ fidelity:
 | `split`, `fees_split` | **Real** when the transaction carries a `split_code` |
 | `ip_address`, `receipt_number`, `fees_breakdown`, `plan`, `subaccount`, `pos_transaction_data`, `source`, `connect`, `order_id` | Always `null` / `{}` |
 
-## Response envelopes are modelled, not verified
+## Response envelopes: verified against prose, not against the spec
 
 Paystack's OpenAPI specification types **every `/charge` response as a generic
-transaction object**. It contains no `pay_offline`, `send_otp`, `open_url` or
-`ussd_code` field anywhere. Those envelope strings — the `status` and
-`display_text` a charge returns, and the USSD dial code — are therefore
-**modelled from Paystack's prose documentation and cannot be machine-checked**
-against the authoritative source. Treat their exact values as approximate; the
-state transitions behind them are what this tool is actually asserting.
+transaction object** — it contains no `pay_offline`, `send_otp`, `open_url` or
+`ussd_code` field anywhere. Those envelope strings therefore cannot be checked
+against the spec.
+
+They **have** been checked against Paystack's prose documentation
+(`/docs/payments/payment-channels/`, read 2026-08-27), which confirms
+`pay_offline`, `send_otp`, `send_pin`, `send_phone`, `send_birthday`,
+`open_url`, `ussd_code` and `display_text`, and states that a `pay_offline`
+response carries `data.ussd_code` for the payer to dial. That is exactly what
+this adapter returns.
+
+One difference remains. Paystack's real dial string is session-specific —
+`*737*33*4*18791#` — and its `display_text` embeds it verbatim
+(*"Please dial \*737\*33\*4\*18791# on your mobile phone to complete the
+transaction"*). paybox emits a simplified `*{bank_code}*000#` and a generic
+`display_text`. The shape is right; the middle digits are not modelled.
 
 ## Known limitations
 
@@ -472,12 +507,21 @@ state transitions behind them are what this tool is actually asserting.
    always zero.
 8. `GET /bank` and `GET /country` return short fixed lists, not Paystack's full
    directories. `GET /dedicated_account` ignores the documented query filters.
-9. Transaction ids are derived deterministically from the reference rather than
+9. **Paystack's published test cards are not recognised** (above). Their
+   declined card succeeds here.
+10. `gateway_response_code` and `response_code` are not implemented. Paystack
+    returns an ISO 8583 code and a string classification (`approved`,
+    `do_not_honor`, `processing_error`, …) on every transaction; paybox
+    returns only the human-readable `gateway_response`.
+11. The balance check covers the transfer **amount only**. Paystack checks the
+    amount *plus the transfer fee*, and deducts both.
+12. The USSD dial string is simplified (above).
+13. Transaction ids are derived deterministically from the reference rather than
    allocated by a counter, so they are stable but not monotonic over time. This
    is deliberate: hash-derived ids stay stable when operations are reordered,
    which is what lets the test suite assert literal ids. A monotonic counter
    would be more faithful to Paystack and less useful here.
-10. Opening a dispute (`POST /dispute`) and crediting a dedicated virtual
+14. Opening a dispute (`POST /dispute`) and crediting a dedicated virtual
     account (`POST /api/dedicated-accounts/:number/credit`) are
     **emulator-only**. Neither exists at Paystack, because neither originates
     with the merchant — but without them the flows could not be tested locally.
