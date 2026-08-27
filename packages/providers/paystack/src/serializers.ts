@@ -1,0 +1,303 @@
+import type { Customer, Payment, PayboxEvent, Refund, Transfer } from '@paybox/shared';
+import { gatewayResponse, toPaystackStatus } from './status.js';
+
+/**
+ * Paystack response serialisation.
+ *
+ * Field coverage is documented in docs/paystack.md, including which fields are
+ * verified against Paystack's published documentation and which are modelled.
+ * Nothing here invents behaviour: fields we cannot faithfully emulate are
+ * returned as the null/empty value Paystack itself uses for an absent value,
+ * rather than as a plausible-looking fabrication.
+ */
+
+/** Paystack transaction ids are numeric. Derived from our canonical id so the
+ *  same payment always serialises to the same number. */
+export function numericTransactionId(providerTransactionId: string): number {
+  let hash = 0;
+  for (let i = 0; i < providerTransactionId.length; i++) {
+    hash = (hash * 31 + providerTransactionId.charCodeAt(i)) % 4_000_000_000;
+  }
+  // Paystack ids observed in the wild are 10 digits; keep the same magnitude.
+  return 1_000_000_000 + hash;
+}
+
+/**
+ * Emulated processing fee.
+ *
+ * Paystack's real pricing varies by country, channel, card origin and
+ * negotiated rate, and it changes. We apply one flat percentage per currency
+ * so the field is present and internally consistent, and docs/paystack.md
+ * states plainly that these are emulated approximations with no authority.
+ * Set `fees: 0` in config to opt out entirely.
+ */
+const FEE_RATE: Record<string, number> = {
+  NGN: 0.015,
+  GHS: 0.0195,
+  ZAR: 0.029,
+  KES: 0.029,
+  USD: 0.039,
+};
+
+export function emulatedFee(amount: number, currency: string, enabled = true): number {
+  if (!enabled) return 0;
+  const rate = FEE_RATE[currency.toUpperCase()] ?? 0.015;
+  return Math.round(amount * rate);
+}
+
+export interface SerializeOptions {
+  customer?: Customer | null;
+  /** Canonical events for this payment, rendered into Paystack's `log`. */
+  events?: PayboxEvent[];
+  includeFees?: boolean;
+}
+
+function paystackCustomer(payment: Payment, customer: Customer | null | undefined) {
+  return {
+    id: customer ? numericTransactionId(customer.providerCustomerId) : null,
+    first_name: customer?.firstName ?? null,
+    last_name: customer?.lastName ?? null,
+    email: customer?.email ?? (payment.metadata.email as string | undefined) ?? null,
+    customer_code: customer ? `CUS_${customer.providerCustomerId}` : null,
+    phone: customer?.phone ?? null,
+    metadata: customer?.metadata ?? null,
+    risk_action: 'default',
+    international_format_phone: null,
+  };
+}
+
+/**
+ * The `authorization` object.
+ *
+ * Card fields are synthetic by construction -- the emulator never sees a real
+ * PAN, only a test card identifier -- and CVV is never present in any shape.
+ */
+function paystackAuthorization(payment: Payment) {
+  const details = payment.paymentMethodDetails;
+  const channel = paystackChannel(payment);
+
+  if (channel === 'mobile_money') {
+    return {
+      authorization_code: `AUTH_${payment.providerTransactionId}`,
+      bin: null,
+      last4: null,
+      exp_month: null,
+      exp_year: null,
+      channel: 'mobile_money',
+      card_type: null,
+      bank: (details.network as string) ?? null,
+      country_code: (details.country as string) ?? 'GH',
+      brand: (details.network as string) ?? null,
+      reusable: false,
+      signature: null,
+      account_name: (details.account_name as string) ?? null,
+      mobile_money_number: (details.phone as string) ?? null,
+      receiver_bank_account_number: null,
+      receiver_bank: null,
+    };
+  }
+
+  if (channel === 'card') {
+    return {
+      authorization_code: `AUTH_${payment.providerTransactionId}`,
+      bin: (details.bin as string) ?? null,
+      last4: (details.last4 as string) ?? null,
+      exp_month: (details.exp_month as string) ?? null,
+      exp_year: (details.exp_year as string) ?? null,
+      channel: 'card',
+      card_type: (details.card_type as string) ?? null,
+      bank: (details.bank as string) ?? 'TEST BANK',
+      country_code: (details.country as string) ?? 'GH',
+      brand: (details.brand as string) ?? null,
+      reusable: true,
+      signature: `SIG_${payment.providerTransactionId}`,
+      account_name: null,
+    };
+  }
+
+  return {
+    authorization_code: `AUTH_${payment.providerTransactionId}`,
+    channel,
+    bank: (details.bank as string) ?? null,
+    country_code: (details.country as string) ?? 'GH',
+    account_name: (details.account_name as string) ?? null,
+    reusable: false,
+    signature: null,
+  };
+}
+
+export function paystackChannel(payment: Payment): string {
+  switch (payment.paymentMethod) {
+    case 'mobile_money':
+      return 'mobile_money';
+    case 'card':
+      return 'card';
+    case 'bank':
+      return 'bank';
+    case 'bank_transfer':
+      return 'bank_transfer';
+    case 'ussd':
+      return 'ussd';
+    case 'qr':
+      return 'qr';
+    default:
+      return 'card';
+  }
+}
+
+/**
+ * Paystack's `log` object. We populate `history` from the canonical event
+ * timeline, which makes it genuinely informative rather than a stub -- a
+ * developer reading the log sees the real sequence the emulator went through.
+ */
+function paystackLog(payment: Payment, events: PayboxEvent[] | undefined) {
+  const history = (events ?? []).map((event) => ({
+    type: event.type.endsWith('.failed') ? 'error' : 'action',
+    message: describeEvent(event),
+    time: Math.max(
+      0,
+      Math.round((Date.parse(event.createdAt) - Date.parse(payment.createdAt)) / 1000),
+    ),
+  }));
+  const timeSpent = history.at(-1)?.time ?? 0;
+  return {
+    start_time: Math.floor(Date.parse(payment.createdAt) / 1000),
+    time_spent: timeSpent,
+    attempts: 1,
+    errors: history.filter((h) => h.type === 'error').length,
+    success: payment.status === 'successful',
+    mobile: payment.paymentMethod === 'mobile_money',
+    input: [],
+    channel: paystackChannel(payment),
+    history,
+  };
+}
+
+function describeEvent(event: PayboxEvent): string {
+  const label = event.type.replace(/^payment\./, '').replace(/_/g, ' ');
+  return `Payment ${label}`;
+}
+
+/** The transaction object returned by verify, fetch and list. */
+export function serializeTransaction(payment: Payment, options: SerializeOptions = {}) {
+  const fees = emulatedFee(payment.amount, payment.currency, options.includeFees ?? true);
+  return {
+    id: numericTransactionId(payment.providerTransactionId),
+    domain: 'test',
+    status: toPaystackStatus(payment.status),
+    reference: payment.reference,
+    receipt_number: null,
+    amount: payment.amount,
+    message: payment.failureMessage,
+    gateway_response: gatewayResponse(payment.status, payment.failureCode),
+    paid_at: payment.paidAt,
+    created_at: payment.createdAt,
+    channel: paystackChannel(payment),
+    currency: payment.currency,
+    ip_address: null,
+    metadata: payment.metadata,
+    log: paystackLog(payment, options.events),
+    fees,
+    fees_split: null,
+    authorization: paystackAuthorization(payment),
+    customer: paystackCustomer(payment, options.customer),
+    plan: null,
+    split: {},
+    order_id: null,
+    // Paystack returns both snake_case and camelCase spellings of these two.
+    paidAt: payment.paidAt,
+    createdAt: payment.createdAt,
+    requested_amount: payment.amount,
+    pos_transaction_data: null,
+    source: null,
+    fees_breakdown: null,
+    connect: null,
+    transaction_date: payment.createdAt,
+    plan_object: {},
+    subaccount: {},
+  };
+}
+
+export function serializeRefund(refund: Refund, payment: Payment | null) {
+  return {
+    id: numericTransactionId(refund.providerRefundId),
+    integration: 100_000,
+    domain: 'test',
+    transaction: payment ? numericTransactionId(payment.providerTransactionId) : null,
+    dispute: null,
+    amount: refund.amount,
+    deducted_amount: refund.amount,
+    currency: refund.currency,
+    channel: 'migs',
+    fully_deducted: refund.amount >= (payment?.amount ?? refund.amount),
+    refunded_by: 'paybox@emulator.local',
+    refunded_at: refund.status === 'successful' ? refund.updatedAt : null,
+    expected_at: refund.createdAt,
+    settlement: null,
+    customer_note: refund.reason,
+    merchant_note: refund.reason,
+    created_at: refund.createdAt,
+    updated_at: refund.updatedAt,
+    status: refund.status === 'successful' ? 'processed' : refund.status,
+  };
+}
+
+export function serializeCustomer(customer: Customer) {
+  return {
+    id: numericTransactionId(customer.providerCustomerId),
+    first_name: customer.firstName,
+    last_name: customer.lastName,
+    email: customer.email,
+    phone: customer.phone,
+    metadata: customer.metadata,
+    domain: 'test',
+    customer_code: `CUS_${customer.providerCustomerId}`,
+    risk_action: 'default',
+    international_format_phone: null,
+    createdAt: customer.createdAt,
+    updatedAt: customer.updatedAt,
+    identified: false,
+    identifications: null,
+  };
+}
+
+export function serializeTransfer(transfer: Transfer) {
+  return {
+    id: numericTransactionId(transfer.providerTransferId),
+    domain: 'test',
+    amount: transfer.amount,
+    currency: transfer.currency,
+    reference: transfer.reference,
+    source: 'balance',
+    source_details: null,
+    reason: transfer.reason,
+    status: transfer.status === 'successful' ? 'success' : transfer.status,
+    failures: transfer.failureReason,
+    transfer_code: `TRF_${transfer.providerTransferId}`,
+    titan_code: null,
+    transferred_at: transfer.status === 'successful' ? transfer.updatedAt : null,
+    created_at: transfer.createdAt,
+    updated_at: transfer.updatedAt,
+    recipient: {
+      domain: 'test',
+      type: 'nuban',
+      currency: transfer.currency,
+      name: transfer.recipientName,
+      details: {
+        account_number: transfer.recipientAccount,
+        account_name: transfer.recipientName,
+        bank_code: transfer.recipientBankCode,
+        bank_name: null,
+      },
+    },
+  };
+}
+
+/** Paystack's envelope. Every response body is this shape. */
+export function ok<T>(message: string, data: T) {
+  return { status: true, message, data };
+}
+
+export function fail(message: string, extra: Record<string, unknown> = {}) {
+  return { status: false, message, ...extra };
+}

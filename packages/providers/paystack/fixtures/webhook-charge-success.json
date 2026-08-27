@@ -1,0 +1,5 @@
+{
+  "_source": "Paystack webhook documentation, verified 2026-08-27. Envelope is { event, data } where data is the transaction object.",
+  "event": "charge.success",
+  "data": {}
+}

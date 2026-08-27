@@ -1,0 +1,10 @@
+{
+  "_source": "paystack.com/docs/api/transaction — Initialize Transaction, verified 2026-08-27.",
+  "status": true,
+  "message": "Authorization URL created",
+  "data": {
+    "authorization_url": "",
+    "access_code": "",
+    "reference": ""
+  }
+}
