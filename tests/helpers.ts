@@ -6,11 +6,18 @@ import {
   VirtualClock,
   type Storage,
 } from '@paybox/core';
-import { createIdFactory, createRandom, type IdFactory, type PayboxEvent } from '@paybox/shared';
+import {
+  createIdFactory,
+  createRandom,
+  type IdFactory,
+  type PayboxEvent,
+  type Random,
+} from '@paybox/shared';
 
 export interface Harness {
   storage: Storage;
   clock: VirtualClock;
+  random: Random;
   ids: IdFactory;
   bus: EventBus;
   engine: PaymentEngine;
@@ -46,6 +53,7 @@ export async function createHarness(
   return {
     storage,
     clock,
+    random,
     ids,
     bus,
     engine,

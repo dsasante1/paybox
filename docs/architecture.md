@@ -171,3 +171,49 @@ log readability; local runs still show it, which is correct.
 6. Add fixtures and a compatibility test.
 
 Nothing in `packages/core` should need to change.
+
+## Provider escape hatches on the state machine
+
+The payment state machine is deliberately strict, but two providers can
+legitimately do things it forbids. Both are opt-in flags on
+`transitionPayment`, refused unless an adapter explicitly asks — so a provider
+that has no such behaviour is unaffected by construction.
+
+| Flag | Allows | Why it exists |
+|---|---|---|
+| `reversal: true` | any terminal state → anything | A provider can overturn a settled decision: a late settlement, a chargeback reversal. |
+| `retry: true` | `failed` → `pending` / `processing` / `requires_action` | Some providers have no terminal failure. |
+
+`retry` exists because **Stripe's PaymentIntent never fails terminally**. A
+decline returns it to `requires_payment_method` "so that the payment can be
+retried" — the same intent is confirmed again with another payment method.
+Paystack has no equivalent: a failed charge there is over.
+
+The narrowness is the point. `retry` only resumes the flow; claiming a failed
+payment actually succeeded is a *reversal*, a different claim with a different
+flag. And it applies only to `failed` — `cancelled`, `expired` and `refunded`
+stay terminal, because no provider we model reopens those.
+
+Canonical `failed` therefore means "the last attempt failed", not "this payment
+is dead". The attempt history lives in the event log, which already records
+every transition — so a payment that failed twice and then succeeded is fully
+auditable without a separate attempts table.
+
+## Webhook signatures that cover a timestamp
+
+`WebhookFormatter.sign(rawBody, secret, context)` receives a `SigningContext`
+carrying the **virtual-time** instant of the attempt and its attempt number.
+It is passed in rather than read inside the formatter so signing stays a pure
+function that cannot reach for `Date.now()`.
+
+A formatter that sets `resignsPerAttempt: true` is re-signed on every delivery
+attempt instead of replaying its stored headers. Stripe needs this: it signs
+`${timestamp}.${payload}`, and its documentation is explicit that a retry gets
+a new timestamp and signature. Replaying a stale one would fail any correct
+verifier's tolerance window — a failure the emulator would have invented, and
+then taught developers to work around.
+
+The default is off. A body-only signature is identical on every attempt, so
+Paystack retries stay byte-identical, which is what makes the delivery log
+trustworthy. Only the signature headers are recomputed; the payload never
+changes.
