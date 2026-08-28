@@ -17,6 +17,21 @@ export interface FormatterContext {
   baseUrl: string;
 }
 
+/** What a signature may depend on besides the body and the secret. */
+export interface SigningContext {
+  /**
+   * Virtual-time instant of *this delivery attempt*, in milliseconds.
+   *
+   * Passed in rather than read from a clock inside the formatter so signing
+   * stays a pure function and cannot reach for `Date.now()`. Providers whose
+   * signature covers a timestamp -- Stripe signs `${t}.${payload}` -- need it;
+   * providers who sign the body alone ignore it.
+   */
+  timestamp: number;
+  /** Which attempt this is, 0-indexed. */
+  attempt: number;
+}
+
 /**
  * A provider's webhook contract (spec §9, §30).
  *
@@ -33,8 +48,22 @@ export interface WebhookFormatter {
    * never a re-serialised object -- providers sign bytes, and a whitespace
    * difference between what we sign and what we send is the classic bug this
    * emulator should help people find, not reproduce itself.
+   *
+   * Called once per **attempt**, not once per delivery. Stripe generates a new
+   * timestamp and signature for every retry, and replaying a stale one would
+   * fail any correct verifier's tolerance window -- teaching developers to
+   * work around a bug the emulator invented.
    */
-  sign(rawBody: string, secret: string): Record<string, string>;
+  sign(rawBody: string, secret: string, context: SigningContext): Record<string, string>;
+  /**
+   * True when the signature depends on more than the body, so it must be
+   * recomputed per attempt rather than replayed from storage.
+   *
+   * Defaults to false: a body-only signature is identical on every attempt, and
+   * replaying the stored headers keeps a retry byte-identical, which is what
+   * makes the delivery log trustworthy.
+   */
+  readonly resignsPerAttempt?: boolean;
 }
 
 /** Outcome of one HTTP attempt. */

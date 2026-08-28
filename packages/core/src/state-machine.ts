@@ -180,7 +180,25 @@ export function isTerminalPayment(status: PaymentStatus): boolean {
 export interface TransitionContext {
   /** Set only by an explicitly simulated provider reversal (spec §7). */
   reversal?: boolean;
+  /**
+   * Set when a provider lets a failed payment be attempted again on the same
+   * resource.
+   *
+   * Stripe's PaymentIntent has no terminal failure: a decline returns it to
+   * `requires_payment_method` "so that the payment can be retried"
+   * (docs.stripe.com/payments/paymentintents/lifecycle, read 2026-08-28), and
+   * the same intent is confirmed again with another payment method. Paystack
+   * has no equivalent -- a failed charge there is over -- so this is opt-in per
+   * adapter rather than a change to what `failed` means for everyone.
+   *
+   * Only resumes the flow. Jumping straight from `failed` to `successful` is a
+   * *reversal*, which is a different claim and has its own flag.
+   */
+  retry?: boolean;
 }
+
+/** Where a retried payment may resume from `failed`. */
+const RETRY_TARGETS: readonly PaymentStatus[] = ['pending', 'processing', 'requires_action'];
 
 export function assertPaymentTransition(
   from: PaymentStatus,
@@ -201,11 +219,17 @@ export function assertPaymentTransition(
   // caller has explicitly asked to simulate that, never as ordinary flow.
   if (context.reversal && isTerminalPayment(from)) return;
 
+  // A retry resumes a failed attempt on the same payment, for providers whose
+  // failures are not final. Deliberately narrower than a reversal: only from
+  // `failed`, and only back into the in-flight states.
+  if (context.retry && from === 'failed' && RETRY_TARGETS.includes(to)) return;
+
   throw new PayboxError(
     'invalid_state_transition',
     `Cannot move a payment from ${from} to ${to}.` +
       (PAYMENT_TRANSITIONS[from].length === 0
-        ? ` ${from} is terminal; use a reversal simulation to override.`
+        ? ` ${from} is terminal; use a reversal simulation to override` +
+          (from === 'failed' ? ', or a retry to attempt it again.' : '.')
         : ` Allowed: ${PAYMENT_TRANSITIONS[from].join(', ')}.`),
     { details: { from, to, allowed: PAYMENT_TRANSITIONS[from] } },
   );
