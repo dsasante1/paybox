@@ -1,6 +1,7 @@
 import type {
   Authorization,
   Customer,
+  InstrumentSetup,
   Invoice,
   Payment,
   PayboxEvent,
@@ -12,6 +13,7 @@ import type {
 import {
   cancellationReason,
   toStripeInvoiceStatus,
+  toStripeSetupStatus,
   toStripeRecurring,
   toStripeSubscriptionStatus,
   toStripeChargeStatus,
@@ -477,6 +479,77 @@ export function serializeLineItems(payment: Payment) {
   });
 }
 
+
+/**
+ * A SetupIntent.
+ *
+ * `payment_method` is the instrument the setup produced, which is the whole
+ * output of the flow -- a succeeded SetupIntent whose `payment_method` is null
+ * has achieved nothing, and the engine will not report one.
+ *
+ * `next_action` mirrors the PaymentIntent shape: `redirect_to_url` pointing at
+ * the emulator's own hosted page, so a front end that already handles a 3-D
+ * Secure step-up on a payment handles one on a setup without a second code
+ * path.
+ */
+export function serializeSetupIntent(
+  setup: InstrumentSetup,
+  options: {
+    customer?: Customer | null;
+    authorization?: Authorization | null;
+    baseUrl?: string;
+    basePath?: string;
+  } = {},
+) {
+  const id = stripeId('seti', setup.id);
+  const failure = stripeFailure(setup.failureCode);
+  const status = toStripeSetupStatus(setup.status);
+
+  return {
+    id,
+    object: 'setup_intent' as const,
+    application: null,
+    attach_to_self: false,
+    automatic_payment_methods: null,
+    cancellation_reason: setup.cancellationReason,
+    client_secret: clientSecret(id),
+    created: unix(setup.createdAt),
+    customer: setup.customerId ? stripeId('cus', setup.customerId) : null,
+    description: (setup.metadata.description as string | undefined) ?? null,
+    flow_directions: null,
+    last_setup_error:
+      setup.status === 'failed'
+        ? {
+            type: 'card_error',
+            code: failure?.code ?? setup.failureCode,
+            ...(failure?.declineCode ? { decline_code: failure.declineCode } : {}),
+            message: setup.failureMessage,
+          }
+        : null,
+    latest_attempt: null,
+    livemode: false,
+    mandate: null,
+    metadata: setup.metadata,
+    next_action:
+      setup.status === 'requires_action' && options.baseUrl
+        ? {
+            type: 'redirect_to_url',
+            redirect_to_url: {
+              return_url: (setup.metadata.return_url as string | undefined) ?? null,
+              url: `${options.baseUrl}${options.basePath ?? "/stripe"}/setup/${id}`,
+            },
+          }
+        : null,
+    on_behalf_of: null,
+    payment_method: setup.authorizationId ? stripeId('pm', setup.authorizationId) : null,
+    payment_method_configuration_details: null,
+    payment_method_options: null,
+    payment_method_types: [setup.channel ?? 'card'],
+    single_use_mandate: null,
+    status,
+    usage: setup.usage,
+  };
+}
 
 export function serializeProduct(product: Product) {
   return {

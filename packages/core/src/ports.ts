@@ -4,6 +4,7 @@ import type {
   DedicatedAccount,
   Dispute,
   DisputeStatus,
+  InstrumentSetup,
   Invoice,
   InvoiceStatus,
   LedgerEntry,
@@ -16,6 +17,7 @@ import type {
   ProviderId,
   Refund,
   RefundStatus,
+  SetupStatus,
   Split,
   Subaccount,
   Subscription,
@@ -247,6 +249,17 @@ export interface DedicatedAccountRepository {
   list(filter?: ListOptions & { provider?: ProviderId }): Promise<Page<DedicatedAccount>>;
 }
 
+export interface InstrumentSetupRepository {
+  insert(setup: InstrumentSetup): Promise<InstrumentSetup>;
+  byId(id: string): Promise<InstrumentSetup | null>;
+  byProviderSetupId(provider: ProviderId, id: string): Promise<InstrumentSetup | null>;
+  listByCustomer(customerId: string): Promise<InstrumentSetup[]>;
+  update(id: string, patch: Partial<InstrumentSetup>): Promise<InstrumentSetup>;
+  list(
+    filter?: ListOptions & { provider?: ProviderId; status?: SetupStatus; customerId?: string },
+  ): Promise<Page<InstrumentSetup>>;
+}
+
 export interface ProductRepository {
   insert(product: Product): Promise<Product>;
   byId(id: string): Promise<Product | null>;
@@ -401,6 +414,7 @@ export interface Storage {
   readonly customers: CustomerRepository;
   readonly authorizations: AuthorizationRepository;
   readonly dedicatedAccounts: DedicatedAccountRepository;
+  readonly instrumentSetups: InstrumentSetupRepository;
   readonly products: ProductRepository;
   readonly plans: PlanRepository;
   readonly subscriptions: SubscriptionRepository;

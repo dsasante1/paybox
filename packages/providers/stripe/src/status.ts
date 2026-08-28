@@ -4,6 +4,7 @@ import {
   type PaymentStatus,
   type PlanInterval,
   type RefundStatus,
+  type SetupStatus,
   type SubscriptionStatus,
 } from '@paybox/shared';
 
@@ -137,6 +138,38 @@ export function cancellationReason(status: PaymentStatus): string | null {
   return null;
 }
 
+
+/**
+ * SetupIntent status: canonical -> Stripe.
+ *
+ * Stripe's enum is `requires_payment_method | requires_confirmation |
+ * requires_action | processing | succeeded | canceled` -- note the absence of
+ * a failure state, exactly as on PaymentIntents. A setup that is declined
+ * returns to `requires_payment_method` and reports why in `last_setup_error`,
+ * so the merchant can confirm again with another instrument.
+ *
+ * Verified against `stripe/openapi` `openapi/spec3.json` schema `setup_intent`
+ * (API version 2026-08-26.dahlia, read 2026-08-28).
+ */
+export function toStripeSetupStatus(status: SetupStatus): string {
+  switch (status) {
+    case 'created':
+      return 'requires_payment_method';
+    case 'pending':
+      return 'requires_confirmation';
+    case 'requires_action':
+      return 'requires_action';
+    case 'processing':
+      return 'processing';
+    case 'successful':
+      return 'succeeded';
+    case 'cancelled':
+      return 'canceled';
+    // No `failed` at Stripe: a declined setup is alive and retryable.
+    case 'failed':
+      return 'requires_payment_method';
+  }
+}
 
 /**
  * Subscription status: canonical -> Stripe.

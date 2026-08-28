@@ -78,6 +78,27 @@ export const SUBSCRIPTION_STATUSES = [
 ] as const;
 export type SubscriptionStatus = (typeof SUBSCRIPTION_STATUSES)[number];
 
+/**
+ * Setting up an instrument for later, without moving money.
+ *
+ * The vocabulary deliberately mirrors the payment one: `created` is "nothing
+ * attached yet", `successful` means the instrument is stored and chargeable.
+ * `failed` is canonical even though Stripe has no such SetupIntent status --
+ * a failed setup there returns to `requires_payment_method` and reports the
+ * reason in `last_setup_error`, exactly as its PaymentIntents do. The adapter
+ * maps it, the same way it does for payments.
+ */
+export const SETUP_STATUSES = [
+  'created',
+  'pending',
+  'processing',
+  'requires_action',
+  'successful',
+  'failed',
+  'cancelled',
+] as const;
+export type SetupStatus = (typeof SETUP_STATUSES)[number];
+
 /** One billing attempt against a subscription. */
 export const INVOICE_STATUSES = ['pending', 'success', 'failed'] as const;
 export type InvoiceStatus = (typeof INVOICE_STATUSES)[number];

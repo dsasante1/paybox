@@ -42,7 +42,10 @@ The **Charge** is different: charges are immutable attempt records, and
 | `POST /v1/payment_intents/{id}/confirm` | **Compatible** | Retries a declined intent. |
 | `POST /v1/payment_intents/{id}/capture` | **Compatible** | |
 | `POST /v1/payment_intents/{id}/cancel` | **Compatible** | |
-| `GET /v1/charges`, `GET /v1/charges/{id}` | **Partially compatible** | Read-only; see below. |
+| `GET /v1/charges`, `GET /v1/charges/{id}` | **Compatible** | |
+| `POST /v1/charges` | **Partially compatible** | Synchronous, as Stripe's is; see below. |
+| `POST /v1/charges/{id}` | **Compatible** | |
+| `POST /v1/charges/{id}/capture` | **Partially compatible** | No partial capture; see below. |
 | `POST /v1/refunds` | **Compatible** | Full and partial. |
 | `GET /v1/refunds`, `GET /v1/refunds/{id}` | **Compatible** | |
 | `POST /v1/customers`, `GET /v1/customers`, `GET /v1/customers/{id}` | **Partially compatible** | No update or delete. |
@@ -60,7 +63,13 @@ The **Charge** is different: charges are immutable attempt records, and
 | `POST /v1/subscriptions/{id}` | **Partially compatible** | `cancel_at_period_end` only. |
 | `DELETE /v1/subscriptions/{id}` | **Compatible** | Cancels immediately. |
 | `GET /v1/invoices`, `GET /v1/invoices/{id}` | **Partially compatible** | Read-only; no draft/finalise/void. |
-| SetupIntents, Connect, Terminal, Issuing, Radar, Tax, everything else | **Not supported** | Out of scope. |
+| `POST /v1/setup_intents`, `GET /v1/setup_intents`, `GET /v1/setup_intents/{id}` | **Compatible** | |
+| `POST /v1/setup_intents/{id}` | **Partially compatible** | Metadata, description and customer. |
+| `POST /v1/setup_intents/{id}/confirm` | **Compatible** | Retries a declined setup. |
+| `POST /v1/setup_intents/{id}/cancel` | **Compatible** | |
+| `GET /stripe/setup/{id}` | **Emulator-only** | The step-up page `next_action` points at. |
+| `POST /v1/setup_intents/{id}/verify_microdeposits` | **Not supported** | No bank-debit methods. |
+| Connect, Terminal, Issuing, Radar, Tax, everything else | **Not supported** | Out of scope. |
 
 ## Requests are form-encoded
 
@@ -292,7 +301,16 @@ expected to react.
    That is what Stripe returns before one exists.
 13. A customer created without an email gets a synthetic local address, because
    paybox keys customers on email and Stripe does not require one.
-14. `expand[]` is honoured on every route, in the query string and in a POST
+14. **SetupIntents store an instrument without moving money**, and are modelled
+   as their own canonical resource rather than a zero-amount payment -- a row
+   that never moves money would pollute every total, list and balance with
+   things that are not transactions. A card saved through a setup, created
+   directly as a PaymentMethod, or left behind by a charge resolves to **one**
+   PaymentMethod: all three doors compute the same instrument fingerprint.
+   Gaps: no `latest_attempt` (paybox has no SetupAttempt object), no `mandate`,
+   and `verify_microdeposits` is absent because no bank-debit method is
+   implemented.
+15. `expand[]` is honoured on every route, in the query string and in a POST
    body, on single objects and on `data.` paths in a list. Naming a nested path
    expands the levels above it, as Stripe does, and more than four levels is
    refused. Two differences from Stripe: an id that does not resolve leaves the

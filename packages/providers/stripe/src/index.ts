@@ -12,6 +12,7 @@ export {
   toStripeChargeStatus,
   toStripeRefundStatus,
   cancellationReason,
+  toStripeSetupStatus,
   toStripeSubscriptionStatus,
   toStripeInvoiceStatus,
   toStripeRecurring,
@@ -32,12 +33,17 @@ export {
   stripeInstrumentResolver,
   STRIPE_PUBLISHED_CARDS,
 } from './instruments.js';
-export { stripeAuthorizationMinter } from './authorization.js';
+export {
+  stripeAuthorizationMinter,
+  stripeInstrumentDraft,
+  stripeSetupAuthorizationMinter,
+} from './authorization.js';
 export { StripeWebhookFormatter, STRIPE_API_VERSION } from './webhook.js';
 export {
   serializePaymentIntent,
   serializeCharge,
   serializeRefund,
+  serializeSetupIntent,
   serializeCustomer,
   serializePaymentMethod,
   serializeEvent,

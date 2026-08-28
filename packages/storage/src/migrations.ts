@@ -482,4 +482,36 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE plans ADD COLUMN product_id TEXT REFERENCES products(id) ON DELETE SET NULL;
     `,
   },
+  {
+    id: '0010_instrument_setups',
+    sql: `
+      -- Verifying an instrument and storing it, without charging for it.
+      -- Stripe calls it a SetupIntent; the canonical resource is provider
+      -- neutral because every provider has some route to card-on-file.
+      --
+      -- Only masked fragments are ever written here, exactly as in
+      -- authorizations: there is no column that could hold a PAN or a CVV.
+      CREATE TABLE instrument_setups (
+        id                  TEXT PRIMARY KEY,
+        provider            TEXT NOT NULL,
+        provider_setup_id   TEXT NOT NULL,
+        customer_id         TEXT REFERENCES customers(id) ON DELETE SET NULL,
+        authorization_id    TEXT REFERENCES authorizations(id) ON DELETE SET NULL,
+        status              TEXT NOT NULL,
+        provider_status     TEXT NOT NULL,
+        usage               TEXT NOT NULL DEFAULT 'off_session',
+        channel             TEXT,
+        instrument          TEXT NOT NULL DEFAULT '{}',
+        failure_code        TEXT,
+        failure_message     TEXT,
+        cancellation_reason TEXT,
+        metadata            TEXT NOT NULL DEFAULT '{}',
+        created_at          TEXT NOT NULL,
+        updated_at          TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX idx_instrument_setups_provider_id
+        ON instrument_setups (provider, provider_setup_id);
+      CREATE INDEX idx_instrument_setups_customer ON instrument_setups (customer_id);
+    `,
+  },
 ];

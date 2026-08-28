@@ -4,6 +4,7 @@ import type {
   AuthorizationRepository,
   CustomerRepository,
   DedicatedAccountRepository,
+  InstrumentSetupRepository,
   DisputeRepository,
   InvoiceRepository,
   LedgerRepository,
@@ -99,6 +100,9 @@ class SqliteStorage implements Storage {
       'splits',
       'subaccounts',
       'balance_ledger',
+      // Setups reference authorizations, which reference payments and
+      // customers; drop them first.
+      'instrument_setups',
       // Before payments and customers: these reference both.
       'authorizations',
       'dedicated_accounts',
@@ -625,6 +629,85 @@ class SqliteStorage implements Storage {
         .execute();
       const total = await count.executeTakeFirst();
       return { items: rows.map(map.toDedicatedAccount), total: Number(total?.total ?? 0) };
+    },
+  };
+
+  readonly instrumentSetups: InstrumentSetupRepository = {
+    insert: async (setup) => {
+      await this.#db
+        .insertInto('instrument_setups')
+        .values(map.fromInstrumentSetup(setup))
+        .execute();
+      return setup;
+    },
+    byId: async (id) => {
+      const row = await this.#db
+        .selectFrom('instrument_setups')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toInstrumentSetup(row) : null;
+    },
+    byProviderSetupId: async (provider, id) => {
+      const row = await this.#db
+        .selectFrom('instrument_setups')
+        .selectAll()
+        .where('provider', '=', provider)
+        .where('provider_setup_id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toInstrumentSetup(row) : null;
+    },
+    listByCustomer: async (customerId) => {
+      const rows = await this.#db
+        .selectFrom('instrument_setups')
+        .selectAll()
+        .where('customer_id', '=', customerId)
+        .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
+        .execute();
+      return rows.map(map.toInstrumentSetup);
+    },
+    update: async (id, patch) => {
+      const columns = map.instrumentSetupPatch(patch);
+      if (Object.keys(columns).length > 0) {
+        await this.#db
+          .updateTable('instrument_setups')
+          .set(columns)
+          .where('id', '=', id)
+          .execute();
+      }
+      const row = await this.#db
+        .selectFrom('instrument_setups')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toInstrumentSetup(row) : notFound('instrument setup', id);
+    },
+    list: async (filter) => {
+      const { limit, offset } = page(filter);
+      let query = this.#db.selectFrom('instrument_setups').selectAll();
+      let count = this.#db
+        .selectFrom('instrument_setups')
+        .select(({ fn }) => fn.countAll<number>().as('total'));
+      if (filter?.provider) {
+        query = query.where('provider', '=', filter.provider);
+        count = count.where('provider', '=', filter.provider);
+      }
+      if (filter?.status) {
+        query = query.where('status', '=', filter.status);
+        count = count.where('status', '=', filter.status);
+      }
+      if (filter?.customerId) {
+        query = query.where('customer_id', '=', filter.customerId);
+        count = count.where('customer_id', '=', filter.customerId);
+      }
+      const rows = await query
+        .orderBy('created_at', 'desc')
+        .limit(limit)
+        .offset(offset)
+        .execute();
+      const total = await count.executeTakeFirst();
+      return { items: rows.map(map.toInstrumentSetup), total: Number(total?.total ?? 0) };
     },
   };
 

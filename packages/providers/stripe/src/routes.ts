@@ -20,7 +20,7 @@ import { applyExpansions, assertExpandDepth, expandPaths } from './expand.js';
 import { assertStripeCredentials } from './auth.js';
 import { toStripeError } from './errors.js';
 import { stripeInstrumentResolver } from './instruments.js';
-import { stripeAuthorizationMinter } from './authorization.js';
+import { stripeAuthorizationMinter, stripeInstrumentDraft } from './authorization.js';
 import { fromStripeRecurring, fromStripeStatus } from './status.js';
 import {
   chargeCaptureSchema,
@@ -40,11 +40,20 @@ import {
   priceCreateSchema,
   productCreateSchema,
   refundCreateSchema,
+  setupIntentCancelSchema,
+  setupIntentConfirmSchema,
+  setupIntentCreateSchema,
+  setupIntentUpdateSchema,
   subscriptionCancelSchema,
   subscriptionCreateSchema,
   subscriptionUpdateSchema,
 } from './schemas.js';
-import { renderCheckoutPage, renderCheckoutResult } from './checkout.js';
+import {
+  renderCheckoutPage,
+  renderCheckoutResult,
+  renderSetupAuthenticationPage,
+  renderSetupResult,
+} from './checkout.js';
 import {
   list,
   serializeCharge,
@@ -58,6 +67,7 @@ import {
   serializePaymentIntent,
   serializePaymentMethod,
   serializeRefund,
+  serializeSetupIntent,
   stripeId,
 } from './serializers.js';
 
@@ -319,6 +329,7 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
         const plan = await loadPrice(handle);
         return serializePrice(plan, plan.productId ? await storage.products.byId(plan.productId) : null);
       }
+      if (handle.startsWith('seti_')) return await decorateSetup(await loadSetup(handle));
       if (handle.startsWith('sub_')) return await decorateSubscription(await loadSubscription(handle));
       if (handle.startsWith('in_')) return await decorateInvoice(await loadInvoice(handle));
       if (handle.startsWith('re_')) {
@@ -555,6 +566,272 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
       );
       const data = await Promise.all(page.map((payment) => decorate(payment)));
       return reply.send(list(data, '/v1/payment_intents', hasMore));
+    },
+  );
+
+  /* ---------------------------------------------------------------- *
+   * SetupIntents
+   *
+   * Storing an instrument without charging for it. Deliberately *not* a
+   * zero-amount payment: a row that never moves money would pollute every
+   * total, list and balance with things that are not transactions. The
+   * canonical resource is an InstrumentSetup, and it ends in the same stored
+   * authorization a successful charge would leave behind -- with the same
+   * fingerprint, so a card saved here and the same card charged directly are
+   * one PaymentMethod rather than two.
+   * ---------------------------------------------------------------- */
+
+  async function loadSetup(handle: string) {
+    const canonical = handle.replace(/^seti_/, 'set_');
+    const setup =
+      (await storage.instrumentSetups.byId(canonical)) ??
+      (await storage.instrumentSetups.byId(handle));
+    if (setup && setup.provider === PROVIDER) return setup;
+    throw new PayboxError('not_found', `No such setup_intent: '${handle}'.`);
+  }
+
+  async function decorateSetup(setup: Awaited<ReturnType<typeof loadSetup>>) {
+    return serializeSetupIntent(setup, {
+      customer: setup.customerId ? await storage.customers.byId(setup.customerId) : null,
+      authorization: setup.authorizationId
+        ? await storage.authorizations.byId(setup.authorizationId)
+        : null,
+      baseUrl: options.baseUrl,
+      basePath: options.basePath,
+    });
+  }
+
+  /**
+   * Run a setup to its outcome.
+   *
+   * Uses the same published-card table as a charge, so `4000002500003155`
+   * demands a step-up here exactly as it does on a payment -- a developer
+   * should not have to learn a second set of test numbers for the setup flow.
+   */
+  async function confirmSetup(
+    setup: Awaited<ReturnType<typeof loadSetup>>,
+    number: string | null,
+  ) {
+    const retry = setup.status === 'failed' ? { retry: true } : {};
+    const { outcome } = resolveInstrument(number, setup.channel ?? 'card', {
+      resolver: stripeInstrumentResolver,
+    });
+
+    if (outcome === 'authentication_required' || outcome === 'timeout') {
+      return engine.transitionInstrumentSetup(setup.id, 'requires_action', retry);
+    }
+
+    const started = await engine.transitionInstrumentSetup(setup.id, 'processing', retry);
+    if (outcome === 'success') {
+      return engine.transitionInstrumentSetup(started.id, 'successful');
+    }
+
+    const failure = setupFailure(outcome);
+    return engine.transitionInstrumentSetup(started.id, 'failed', failure);
+  }
+
+  /** The decline a failed setup reports in `last_setup_error`. */
+  function setupFailure(outcome: string): { failureCode: string; failureMessage: string } {
+    switch (outcome) {
+      case 'insufficient_funds':
+        return { failureCode: 'insufficient_funds', failureMessage: 'Insufficient funds.' };
+      case 'expired_card':
+        return { failureCode: 'expired_card', failureMessage: 'The card has expired.' };
+      case 'authentication_failed':
+      case 'customer_rejected':
+        return {
+          failureCode: 'authentication_required',
+          failureMessage: 'The customer did not complete authentication.',
+        };
+      default:
+        return {
+          failureCode: 'card_declined',
+          failureMessage: 'The card was declined by the issuer.',
+        };
+    }
+  }
+
+  /** The instrument a setup is being run against, from a body or a stored id. */
+  async function setupInstrument(body: {
+    payment_method?: string | undefined;
+    payment_method_data?: { card?: { number: string; exp_month?: unknown; exp_year?: unknown } } | undefined;
+  }): Promise<{ number: string | null; details: Record<string, unknown> } | null> {
+    const inline = body.payment_method_data?.card;
+    if (inline) return { number: inline.number, details: cardDetailsFrom(inline) };
+    if (body.payment_method) {
+      const authorization = await loadAuthorization(body.payment_method);
+      engine.assertChargeable(authorization);
+      return { number: authorization.last4, details: authorizationDetails(authorization) };
+    }
+    return null;
+  }
+
+  fastify.post('/v1/setup_intents', async (request, reply) => {
+    authenticate(request);
+    const body = setupIntentCreateSchema.parse(request.body ?? {});
+    const customer = body.customer ? await loadCustomer(body.customer) : null;
+    const instrument = await setupInstrument(body);
+
+    const setup = await engine.createInstrumentSetup({
+      provider: PROVIDER,
+      customerId: customer?.id ?? null,
+      usage: body.usage ?? 'off_session',
+      channel: 'card',
+      ...(instrument ? { instrument: instrument.details } : {}),
+      status: instrument ? 'pending' : 'created',
+      metadata: {
+        ...(body.metadata ?? {}),
+        ...(body.description ? { description: body.description } : {}),
+        ...(body.return_url ? { return_url: body.return_url } : {}),
+      },
+    });
+
+    if (body.confirm && instrument) {
+      return reply.send(await decorateSetup(await confirmSetup(setup, instrument.number)));
+    }
+    return reply.send(await decorateSetup(setup));
+  });
+
+  fastify.post<{ Params: { intent: string } }>(
+    '/v1/setup_intents/:intent/confirm',
+    async (request, reply) => {
+      authenticate(request);
+      const body = setupIntentConfirmSchema.parse(request.body ?? {});
+      let setup = await loadSetup(request.params.intent);
+      const instrument = await setupInstrument(body);
+
+      if (instrument) {
+        setup = await engine.transitionInstrumentSetup(setup.id, 'pending', {
+          instrument: instrument.details,
+          channel: 'card',
+          ...(setup.status === 'failed' ? { retry: true } : {}),
+        });
+      } else if (Object.keys(setup.instrument).length === 0) {
+        throw new PayboxError(
+          'validation_failed',
+          'You must provide a `payment_method` or `payment_method_data` to confirm this ' +
+            'SetupIntent.',
+        );
+      }
+
+      const number =
+        instrument?.number ?? (setup.instrument.last4 as string | undefined) ?? null;
+      return reply.send(await decorateSetup(await confirmSetup(setup, number)));
+    },
+  );
+
+  fastify.post<{ Params: { intent: string } }>(
+    '/v1/setup_intents/:intent/cancel',
+    async (request, reply) => {
+      authenticate(request);
+      const body = setupIntentCancelSchema.parse(request.body ?? {});
+      const setup = await loadSetup(request.params.intent);
+      const cancelled = await engine.transitionInstrumentSetup(setup.id, 'cancelled', {
+        cancellationReason: body.cancellation_reason ?? 'requested_by_customer',
+      });
+      return reply.send(await decorateSetup(cancelled));
+    },
+  );
+
+  fastify.get<{ Params: { intent: string } }>(
+    '/v1/setup_intents/:intent',
+    async (request, reply) => {
+      authenticate(request);
+      return reply.send(await decorateSetup(await loadSetup(request.params.intent)));
+    },
+  );
+
+  fastify.post<{ Params: { intent: string } }>(
+    '/v1/setup_intents/:intent',
+    async (request, reply) => {
+      authenticate(request);
+      const body = setupIntentUpdateSchema.parse(request.body ?? {});
+      const setup = await loadSetup(request.params.intent);
+      const updated = await storage.instrumentSetups.update(setup.id, {
+        metadata: {
+          ...setup.metadata,
+          ...(body.metadata ?? {}),
+          ...(body.description ? { description: body.description } : {}),
+        },
+        ...(body.customer ? { customerId: (await loadCustomer(body.customer)).id } : {}),
+        updatedAt: clock.nowISO(),
+      });
+      return reply.send(await decorateSetup(updated));
+    },
+  );
+
+  fastify.get<{ Querystring: Record<string, string> }>(
+    '/v1/setup_intents',
+    async (request, reply) => {
+      authenticate(request);
+      const query = listQuerySchema.parse(request.query);
+      const customer = query.customer ? await loadCustomer(query.customer) : null;
+      const { page, hasMore } = await paginate(
+        query,
+        (limit, offset) =>
+          storage.instrumentSetups.list({
+            provider: PROVIDER,
+            limit,
+            offset,
+            ...(customer ? { customerId: customer.id } : {}),
+          }),
+        (setup) => stripeId('seti', setup.id),
+      );
+      const data = await Promise.all(page.map((setup) => decorateSetup(setup)));
+      return reply.send(list(data, '/v1/setup_intents', hasMore));
+    },
+  );
+
+  /**
+   * The step-up page `next_action.redirect_to_url` points at.
+   *
+   * Served because advertising a URL and answering it with a 404 would be
+   * worse than omitting `next_action` altogether.
+   */
+  fastify.get<{ Params: { setup: string } }>('/setup/:setup', async (request, reply) => {
+    const setup = await loadSetup(request.params.setup);
+    if (setup.status !== 'requires_action') {
+      return reply.type('text/html').send(
+        renderSetupResult({
+          approved: setup.status === 'successful',
+          redirectUrl: (setup.metadata.return_url as string | undefined) ?? null,
+        }),
+      );
+    }
+    return reply.type('text/html').send(
+      renderSetupAuthenticationPage({
+        setupId: stripeId('seti', setup.id),
+        basePath: options.basePath,
+        last4: (setup.instrument.last4 as string | undefined) ?? null,
+      }),
+    );
+  });
+
+  fastify.post<{ Params: { setup: string }; Body: { outcome?: string } }>(
+    '/setup/:setup/complete',
+    async (request, reply) => {
+      const setup = await loadSetup(request.params.setup);
+      if (setup.status !== 'requires_action') {
+        throw new PayboxError(
+          'invalid_state_transition',
+          `This SetupIntent is not awaiting authentication; it is ${setup.status}.`,
+        );
+      }
+
+      const approved = (request.body?.outcome ?? 'approve') !== 'reject';
+      const settled = approved
+        ? await engine.transitionInstrumentSetup(setup.id, 'successful')
+        : await engine.transitionInstrumentSetup(setup.id, 'failed', {
+            failureCode: 'authentication_required',
+            failureMessage: 'The customer did not complete authentication.',
+          });
+
+      return reply.type('text/html').send(
+        renderSetupResult({
+          approved: settled.status === 'successful',
+          redirectUrl: (setup.metadata.return_url as string | undefined) ?? null,
+        }),
+      );
     },
   );
 
@@ -1440,18 +1717,24 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
       );
     }
 
-    const masked = maskInstrument(body.card.number);
+    // Through the same draft builder the charge and setup paths use, so one
+    // card is one PaymentMethod whichever door it came in by.
+    const draft = stripeInstrumentDraft('card', cardDetailsFrom(body.card), body.card.number);
     const created = await engine.createAuthorizationRecord({
       provider: PROVIDER,
       channel: 'card',
       reusable: true,
-      bin: masked.bin,
-      last4: masked.last4,
-      expMonth: body.card.exp_month != null ? String(body.card.exp_month) : null,
-      expYear: body.card.exp_year != null ? String(body.card.exp_year) : null,
-      brand: 'visa',
-      cardType: 'visa',
-      countryCode: 'US',
+      bin: draft.bin ?? null,
+      last4: draft.last4 ?? null,
+      expMonth: draft.expMonth ?? null,
+      expYear: draft.expYear ?? null,
+      brand: draft.brand ?? null,
+      cardType: draft.cardType ?? null,
+      countryCode: draft.countryCode ?? null,
+      signature: draft.signature ?? null,
+      ...(draft.providerAuthorizationCode
+        ? { providerAuthorizationCode: draft.providerAuthorizationCode }
+        : {}),
       metadata: body.metadata ?? {},
     });
     return reply.send(serializePaymentMethod(created));
@@ -1476,10 +1759,7 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
       const body = paymentMethodAttachSchema.parse(request.body);
       const authorization = await loadAuthorization(request.params.paymentMethod);
       const customer = await loadCustomer(body.customer);
-      const attached = await storage.authorizations.update(authorization.id, {
-        customerId: customer.id,
-        updatedAt: clock.nowISO(),
-      });
+      const attached = await engine.attachAuthorization(authorization.id, customer.id);
       return reply.send(serializePaymentMethod(attached, customer));
     },
   );
@@ -1489,10 +1769,7 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
     async (request, reply) => {
       authenticate(request);
       const authorization = await loadAuthorization(request.params.paymentMethod);
-      const detached = await storage.authorizations.update(authorization.id, {
-        customerId: null,
-        updatedAt: clock.nowISO(),
-      });
+      const detached = await engine.detachAuthorization(authorization.id);
       return reply.send(serializePaymentMethod(detached));
     },
   );

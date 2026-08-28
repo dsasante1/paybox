@@ -7,6 +7,7 @@ import type {
   PlanInterval,
   ProviderId,
   RefundStatus,
+  SetupStatus,
   SubscriptionStatus,
   TransferStatus,
 } from './status.js';
@@ -149,6 +150,54 @@ export interface Authorization {
   /** Set for mobile-money authorizations so the wire format can echo it. */
   accountName: string | null;
   mobileMoneyNumber: string | null;
+  metadata: Metadata;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Verifying an instrument and storing it, without charging for anything.
+ *
+ * Card-on-file is the flow behind every "save this card" checkbox, every
+ * free trial that later starts billing, and every off-session retry. It is
+ * *not* a payment: no money moves, and the money that eventually does move
+ * belongs to a separate charge later.
+ *
+ * Canonical rather than Stripe-specific. Stripe calls it a SetupIntent;
+ * Paystack reaches the same place by charging a nominal amount and keeping the
+ * `AUTH_` code it hands back. Both end with an [[Authorization]] the merchant
+ * can debit while the customer is away, which is the part the engine models.
+ *
+ * `authorizationId` is the whole point: a setup that succeeds without
+ * producing a chargeable instrument has achieved nothing.
+ */
+export interface InstrumentSetup {
+  id: string;
+  provider: ProviderId;
+  providerSetupId: string;
+  customerId: string | null;
+  /** The stored instrument this produced. Null until it succeeds. */
+  authorizationId: string | null;
+  status: SetupStatus;
+  providerStatus: string;
+  /**
+   * Whether the merchant intends to charge this with the customer present.
+   *
+   * Real providers treat the two differently: an off-session mandate needs
+   * stronger consent up front precisely because nobody will be there to
+   * approve the charge later.
+   */
+  usage: 'on_session' | 'off_session';
+  channel: PaymentMethod | null;
+  /**
+   * Masked instrument fragments, exactly as [[Authorization]] stores them.
+   * There is deliberately no field here that could hold a PAN or a CVV
+   * (spec §29).
+   */
+  instrument: Metadata;
+  failureCode: string | null;
+  failureMessage: string | null;
+  cancellationReason: string | null;
   metadata: Metadata;
   createdAt: string;
   updatedAt: string;
@@ -407,6 +456,7 @@ export interface PayboxEvent {
     | 'transfer'
     | 'customer'
     | 'authorization'
+    | 'setup'
     | 'subscription'
     | 'invoice'
     | 'dispute'

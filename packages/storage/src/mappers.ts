@@ -5,6 +5,7 @@ import type {
   Dispute,
   DisputeResolution,
   DisputeStatus,
+  InstrumentSetup,
   Invoice,
   InvoiceStatus,
   LedgerEntry,
@@ -19,6 +20,7 @@ import type {
   ProviderId,
   Refund,
   RefundStatus,
+  SetupStatus,
   Split,
   SplitEntry,
   Subaccount,
@@ -39,6 +41,7 @@ import type {
   AuthorizationRow,
   DedicatedAccountRow,
   DisputeRow,
+  InstrumentSetupRow,
   InvoiceRow,
   LedgerEntryRow,
   PlanRow,
@@ -570,6 +573,65 @@ export function invoicePatch(patch: Partial<Invoice>): Partial<InvoiceRow> {
   if (patch.providerStatus !== undefined) out.provider_status = patch.providerStatus;
   if (patch.paymentId !== undefined) out.payment_id = patch.paymentId;
   if (patch.paidAt !== undefined) out.paid_at = patch.paidAt;
+  if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
+  if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
+  return out;
+}
+
+/* --- instrument setups (card-on-file without a charge) --- */
+
+export const toInstrumentSetup = (row: InstrumentSetupRow): InstrumentSetup => ({
+  id: row.id,
+  provider: row.provider as ProviderId,
+  providerSetupId: row.provider_setup_id,
+  customerId: row.customer_id,
+  authorizationId: row.authorization_id,
+  status: row.status as SetupStatus,
+  providerStatus: row.provider_status,
+  usage: row.usage === 'on_session' ? 'on_session' : 'off_session',
+  channel: (row.channel as PaymentMethod | null) ?? null,
+  instrument: readJson(row.instrument),
+  failureCode: row.failure_code,
+  failureMessage: row.failure_message,
+  cancellationReason: row.cancellation_reason,
+  metadata: readJson(row.metadata),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+export const fromInstrumentSetup = (setup: InstrumentSetup): InstrumentSetupRow => ({
+  id: setup.id,
+  provider: setup.provider,
+  provider_setup_id: setup.providerSetupId,
+  customer_id: setup.customerId,
+  authorization_id: setup.authorizationId,
+  status: setup.status,
+  provider_status: setup.providerStatus,
+  usage: setup.usage,
+  channel: setup.channel,
+  instrument: writeJson(setup.instrument),
+  failure_code: setup.failureCode,
+  failure_message: setup.failureMessage,
+  cancellation_reason: setup.cancellationReason,
+  metadata: writeJson(setup.metadata),
+  created_at: setup.createdAt,
+  updated_at: setup.updatedAt,
+});
+
+export function instrumentSetupPatch(
+  patch: Partial<InstrumentSetup>,
+): Partial<InstrumentSetupRow> {
+  const out: Partial<InstrumentSetupRow> = {};
+  if (patch.status !== undefined) out.status = patch.status;
+  if (patch.providerStatus !== undefined) out.provider_status = patch.providerStatus;
+  if (patch.customerId !== undefined) out.customer_id = patch.customerId;
+  if (patch.authorizationId !== undefined) out.authorization_id = patch.authorizationId;
+  if (patch.usage !== undefined) out.usage = patch.usage;
+  if (patch.channel !== undefined) out.channel = patch.channel;
+  if (patch.instrument !== undefined) out.instrument = writeJson(patch.instrument);
+  if (patch.failureCode !== undefined) out.failure_code = patch.failureCode;
+  if (patch.failureMessage !== undefined) out.failure_message = patch.failureMessage;
+  if (patch.cancellationReason !== undefined) out.cancellation_reason = patch.cancellationReason;
   if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
   if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
   return out;

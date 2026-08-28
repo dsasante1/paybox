@@ -9,6 +9,7 @@ import {
   type DisputeResolution,
   type DisputeStatus,
   type IdFactory,
+  type InstrumentSetup,
   type Invoice,
   type InvoiceStatus,
   type LedgerEntry,
@@ -23,6 +24,7 @@ import {
   type ProviderId,
   type Refund,
   type RefundStatus,
+  type SetupStatus,
   type Split,
   type Subaccount,
   type Subscription,
@@ -38,6 +40,7 @@ import {
   assertPaymentTransition,
   assertRefundTransition,
   assertRefundable,
+  assertSetupTransition,
   assertSubscriptionTransition,
   assertTransferTransition,
   isTerminalPayment,
@@ -142,6 +145,18 @@ export interface AuthorizationDraft {
  */
 export type AuthorizationMinter = (payment: Payment) => AuthorizationDraft | null;
 
+/**
+ * Turns a completed instrument setup into the stored instrument its provider
+ * would mint.
+ *
+ * Same injection as `AuthorizationMinter`, and for the same reason: which
+ * fragments a provider keeps, and whether the result may be charged
+ * off-session, is provider knowledge the engine must not acquire (spec §30).
+ * The setup path needs its own because a setup has no payment to derive from --
+ * that is the entire point of it.
+ */
+export type SetupAuthorizationMinter = (setup: InstrumentSetup) => AuthorizationDraft | null;
+
 export interface EngineDeps {
   storage: Storage;
   clock: Clock;
@@ -149,6 +164,8 @@ export interface EngineDeps {
   bus: EventBus;
   providerStatus?: ProviderStatusResolver;
   mintAuthorization?: AuthorizationMinter;
+  /** Mints the instrument a completed setup produced. */
+  mintSetupAuthorization?: SetupAuthorizationMinter;
   /**
    * Refuse a transfer that the balance cannot cover.
    *
@@ -182,6 +199,7 @@ export class PaymentEngine {
   readonly #bus: EventBus;
   readonly #providerStatus: ProviderStatusResolver;
   readonly #mintAuthorization: AuthorizationMinter;
+  readonly #mintSetupAuthorization: SetupAuthorizationMinter;
   readonly #enforceBalance: boolean;
   readonly #openingBalance: number;
 
@@ -192,6 +210,7 @@ export class PaymentEngine {
     this.#bus = deps.bus;
     this.#providerStatus = deps.providerStatus ?? ((_provider, status) => status);
     this.#mintAuthorization = deps.mintAuthorization ?? (() => null);
+    this.#mintSetupAuthorization = deps.mintSetupAuthorization ?? (() => null);
     this.#enforceBalance = deps.enforceBalance ?? true;
     this.#openingBalance = deps.openingBalance ?? 0;
   }
@@ -840,6 +859,22 @@ export class PaymentEngine {
     mobileMoneyNumber?: string | null;
     metadata?: Metadata;
   }): Promise<Authorization> {
+    // A supplied signature asserts "this identifies the instrument", so the
+    // same card reaching the engine by two doors -- created directly, saved
+    // through a setup, or left behind by a charge -- must resolve to one row.
+    // Two would show a merchant duplicate saved cards no provider would.
+    if (input.signature) {
+      const existing = await this.#storage.authorizations.bySignature(
+        input.provider,
+        input.signature,
+      );
+      if (existing) {
+        return input.customerId && existing.customerId !== input.customerId
+          ? this.attachAuthorization(existing.id, input.customerId)
+          : existing;
+      }
+    }
+
     const now = this.#clock.nowISO();
     const authorization: Authorization = {
       id: this.#ids.next('aut'),
@@ -884,6 +919,68 @@ export class PaymentEngine {
     return result;
   }
 
+  /**
+   * Bind a stored instrument to a customer.
+   *
+   * Goes through the engine rather than a bare repository write so it appends
+   * an event like every other state change -- which is what lets the adapter
+   * emit `payment_method.attached` for an instrument attached later, and not
+   * only for one minted with a customer already on it.
+   */
+  async attachAuthorization(id: string, customerId: string): Promise<Authorization> {
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const existing = await tx.authorizations.byId(id);
+      if (!existing) throw new PayboxError('not_found', `No authorization with id ${id}.`);
+
+      const customer = await tx.customers.byId(customerId);
+      if (!customer) throw new PayboxError('not_found', `No customer with id ${customerId}.`);
+
+      const updated = await tx.authorizations.update(id, {
+        customerId,
+        updatedAt: this.#clock.nowISO(),
+      });
+      const event = await this.#appendEvent(tx, {
+        type: 'authorization.attached',
+        provider: updated.provider,
+        resourceId: updated.id,
+        resourceType: 'authorization',
+        data: authorizationEventData(updated),
+        previousStatus: existing.customerId ? 'attached' : 'detached',
+        currentStatus: 'attached',
+      });
+      return { result: updated, events: [event] };
+    });
+
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
+  /** Unbind a stored instrument from its customer. */
+  async detachAuthorization(id: string): Promise<Authorization> {
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const existing = await tx.authorizations.byId(id);
+      if (!existing) throw new PayboxError('not_found', `No authorization with id ${id}.`);
+
+      const updated = await tx.authorizations.update(id, {
+        customerId: null,
+        updatedAt: this.#clock.nowISO(),
+      });
+      const event = await this.#appendEvent(tx, {
+        type: 'authorization.detached',
+        provider: updated.provider,
+        resourceId: updated.id,
+        resourceType: 'authorization',
+        data: { ...authorizationEventData(updated), customer_id: existing.customerId },
+        previousStatus: 'attached',
+        currentStatus: 'detached',
+      });
+      return { result: updated, events: [event] };
+    });
+
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
   async deactivateAuthorization(id: string): Promise<Authorization> {
     const { result, events } = await this.#storage.transaction(async (tx) => {
       const existing = await tx.authorizations.byId(id);
@@ -919,6 +1016,35 @@ export class PaymentEngine {
   async #mintFor(tx: Storage, payment: Payment): Promise<PayboxEvent | null> {
     const draft = this.#mintAuthorization(payment);
     if (!draft) return null;
+    const minted = await this.#insertDraft(tx, {
+      provider: payment.provider,
+      draft,
+      customerId: payment.customerId,
+      paymentId: payment.id,
+      fallbackCode: payment.providerTransactionId,
+    });
+    return minted?.event ?? null;
+  }
+
+  /**
+   * Write an authorization draft as a row, inside the caller's transaction.
+   *
+   * Shared by the payment path and the setup path because both end in the same
+   * place -- a stored instrument the merchant can debit later -- and the dedupe
+   * rule has to be identical for both, or a card saved through a setup and the
+   * same card charged directly would produce two instruments.
+   */
+  async #insertDraft(
+    tx: Storage,
+    input: {
+      provider: ProviderId;
+      draft: AuthorizationDraft;
+      customerId: string | null;
+      paymentId: string | null;
+      fallbackCode: string;
+    },
+  ): Promise<{ authorization: Authorization; event: PayboxEvent } | null> {
+    const { draft } = input;
 
     // A signature is the provider's fingerprint for the instrument, so the
     // same card charged twice must yield one authorization, not two. Channels
@@ -926,18 +1052,17 @@ export class PaymentEngine {
     // what the provider does.
     const signature = draft.signature ?? null;
     if (signature) {
-      const existing = await tx.authorizations.bySignature(payment.provider, signature);
+      const existing = await tx.authorizations.bySignature(input.provider, signature);
       if (existing) return null;
     }
 
     const now = this.#clock.nowISO();
     const authorization: Authorization = {
       id: this.#ids.next('aut'),
-      provider: payment.provider,
-      providerAuthorizationCode:
-        draft.providerAuthorizationCode ?? payment.providerTransactionId,
-      customerId: payment.customerId,
-      paymentId: payment.id,
+      provider: input.provider,
+      providerAuthorizationCode: draft.providerAuthorizationCode ?? input.fallbackCode,
+      customerId: input.customerId,
+      paymentId: input.paymentId,
       channel: draft.channel,
       bin: draft.bin ?? null,
       last4: draft.last4 ?? null,
@@ -958,7 +1083,7 @@ export class PaymentEngine {
     };
 
     const created = await tx.authorizations.insert(authorization);
-    return this.#appendEvent(tx, {
+    const event = await this.#appendEvent(tx, {
       type: 'authorization.created',
       provider: created.provider,
       resourceId: created.id,
@@ -967,6 +1092,168 @@ export class PaymentEngine {
       previousStatus: null,
       currentStatus: 'active',
     });
+    return { authorization: created, event };
+  }
+
+  /* ---------------------------------------------------------------- *
+   * Instrument setups: card-on-file, without a charge
+   * ---------------------------------------------------------------- */
+
+  /**
+   * Begin storing an instrument for later use.
+   *
+   * Deliberately not a zero-amount payment. A payment that never moves money
+   * would pollute every total, every list and every balance with rows that are
+   * not transactions, and would make "how much did I take today" wrong. The
+   * lifecycle is genuinely different too: it ends in a stored instrument
+   * rather than a settlement.
+   */
+  async createInstrumentSetup(input: {
+    provider: ProviderId;
+    customerId?: string | null;
+    usage?: 'on_session' | 'off_session';
+    channel?: PaymentMethod | null;
+    instrument?: Metadata;
+    status?: SetupStatus;
+    providerSetupId?: string;
+    metadata?: Metadata;
+  }): Promise<InstrumentSetup> {
+    const now = this.#clock.nowISO();
+    const status = input.status ?? 'created';
+    const setup: InstrumentSetup = {
+      id: this.#ids.next('set'),
+      provider: input.provider,
+      providerSetupId: input.providerSetupId ?? this.#ids.token(16),
+      customerId: input.customerId ?? null,
+      authorizationId: null,
+      status,
+      providerStatus: status,
+      usage: input.usage ?? 'off_session',
+      channel: input.channel ?? null,
+      instrument: input.instrument ?? {},
+      failureCode: null,
+      failureMessage: null,
+      cancellationReason: null,
+      metadata: input.metadata ?? {},
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const created = await tx.instrumentSetups.insert(setup);
+      const event = await this.#appendEvent(tx, {
+        type: 'setup.created',
+        provider: created.provider,
+        resourceId: created.id,
+        resourceType: 'setup',
+        data: setupEventData(created),
+        previousStatus: null,
+        currentStatus: created.status,
+      });
+      return { result: created, events: [event] };
+    });
+
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
+  /**
+   * Move a setup along, minting the stored instrument when it succeeds.
+   *
+   * The mint happens inside the same transaction as the transition, so a setup
+   * can never be recorded as successful without the instrument it promised --
+   * the same append-and-project rule the payment path follows.
+   */
+  async transitionInstrumentSetup(
+    setupId: string,
+    to: SetupStatus,
+    options: {
+      failureCode?: string | null;
+      failureMessage?: string | null;
+      cancellationReason?: string | null;
+      channel?: PaymentMethod | null;
+      instrument?: Metadata;
+      /** Resume a failed setup with another instrument. */
+      retry?: boolean;
+      eventData?: Metadata;
+    } = {},
+  ): Promise<InstrumentSetup> {
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const setup = await tx.instrumentSetups.byId(setupId);
+      if (!setup) throw new PayboxError('not_found', `No instrument setup with id ${setupId}.`);
+      assertSetupTransition(setup.status, to, { ...(options.retry ? { retry: true } : {}) });
+
+      const now = this.#clock.nowISO();
+      const patch: Partial<InstrumentSetup> = {
+        status: to,
+        providerStatus: this.#providerStatus(setup.provider, setupToPaymentStatus(to)),
+        updatedAt: now,
+        ...(options.channel !== undefined ? { channel: options.channel } : {}),
+        ...(options.instrument !== undefined
+          ? { instrument: { ...setup.instrument, ...options.instrument } }
+          : {}),
+        ...(options.cancellationReason !== undefined
+          ? { cancellationReason: options.cancellationReason }
+          : {}),
+        ...(to === 'failed'
+          ? {
+              failureCode: options.failureCode ?? null,
+              failureMessage: options.failureMessage ?? null,
+            }
+          : {}),
+        // Retrying clears the previous attempt's error, so a caller reading the
+        // row cannot mistake a stale failure for the current state.
+        ...(options.retry && to !== 'failed'
+          ? { failureCode: null, failureMessage: null }
+          : {}),
+      };
+
+      const extra: PayboxEvent[] = [];
+      if (to === 'successful' && !setup.authorizationId) {
+        const draft = this.#mintSetupAuthorization({ ...setup, ...patch } as InstrumentSetup);
+        if (draft) {
+          const minted = await this.#insertDraft(tx, {
+            provider: setup.provider,
+            draft,
+            customerId: setup.customerId,
+            paymentId: null,
+            fallbackCode: setup.providerSetupId,
+          });
+          if (minted) {
+            patch.authorizationId = minted.authorization.id;
+            extra.push(minted.event);
+          } else if (draft.signature) {
+            // The instrument was already stored, by an earlier setup or an
+            // earlier charge. Point at the existing row rather than leaving
+            // the setup successful with nothing to charge.
+            const existing = await tx.authorizations.bySignature(
+              setup.provider,
+              draft.signature,
+            );
+            if (existing) patch.authorizationId = existing.id;
+          }
+        }
+      }
+
+      const updated = await tx.instrumentSetups.update(setupId, patch);
+      const event = await this.#appendEvent(tx, {
+        type: `setup.${to}`,
+        provider: updated.provider,
+        resourceId: updated.id,
+        resourceType: 'setup',
+        data: { ...setupEventData(updated), ...(options.eventData ?? {}) },
+        previousStatus: setup.status,
+        currentStatus: to,
+      });
+      return { result: updated, events: [...extra, event] };
+    });
+
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
+  async getInstrumentSetup(id: string): Promise<InstrumentSetup | null> {
+    return this.#storage.instrumentSetups.byId(id);
   }
 
   /* ---------------------------------------------------------------- *
@@ -1857,6 +2144,29 @@ function authorizationEventData(authorization: Authorization): Metadata {
     active: authorization.active,
     customer_id: authorization.customerId,
   };
+}
+
+function setupEventData(setup: InstrumentSetup): Metadata {
+  return {
+    id: setup.id,
+    setup_id: setup.providerSetupId,
+    customer_id: setup.customerId,
+    authorization_id: setup.authorizationId,
+    usage: setup.usage,
+    channel: setup.channel,
+    last4: setup.instrument.last4 ?? null,
+  };
+}
+
+/**
+ * The payment status a setup status corresponds to.
+ *
+ * Only used to reach the injected `ProviderStatusResolver`, so a setup's
+ * `providerStatus` reads in the same vocabulary the adapter uses everywhere
+ * else rather than growing a second, parallel mapping.
+ */
+function setupToPaymentStatus(status: SetupStatus): PaymentStatus {
+  return status === 'cancelled' ? 'cancelled' : (status as PaymentStatus);
 }
 
 function dedicatedAccountEventData(account: DedicatedAccount): Metadata {

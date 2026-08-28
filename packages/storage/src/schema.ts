@@ -342,6 +342,25 @@ export interface DisputeRow {
   updated_at: string;
 }
 
+export interface InstrumentSetupRow {
+  id: string;
+  provider: string;
+  provider_setup_id: string;
+  customer_id: string | null;
+  authorization_id: string | null;
+  status: string;
+  provider_status: string;
+  usage: string;
+  channel: string | null;
+  instrument: string;
+  failure_code: string | null;
+  failure_message: string | null;
+  cancellation_reason: string | null;
+  metadata: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ProductRow {
   id: string;
   provider: string;
@@ -371,6 +390,7 @@ export interface Database {
   idempotency_keys: IdempotencyRow;
   authorizations: AuthorizationRow;
   dedicated_accounts: DedicatedAccountRow;
+  instrument_setups: InstrumentSetupRow;
   products: ProductRow;
   plans: PlanRow;
   subscriptions: SubscriptionRow;

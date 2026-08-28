@@ -39,6 +39,7 @@ import {
   StripeWebhookFormatter,
   generateStripeKeys,
   stripeAuthorizationMinter,
+  stripeSetupAuthorizationMinter,
   toStripeStatus,
 } from '@paybox/stripe';
 import type { PayboxConfig } from './config.js';
@@ -121,6 +122,16 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
     return null;
   };
 
+  /**
+   * The instrument a completed setup leaves behind.
+   *
+   * Only Stripe models a setup as its own resource today; Paystack reaches
+   * card-on-file by charging and keeping the code it returns, which the
+   * payment-path minter already covers.
+   */
+  const mintSetupAuthorization = (setup: Parameters<typeof stripeSetupAuthorizationMinter>[0]) =>
+    setup.provider === 'stripe' ? stripeSetupAuthorizationMinter(setup) : null;
+
   const engine = new PaymentEngine({
     storage,
     clock,
@@ -128,6 +139,7 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
     bus,
     providerStatus,
     mintAuthorization,
+    mintSetupAuthorization,
     enforceBalance: config.balance.enforce,
     openingBalance: config.balance.opening,
   });

@@ -106,6 +106,42 @@ export const refundCreateSchema = z.object({
 });
 
 /**
+ * SetupIntents: store an instrument without charging it.
+ *
+ * `usage` is Stripe's own field and matters -- an off-session mandate is the
+ * one that lets a merchant charge while the customer is away, which is the
+ * whole reason to run a setup rather than just a charge.
+ */
+export const setupIntentCreateSchema = z.object({
+  customer: z.string().optional(),
+  payment_method: z.string().optional(),
+  payment_method_data: paymentMethodData.optional(),
+  payment_method_types: z.array(z.string()).optional(),
+  usage: z.enum(['on_session', 'off_session']).optional(),
+  description: z.string().optional(),
+  confirm: formBool,
+  return_url: z.string().optional(),
+  metadata,
+});
+
+export const setupIntentUpdateSchema = z.object({
+  customer: z.string().optional(),
+  description: z.string().optional(),
+  payment_method: z.string().optional(),
+  metadata,
+});
+
+export const setupIntentConfirmSchema = z.object({
+  payment_method: z.string().optional(),
+  payment_method_data: paymentMethodData.optional(),
+  return_url: z.string().optional(),
+});
+
+export const setupIntentCancelSchema = z.object({
+  cancellation_reason: z.enum(['abandoned', 'requested_by_customer', 'duplicate']).optional(),
+});
+
+/**
  * The legacy Charges API.
  *
  * Deprecated at Stripe in favour of PaymentIntents but still in wide use, and
