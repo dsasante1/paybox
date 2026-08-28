@@ -51,7 +51,6 @@ import {
   transferSchema,
 } from './schemas.js';
 import {
-  emulatedTransferFee,
   fail,
   numericTransactionId,
   ok,
@@ -77,6 +76,11 @@ import {
   paystackInstrumentResolver,
   paystackRefundOutcome,
 } from './instruments.js';
+import {
+  destinationForRecipientType,
+  paystackTransferFee,
+  transferFeeRefundable,
+} from './fees.js';
 
 export interface PaystackPluginOptions {
   engine: PaymentEngine;
@@ -1977,10 +1981,11 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
       throw new PayboxError('not_found', `Transfer recipient ${body.recipient} not found.`);
     }
 
+    const transferCurrency = (body.currency ?? recipient.currency).toUpperCase();
     const transfer = await engine.createTransfer({
       provider: PROVIDER,
       amount: body.amount,
-      currency: (body.currency ?? recipient.currency).toUpperCase(),
+      currency: transferCurrency,
       reference: body.reference,
       recipientName: recipient.name,
       recipientAccount: recipient.accountNumber,
@@ -1989,12 +1994,17 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
       status: 'pending',
       // Paystack holds the fee alongside the amount, so the emulator has to
       // as well -- otherwise a transfer passes here that would be refused
-      // there for being a few naira short.
-      fee: emulatedTransferFee(
-        (body.currency ?? recipient.currency).toUpperCase(),
-        includeFees,
-        options.transferFee,
-      ),
+      // there for being a few naira short. The rate follows their published
+      // schedule: tiered by amount in NGN and KES, and split by destination
+      // in GHS and KES.
+      fee: paystackTransferFee({
+        amount: body.amount,
+        currency: transferCurrency,
+        destination: destinationForRecipientType(recipient.type),
+        override: options.transferFee?.[transferCurrency],
+        enabled: includeFees,
+      }),
+      feeRefundable: transferFeeRefundable(transferCurrency),
     });
     return reply.send(ok('Transfer has been queued', serializeTransfer(transfer)));
   });

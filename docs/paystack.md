@@ -337,9 +337,34 @@ emulator starts with an opening test float per currency:
 balance:
   enforce: true
   opening: 10000000   # PAYBOX_OPENING_BALANCE
-  transferFee:        # flat per currency; set your own negotiated rate
-    NGN: 1000
+  transferFee: {}     # override the published schedule per currency
 ```
+
+### Transfer fees
+
+The fee follows Paystack's **published schedule**, taken from their per-country
+pricing pages on **2026-08-28**. It is tiered by amount, and in GHS and KES it
+also depends on where the money is going — derived from the recipient's `type`,
+where only `mobile_money` counts as a wallet.
+
+| Currency | Schedule |
+|---|---|
+| **NGN** | ≤5,000 → ₦10 · 5,001–50,000 → ₦25 · >50,000 → ₦50 |
+| **GHS** | mobile money → GHS 1 · bank → GHS 8 (flat) |
+| **ZAR** | ZAR 3 flat — **charged whether the transfer succeeds or fails** |
+| **KES** | wallet: ≤1,500 → 20 · ≤20,000 → 40 · above → 60<br>bank: ≤10,000 → 80 · ≤50,000 → 120 · ≤999,999 → 140 · above → 350 |
+| anything else | 0 — no schedule, so nothing is guessed |
+
+South Africa is the odd one: because the fee is charged on failure, a failed
+ZAR transfer returns the **amount only** and keeps the fee. Everywhere else the
+whole reservation comes back.
+
+> ⚠️ **These come from a commercial pricing page, not the API contract.**
+> Unlike the pinned OpenAPI spec, those pages carry no version, no changelog
+> and no stability guarantee, and your negotiated rates may differ entirely.
+> Treat the figures as a plausible default that will go stale, and set
+> `balance.transferFee.<CURRENCY>` to pin your own — an override replaces the
+> schedule for that currency outright.
 
 The float is **not a ledger row**, so `paybox reset` cannot wipe it and the
 ledger stays a pure record of what the run actually did. Set `opening: 0` to
@@ -565,13 +590,13 @@ transaction"*). paybox emits a simplified `*{bank_code}*000#` and a generic
 9. `gateway_response_code` maps only the failures paybox can actually
    simulate. Paystack's table is ~60 ISO 8583 codes; anything unmapped
    resolves to `unknown`, which is what Paystack documents for unlisted codes.
-10. Transfer fees are a **flat rate per currency**, not Paystack's real tiered
-    schedule — which lives on their commercial pricing page rather than in the
-    API documentation this file verifies against, and varies by country.
-    Modelling it from there would be inventing provider behaviour from a
-    non-API source. The check and the deduction include the fee, so the
-    arithmetic is right; the rate is a placeholder. Set your own under
-    `balance.transferFee` if you know your negotiated rate.
+10. Transfer fees come from Paystack's **commercial pricing pages**, not the
+    API contract (above). They will go stale silently. Kenya publishes three
+    ladders — M-PESA wallet, M-PESA Paybill/Till, and bank — but a transfer
+    recipient's `type` cannot distinguish a wallet from a Paybill/Till, so the
+    wallet ladder is used for both. Côte d'Ivoire's page quotes GHS figures,
+    which is almost certainly their error; XOF has no schedule here and is
+    charged nothing.
 12. The USSD dial string's middle segments are ours (above).
 13. Transaction ids are derived deterministically from the reference rather than
    allocated by a counter, so they are stable but not monotonic over time. This

@@ -525,6 +525,15 @@ export class PaymentEngine {
      * pricing and the engine must not learn them (spec §30).
      */
     fee?: number;
+    /**
+     * Whether a failed transfer gets its fee back.
+     *
+     * Also the adapter's call. Some providers keep the fee whatever the
+     * outcome -- Paystack's South African pricing says "per transfer (failed
+     * or successful)" -- and the engine has no business knowing which.
+     * Defaults to refundable.
+     */
+    feeRefundable?: boolean;
   }): Promise<Transfer> {
     validateAmount(input.amount);
     const now = this.#clock.nowISO();
@@ -545,7 +554,12 @@ export class PaymentEngine {
       failureReason: null,
       metadata: {
         ...(input.metadata ?? {}),
-        ...(input.fee ? { fee: Math.max(0, Math.trunc(input.fee)) } : {}),
+        ...(input.fee
+          ? {
+              fee: Math.max(0, Math.trunc(input.fee)),
+              fee_refundable: input.feeRefundable !== false,
+            }
+          : {}),
       },
       createdAt: now,
       updatedAt: now,
@@ -629,14 +643,16 @@ export class PaymentEngine {
           : {}),
       });
 
-      // A payout that did not happen releases exactly what it reserved --
-      // amount plus fee, or the two would drift apart.
+      // A payout that did not happen releases what it reserved. The fee comes
+      // back only where the provider gives it back -- keeping a
+      // non-refundable fee is the whole point of the flag.
       if (to === 'failed' || to === 'reversed') {
         const reservedFee = Math.max(0, Math.trunc(Number(updated.metadata.fee ?? 0)));
+        const refundable = updated.metadata.fee_refundable !== false;
         await this.#ledgerIn(tx, 'credit', {
           provider: updated.provider,
           currency: updated.currency,
-          amount: updated.amount + reservedFee,
+          amount: updated.amount + (refundable ? reservedFee : 0),
           reason: `transfer_${to}`,
           resourceId: updated.id,
         });

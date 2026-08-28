@@ -46,15 +46,10 @@ balance:
   # Opening test float per currency, in minor units. Set to 0 to start empty
   # and exercise the insufficient-funds path from the very first transfer.
   opening: 10000000
-  # Transfer fee per currency, in minor units, held against the balance
-  # alongside the amount. Paystack's real schedule is tiered, varies by
-  # country, and lives on their pricing page rather than in the API docs, so
-  # this is a flat approximation — set your own negotiated rate here.
-  transferFee:
-    NGN: 1000
-    GHS: 800
-    ZAR: 300
-    KES: 3000
-    USD: 100
+  # Flat transfer-fee override per currency, in minor units. Leave empty to
+  # use each provider's published schedule (tiered by amount, and split by
+  # destination in GHS and KES). Set a currency here to pin your own
+  # negotiated rate, which then replaces the schedule for that currency.
+  transferFee: {}
 
 logLevel: info

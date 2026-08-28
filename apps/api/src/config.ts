@@ -48,14 +48,12 @@ export interface PayboxConfig {
      */
     opening: number;
     /**
-     * Transfer fee per currency, in minor units.
+     * Flat transfer fee **override** per currency, in minor units.
      *
-     * Paystack's real schedule is **tiered and varies by country**, and it
-     * lives on their commercial pricing page rather than in the API
-     * documentation this project verifies against. Modelling it from there
-     * would be inventing provider behaviour from a non-API source, so the
-     * emulator applies a flat rate instead and lets you set your own if you
-     * know your negotiated one.
+     * Empty by default, and deliberately so: the adapter applies the
+     * provider's own published schedule, which is tiered by amount and split
+     * by destination. Set a currency here only to pin your negotiated rate,
+     * in which case it replaces the schedule outright for that currency.
      */
     transferFee: Record<string, number>;
   };
@@ -83,7 +81,8 @@ const DEFAULTS: PayboxConfig = {
   balance: {
     enforce: true,
     opening: 10_000_000,
-    transferFee: { NGN: 1_000, GHS: 800, ZAR: 300, KES: 3_000, USD: 100 },
+    // Empty: the provider's published schedule applies unless overridden.
+    transferFee: {},
   },
   logLevel: 'info',
 };
@@ -168,10 +167,7 @@ export function loadConfig(options: { configPath?: string; cwd?: string } = {}):
       opening: Number(
         env.PAYBOX_OPENING_BALANCE ?? fromFile.balance?.opening ?? DEFAULTS.balance.opening,
       ),
-      transferFee: {
-        ...DEFAULTS.balance.transferFee,
-        ...(fromFile.balance?.transferFee ?? {}),
-      },
+      transferFee: { ...(fromFile.balance?.transferFee ?? {}) },
     },
     logLevel: env.PAYBOX_LOG_LEVEL ?? fromFile.logLevel ?? DEFAULTS.logLevel,
   };

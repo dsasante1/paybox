@@ -20,7 +20,6 @@ export {
   serializeTransfer,
   numericTransactionId,
   emulatedFee,
-  emulatedTransferFee,
   ok,
   fail,
 } from './serializers.js';
@@ -31,5 +30,14 @@ export {
 } from './authorization.js';
 export {
   paystackInstrumentResolver,
+  paystackRefundOutcome,
+  expectedOtp,
   PAYSTACK_PUBLISHED_INSTRUMENTS,
+  DEFAULT_TEST_OTP,
 } from './instruments.js';
+export {
+  paystackTransferFee,
+  transferFeeRefundable,
+  destinationForRecipientType,
+  type TransferDestination,
+} from './fees.js';

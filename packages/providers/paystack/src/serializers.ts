@@ -59,33 +59,6 @@ const FEE_RATE: Record<string, number> = {
   USD: 0.039,
 };
 
-/**
- * Emulated transfer fee.
- *
- * Paystack holds "the transfer amount plus the transfer fee" against your
- * balance and deducts both. Their real NGN schedule is tiered and changes, so
- * this is a flat approximation per currency with the same caveat as
- * `emulatedFee`: present and internally consistent, with no authority. Do not
- * reconcile against it.
- */
-const DEFAULT_TRANSFER_FEE: Record<string, number> = {
-  NGN: 1_000,
-  GHS: 800,
-  ZAR: 300,
-  KES: 3_000,
-  USD: 100,
-};
-
-export function emulatedTransferFee(
-  currency: string,
-  enabled = true,
-  schedule: Record<string, number> = DEFAULT_TRANSFER_FEE,
-): number {
-  if (!enabled) return 0;
-  const code = currency.toUpperCase();
-  return schedule[code] ?? DEFAULT_TRANSFER_FEE[code] ?? 1_000;
-}
-
 export function emulatedFee(amount: number, currency: string, enabled = true): number {
   if (!enabled) return 0;
   const rate = FEE_RATE[currency.toUpperCase()] ?? 0.015;
