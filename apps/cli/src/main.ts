@@ -597,7 +597,13 @@ webhook
   .option('--duplicate <bool>', 'deliver every webhook twice')
   .option('--out-of-order <bool>', 'randomise delivery order within a window')
   .option('--failure-rate <rate>', 'fraction of deliveries that fail, 0..1')
-  .action(async (options: Record<string, string>) => {
+  .option('--reset', 'turn every chaos setting off', false)
+  .action(async (options: Record<string, string | boolean>) => {
+    if (options.reset) {
+      const cleared = await client().delete('/api/webhooks/chaos');
+      output(cleared, () => `${pc.green('✓')} Webhook chaos cleared.`);
+      return;
+    }
     const body: Record<string, unknown> = {};
     if (options.duplicate !== undefined) body.duplicate = options.duplicate === 'true';
     if (options.outOfOrder !== undefined) body.outOfOrder = options.outOfOrder === 'true';

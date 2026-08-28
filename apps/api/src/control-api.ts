@@ -466,6 +466,11 @@ export const controlApiPlugin: FastifyPluginAsync<{ context: PayboxContext }> = 
     dispatcher.setChaos(request.body as never),
   );
 
+  // Mirrors DELETE /network. Without it, the only way back to a clean slate is
+  // knowing to POST each field as null, and the asymmetry between the two
+  // chaos surfaces is a trap.
+  fastify.delete('/webhooks/chaos', async () => dispatcher.resetChaos());
+
   /* ---------------- network simulation ---------------- */
 
   fastify.get('/network', async () => network.profile);

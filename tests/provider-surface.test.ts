@@ -142,3 +142,67 @@ describe('the shared control plane', () => {
     expect(stripe.json()).not.toHaveProperty('status');
   });
 });
+
+describe('webhook chaos can be turned off', () => {
+  it('resets every setting, mirroring DELETE /network', async () => {
+    // Found in end-to-end testing: `setChaos` merges, so there was no way back
+    // to a clean slate from the API, and DELETE /webhooks/chaos did not exist
+    // even though DELETE /network did. The asymmetry silently 404s.
+    await app.inject({
+      method: 'POST',
+      url: '/api/webhooks/chaos',
+      payload: { forceOutcome: 'http_500', duplicate: true, failureRate: 1 },
+    });
+    expect((await app.inject({ method: 'GET', url: '/api/webhooks/chaos' })).json()).toMatchObject(
+      { forceOutcome: 'http_500', duplicate: true },
+    );
+
+    const reset = await app.inject({ method: 'DELETE', url: '/api/webhooks/chaos' });
+    expect(reset.statusCode).toBe(200);
+    expect(reset.json()).toEqual({});
+
+    expect((await app.inject({ method: 'GET', url: '/api/webhooks/chaos' })).json()).toEqual({});
+  });
+
+  it('stops forcing failures once reset', async () => {
+    await app.inject({
+      method: 'POST',
+      url: '/api/webhooks/endpoints',
+      payload: { url: 'http://127.0.0.1:9/hook', provider: 'stripe', secret: 'whsec_x' },
+    });
+    await app.inject({
+      method: 'POST',
+      url: '/api/webhooks/chaos',
+      payload: { forceOutcome: 'http_500' },
+    });
+    await app.inject({ method: 'DELETE', url: '/api/webhooks/chaos' });
+
+    await app.inject({
+      method: 'POST',
+      url: '/stripe/v1/payment_intents',
+      headers: {
+        authorization: 'Bearer sk_test_local_suite',
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      payload: new URLSearchParams({
+        amount: '2000',
+        currency: 'usd',
+        confirm: 'true',
+        'payment_method_data[card][number]': '4242424242424242',
+      }).toString(),
+    });
+    await app.inject({
+      method: 'POST',
+      url: '/api/time',
+      payload: { action: 'advance', value: '30s' },
+    });
+
+    const deliveries = (await app.inject({
+      method: 'GET',
+      url: '/api/webhooks/deliveries?limit=20',
+    })).json().items as { responseStatus: number | null }[];
+    // With chaos on, every attempt records a forced 500. With it reset, the
+    // real transport runs -- which fails to connect here, but is not a 500.
+    expect(deliveries.every((d) => d.responseStatus === 500)).toBe(false);
+  });
+});

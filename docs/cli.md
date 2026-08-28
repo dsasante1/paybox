@@ -133,6 +133,7 @@ paybox webhook list
 paybox webhook list --status exhausted
 paybox webhook retry whd_...
 paybox webhook replay whd_...
+paybox webhook chaos --reset          # turn every chaos setting off
 paybox webhook fail http_500 | timeout | connection_refused | off
 paybox webhook chaos --duplicate true --out-of-order true --failure-rate 0.2
 ```
