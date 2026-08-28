@@ -369,3 +369,103 @@ export function serializeEvent(
     type,
   };
 }
+
+
+/**
+ * A Checkout Session.
+ *
+ * paybox stores the session on the payment it collects for, with the
+ * session-specific fields in metadata: a `mode: payment` session and a
+ * payment are one lifecycle, and `expires_at` / `status: expired` map straight
+ * onto the canonical `expiresAt` / `expired`. docs/stripe.md records that a
+ * session is therefore not an independent object here.
+ */
+export function serializeCheckoutSession(
+  payment: Payment,
+  options: {
+    customer?: Customer | null;
+    baseUrl?: string;
+    basePath?: string;
+  } = {},
+) {
+  const id = stripeId('cs', payment.id);
+  const meta = payment.metadata;
+  const str = (key: string): string | null => {
+    const value = meta[key];
+    return typeof value === 'string' && value.length > 0 ? value : null;
+  };
+
+  const settled = payment.status === 'successful';
+  const expired = payment.status === 'expired' || payment.status === 'cancelled';
+
+  return {
+    id,
+    object: 'checkout.session' as const,
+    amount_subtotal: payment.amount,
+    amount_total: payment.amount,
+    cancel_url: str('cancel_url'),
+    client_reference_id: str('client_reference_id'),
+    created: unix(payment.createdAt),
+    currency: payment.currency.toLowerCase(),
+    customer: payment.customerId ? stripeId('cus', payment.customerId) : null,
+    customer_details: options.customer
+      ? {
+          email: options.customer.email,
+          name:
+            [options.customer.firstName, options.customer.lastName]
+              .filter(Boolean)
+              .join(' ') || null,
+          phone: options.customer.phone,
+          address: null,
+          tax_exempt: 'none',
+          tax_ids: [],
+        }
+      : null,
+    customer_email: str('customer_email'),
+    expires_at: payment.expiresAt ? unix(payment.expiresAt) : null,
+    invoice: null,
+    livemode: false,
+    metadata: meta,
+    mode: str('mode') ?? 'payment',
+    payment_intent: stripeId('pi', payment.id),
+    payment_method_types: ['card'],
+    // `unpaid` until it settles, then `paid`. Stripe's third value,
+    // no_payment_required, is for zero-amount sessions, which paybox refuses
+    // because canonical amounts must be positive.
+    payment_status: settled ? 'paid' : 'unpaid',
+    // open -> complete once paid; expired if it lapsed or was cancelled.
+    status: settled ? 'complete' : expired ? 'expired' : 'open',
+    submit_type: null,
+    subscription: null,
+    success_url: str('success_url'),
+    total_details: { amount_discount: 0, amount_shipping: 0, amount_tax: 0 },
+    ui_mode: 'hosted',
+    url:
+      settled || expired
+        ? null
+        : `${options.baseUrl ?? ''}${options.basePath ?? ''}/checkout/${id}`,
+  };
+}
+
+/** `GET /v1/checkout/sessions/{id}/line_items`. */
+export function serializeLineItems(payment: Payment) {
+  const raw = payment.metadata.line_items;
+  const items = Array.isArray(raw) ? raw : [];
+  return items.map((item, index) => {
+    const line = (item ?? {}) as Record<string, unknown>;
+    const quantity = Number(line.quantity ?? 1) || 1;
+    const unitAmount = Number(line.unit_amount ?? 0) || 0;
+    return {
+      id: `li_${stripeId('cs', payment.id).slice(3)}${index}`,
+      object: 'item' as const,
+      amount_discount: 0,
+      amount_subtotal: unitAmount * quantity,
+      amount_tax: 0,
+      amount_total: unitAmount * quantity,
+      currency: payment.currency.toLowerCase(),
+      description: typeof line.name === 'string' ? line.name : null,
+      price: null,
+      quantity,
+    };
+  });
+}

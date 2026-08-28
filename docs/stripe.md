@@ -49,7 +49,12 @@ The **Charge** is different: charges are immutable attempt records, and
 | `POST /v1/payment_methods` | **Partially compatible** | `type=card` only. |
 | `GET /v1/payment_methods/{id}` | **Compatible** | |
 | `POST /v1/payment_methods/{id}/attach`\|`detach` | **Compatible** | |
-| SetupIntents, Checkout, Billing, Connect, Terminal, Issuing, Radar, Tax, everything else | **Not supported** | Later slices, or out of scope. |
+| `POST /v1/checkout/sessions` | **Partially compatible** | `mode=payment` only; `price_data` required. |
+| `GET /v1/checkout/sessions`, `GET /v1/checkout/sessions/{id}` | **Compatible** | |
+| `GET /v1/checkout/sessions/{id}/line_items` | **Compatible** | |
+| `POST /v1/checkout/sessions/{id}/expire` | **Compatible** | |
+| `GET /stripe/checkout/{id}` | **Emulator-only** | The hosted page; see below. |
+| SetupIntents, Billing, Connect, Terminal, Issuing, Radar, Tax, everything else | **Not supported** | Later slices, or out of scope. |
 
 ## Requests are form-encoded
 
@@ -83,6 +88,34 @@ than a useful error.
   403**. Deliberate and not configurable. See [SECURITY.md](../SECURITY.md).
 - Other key shapes are rejected unless `PAYBOX_ALLOW_ANY_KEY=1`.
 - Nothing validates *which* test key you use.
+
+## Checkout Sessions
+
+A session returns a `url`, and paybox serves the page it points at — otherwise
+the most-used Stripe integration would be untestable. The page is **card only**
+and lists Stripe's published test cards on it. It carries the §29 emulator
+banner, which comes from a shared hosted-page shell so it cannot drift between
+this page and Paystack's.
+
+The hosted page is **deliberately unauthenticated**: the payer visits it, not
+the merchant, and Stripe's is public too.
+
+| Session state | When |
+|---|---|
+| `status: open`, `payment_status: unpaid` | Created, not yet paid |
+| `status: complete`, `payment_status: paid` | Paid; `url` becomes null |
+| `status: expired` | Expired or cancelled; the page returns **410** |
+
+Sessions expire **24 hours** after creation, as at Stripe. Because that is a
+scheduled job against virtual time, an abandoned checkout is one command away:
+
+```bash
+paybox time advance 25h     # fires checkout.session.expired
+```
+
+A **declined** card leaves the session `open`, so the payer can try another —
+which is what Stripe does, and follows from a PaymentIntent surviving its own
+failure.
 
 ## Status mapping
 
@@ -146,6 +179,8 @@ a failure the emulator would have invented.
 | `refund.successful` | `charge.refunded` |
 | `refund.failed` | `refund.failed` |
 | `customer.created` | `customer.created` |
+| `payment.successful` (session) | `checkout.session.completed` |
+| `payment.expired` (session) | `checkout.session.expired` |
 
 **One canonical event fans out to several Stripe events**, because Stripe
 reports one thing happening on more than one object. A settlement sends both
@@ -161,23 +196,31 @@ expected to react.
 
 ## Known limitations
 
-1. **The intent and its charge are one row.** `pi_…` and `ch_…` address the
+1. **A Checkout Session is stored on the payment it collects for**, with its
+   own fields in metadata, rather than as an independent object. A
+   `mode: payment` session and a payment are one lifecycle, and `expires_at` /
+   `status: expired` map straight onto the canonical `expiresAt` / `expired`.
+   `mode: subscription` will need a real session row; it is not implemented.
+2. Checkout requires `price_data` on every line item. A bare `price` id needs
+   the Prices API, which is not implemented, and accepting one would silently
+   produce a zero-amount session.
+3. **The intent and its charge are one row.** `pi_…` and `ch_…` address the
    same payment. They are not independent objects as they are at Stripe, so a
    payment cannot have several charges — which is also why a retry reuses the
    charge id rather than minting a new one.
-2. **Cursor pagination is emulated over offsets.** `starting_after` and
+4. **Cursor pagination is emulated over offsets.** `starting_after` and
    `ending_before` work by scanning up to 10,000 rows for the cursor id; a
    cursor beyond that window is ignored rather than honoured.
-3. `POST /v1/payment_intents/{id}` updates metadata, description and
+5. `POST /v1/payment_intents/{id}` updates metadata, description and
    `receipt_email` only. Amount and currency are deliberately not updatable.
-4. Charges are read-only. There is no `POST /v1/charges`; the legacy direct
+6. Charges are read-only. There is no `POST /v1/charges`; the legacy direct
    charge API is not implemented.
-5. Refunds settle **immediately**. Stripe's asynchronous refund path applies to
+7. Refunds settle **immediately**. Stripe's asynchronous refund path applies to
    bank-backed methods, which this slice does not implement.
-6. `client_secret` is derived from the intent id and is **not** a credential.
+8. `client_secret` is derived from the intent id and is **not** a credential.
    It keeps runs reproducible; do not treat it as unguessable.
-7. `receipt_url` is always null, because the emulator serves no receipt page.
+9. `receipt_url` is always null, because the emulator serves no receipt page.
    That is what Stripe returns before one exists.
-8. A customer created without an email gets a synthetic local address, because
+10. A customer created without an email gets a synthetic local address, because
    paybox keys customers on email and Stripe does not require one.
-9. `expand[]` is parsed and ignored. Nothing is expanded.
+11. `expand[]` is parsed and ignored. Nothing is expanded.
