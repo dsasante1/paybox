@@ -7,6 +7,7 @@ import type {
   DisputeStatus,
   InstrumentSetup,
   Invoice,
+  InvoiceItem,
   InvoiceStatus,
   LedgerEntry,
   Metadata,
@@ -42,6 +43,7 @@ import type {
   DedicatedAccountRow,
   DisputeRow,
   InstrumentSetupRow,
+  InvoiceItemRow,
   InvoiceRow,
   LedgerEntryRow,
   PlanRow,
@@ -538,6 +540,9 @@ export const toInvoice = (row: InvoiceRow): Invoice => ({
   currency: row.currency,
   status: row.status as InvoiceStatus,
   providerStatus: row.provider_status,
+  billingReason: row.billing_reason,
+  attemptCount: row.attempt_count,
+  number: row.number,
   periodStart: row.period_start,
   periodEnd: row.period_end,
   dueAt: row.due_at,
@@ -558,6 +563,9 @@ export const fromInvoice = (invoice: Invoice): InvoiceRow => ({
   currency: invoice.currency,
   status: invoice.status,
   provider_status: invoice.providerStatus,
+  billing_reason: invoice.billingReason,
+  attempt_count: invoice.attemptCount,
+  number: invoice.number,
   period_start: invoice.periodStart,
   period_end: invoice.periodEnd,
   due_at: invoice.dueAt,
@@ -573,6 +581,74 @@ export function invoicePatch(patch: Partial<Invoice>): Partial<InvoiceRow> {
   if (patch.providerStatus !== undefined) out.provider_status = patch.providerStatus;
   if (patch.paymentId !== undefined) out.payment_id = patch.paymentId;
   if (patch.paidAt !== undefined) out.paid_at = patch.paidAt;
+  if (patch.amount !== undefined) out.amount = patch.amount;
+  if (patch.billingReason !== undefined) out.billing_reason = patch.billingReason;
+  if (patch.attemptCount !== undefined) out.attempt_count = patch.attemptCount;
+  if (patch.number !== undefined) out.number = patch.number;
+  if (patch.dueAt !== undefined) out.due_at = patch.dueAt;
+  if (patch.periodStart !== undefined) out.period_start = patch.periodStart;
+  if (patch.periodEnd !== undefined) out.period_end = patch.periodEnd;
+  if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
+  if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
+  return out;
+}
+
+/* --- invoice line items --- */
+
+export const toInvoiceItem = (row: InvoiceItemRow): InvoiceItem => ({
+  id: row.id,
+  provider: row.provider as ProviderId,
+  providerItemId: row.provider_item_id,
+  customerId: row.customer_id,
+  invoiceId: row.invoice_id,
+  subscriptionId: row.subscription_id,
+  planId: row.plan_id,
+  description: row.description,
+  amount: row.amount,
+  currency: row.currency,
+  quantity: row.quantity,
+  unitAmount: row.unit_amount,
+  periodStart: row.period_start,
+  periodEnd: row.period_end,
+  proration: row.proration === 1,
+  position: row.position,
+  metadata: readJson(row.metadata),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+export const fromInvoiceItem = (item: InvoiceItem): InvoiceItemRow => ({
+  id: item.id,
+  provider: item.provider,
+  provider_item_id: item.providerItemId,
+  customer_id: item.customerId,
+  invoice_id: item.invoiceId,
+  subscription_id: item.subscriptionId,
+  plan_id: item.planId,
+  description: item.description,
+  amount: item.amount,
+  currency: item.currency,
+  quantity: item.quantity,
+  unit_amount: item.unitAmount,
+  period_start: item.periodStart,
+  period_end: item.periodEnd,
+  proration: item.proration ? 1 : 0,
+  position: item.position,
+  metadata: writeJson(item.metadata),
+  created_at: item.createdAt,
+  updated_at: item.updatedAt,
+});
+
+export function invoiceItemPatch(patch: Partial<InvoiceItem>): Partial<InvoiceItemRow> {
+  const out: Partial<InvoiceItemRow> = {};
+  if (patch.invoiceId !== undefined) out.invoice_id = patch.invoiceId;
+  if (patch.description !== undefined) out.description = patch.description;
+  if (patch.amount !== undefined) out.amount = patch.amount;
+  if (patch.quantity !== undefined) out.quantity = patch.quantity;
+  if (patch.unitAmount !== undefined) out.unit_amount = patch.unitAmount;
+  if (patch.periodStart !== undefined) out.period_start = patch.periodStart;
+  if (patch.periodEnd !== undefined) out.period_end = patch.periodEnd;
+  if (patch.position !== undefined) out.position = patch.position;
   if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
   if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
   return out;

@@ -62,7 +62,17 @@ The **Charge** is different: charges are immutable attempt records, and
 | `POST /v1/subscriptions`, `GET /v1/subscriptions`, `GET /v1/subscriptions/{id}` | **Partially compatible** | One price per subscription. |
 | `POST /v1/subscriptions/{id}` | **Partially compatible** | `cancel_at_period_end` only. |
 | `DELETE /v1/subscriptions/{id}` | **Compatible** | Cancels immediately. |
-| `GET /v1/invoices`, `GET /v1/invoices/{id}` | **Partially compatible** | Read-only; no draft/finalise/void. |
+| `GET /v1/invoices`, `GET /v1/invoices/{id}` | **Compatible** | |
+| `POST /v1/invoices` | **Partially compatible** | Draft; `collection_method` accepted, not acted on. |
+| `POST /v1/invoices/{id}` | **Partially compatible** | Metadata and description. |
+| `DELETE /v1/invoices/{id}` | **Partially compatible** | Voids rather than removes; see below. |
+| `POST /v1/invoices/{id}/finalize` | **Compatible** | Sweeps in pending items. |
+| `POST /v1/invoices/{id}/pay` | **Partially compatible** | Card and out-of-band; see below. |
+| `POST /v1/invoices/{id}/void` | **Compatible** | |
+| `POST /v1/invoices/{id}/mark_uncollectible` | **Compatible** | |
+| `GET /v1/invoices/{id}/lines` | **Compatible** | |
+| `POST /v1/invoiceitems`, `GET /v1/invoiceitems`, `GET`/`DELETE /v1/invoiceitems/{id}` | **Partially compatible** | No update; no discounts or tax rates. |
+| `POST /v1/invoices/{id}/send`, `/add_lines`, `/remove_lines`, `/update_lines`, `create_preview`, `search` | **Not supported** | |
 | `POST /v1/setup_intents`, `GET /v1/setup_intents`, `GET /v1/setup_intents/{id}` | **Compatible** | |
 | `POST /v1/setup_intents/{id}` | **Partially compatible** | Metadata, description and customer. |
 | `POST /v1/setup_intents/{id}/confirm` | **Compatible** | Retries a declined setup. |
@@ -301,7 +311,20 @@ expected to react.
    That is what Stripe returns before one exists.
 13. A customer created without an email gets a synthetic local address, because
    paybox keys customers on email and Stripe does not require one.
-14. **SetupIntents store an instrument without moving money**, and are modelled
+14. **An invoice's total is a fold over its lines**, recomputed on every change
+   rather than stored alongside them -- a total that can disagree with the
+   lines beneath it eventually will. Line amounts are signed, so a credit is a
+   negative line and the arithmetic works out; the invoice total is clamped at
+   zero, because paybox has no customer credit balance for an overall negative
+   to go into. Four differences from Stripe: `DELETE /v1/invoices/{id}` **voids**
+   a draft rather than removing it (the event log is append-only, and a
+   vanished invoice would leave a hole in the audit trail — the response still
+   reports `deleted: true`); `collection_method: send_invoice` is accepted but
+   nothing is emailed, since the emulator sends no mail; there are no discounts,
+   coupons or tax rates; and `invoice.finalization_failed`, `invoice.sent`,
+   `invoice.upcoming`, `invoice.updated` and `invoiceitem.deleted` are not
+   emitted.
+15. **SetupIntents store an instrument without moving money**, and are modelled
    as their own canonical resource rather than a zero-amount payment -- a row
    that never moves money would pollute every total, list and balance with
    things that are not transactions. A card saved through a setup, created
@@ -310,7 +333,7 @@ expected to react.
    Gaps: no `latest_attempt` (paybox has no SetupAttempt object), no `mandate`,
    and `verify_microdeposits` is absent because no bank-debit method is
    implemented.
-15. `expand[]` is honoured on every route, in the query string and in a POST
+16. `expand[]` is honoured on every route, in the query string and in a POST
    body, on single objects and on `data.` paths in a list. Naming a nested path
    expands the levels above it, as Stripe does, and more than four levels is
    refused. Two differences from Stripe: an id that does not resolve leaves the

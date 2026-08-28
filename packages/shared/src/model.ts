@@ -313,12 +313,20 @@ export interface Subscription {
   updatedAt: string;
 }
 
-/** One billing attempt. Links a subscription period to the payment that paid it. */
+/**
+ * A bill.
+ *
+ * Usually one billing period of a subscription, linked to the payment that
+ * settled it -- but `subscriptionId` is nullable because an invoice can also
+ * be assembled by hand from [[InvoiceItem]]s and sent to a customer who has no
+ * subscription at all.
+ */
 export interface Invoice {
   id: string;
   provider: ProviderId;
   providerInvoiceCode: string;
-  subscriptionId: string;
+  /** Null for a standalone invoice raised against a customer directly. */
+  subscriptionId: string | null;
   customerId: string;
   /** Null until the charge is attempted. */
   paymentId: string | null;
@@ -326,10 +334,62 @@ export interface Invoice {
   currency: string;
   status: InvoiceStatus;
   providerStatus: string;
+  /** Why this invoice exists: a renewal, a manual bill, a plan change. */
+  billingReason: string;
+  /** How many times payment has been attempted. */
+  attemptCount: number;
+  /** Assigned at finalisation, as providers do. A draft has none. */
+  number: string | null;
   periodStart: string;
   periodEnd: string;
   dueAt: string;
   paidAt: string | null;
+  metadata: Metadata;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * One line on an invoice.
+ *
+ * Needed the moment an invoice can be built by hand, and again the moment a
+ * subscription can carry more than one price.
+ *
+ * `amount` is deliberately signed. A credit for unused time on a plan the
+ * customer downgraded away from is a negative line, which is exactly how
+ * proration arithmetic is supposed to work -- forcing it positive and
+ * subtracting elsewhere is how that arithmetic goes wrong.
+ *
+ * `invoiceId` is null while the item is *pending*: raised by a mid-cycle
+ * change and waiting to be swept onto whichever invoice comes next.
+ */
+export interface InvoiceItem {
+  id: string;
+  provider: ProviderId;
+  providerItemId: string;
+  customerId: string;
+  /** Null while pending, waiting for the next invoice to sweep it up. */
+  invoiceId: string | null;
+  subscriptionId: string | null;
+  planId: string | null;
+  description: string | null;
+  /** Signed total for this line. Negative is a credit. */
+  amount: number;
+  currency: string;
+  quantity: number;
+  unitAmount: number;
+  periodStart: string;
+  periodEnd: string;
+  /** True for a line created by a mid-cycle change rather than a full period. */
+  proration: boolean;
+  /**
+   * Insertion order, monotonic across all items.
+   *
+   * `createdAt` cannot carry it: under the frozen clock every line on an
+   * invoice shares one timestamp, and an id tiebreak would render the lines
+   * shuffled.
+   */
+  position: number;
   metadata: Metadata;
   createdAt: string;
   updatedAt: string;

@@ -77,8 +77,12 @@ const EVENT_MAP: Record<string, readonly string[]> = {
   'subscription.cancelled': ['customer.subscription.deleted'],
   'subscription.completed': ['customer.subscription.deleted'],
   'invoice.created': ['invoice.created'],
-  'invoice.success': ['invoice.paid'],
+  'invoice.finalized': ['invoice.finalized'],
+  'invoice.success': ['invoice.paid', 'invoice.payment_succeeded'],
   'invoice.payment_failed': ['invoice.payment_failed'],
+  'invoice.void': ['invoice.voided'],
+  'invoice.uncollectible': ['invoice.marked_uncollectible'],
+  'invoiceitem.created': ['invoiceitem.created'],
 };
 
 /** Which Stripe object each event carries in `data.object`. */
@@ -214,12 +218,22 @@ export class StripeWebhookFormatter implements WebhookFormatter {
     if (event.resourceType === 'invoice') {
       const invoice = await storage.invoices.byId(event.resourceId);
       if (!invoice) return null;
-      const subscription = await storage.subscriptions.byId(invoice.subscriptionId);
+      const subscription = invoice.subscriptionId
+        ? await storage.subscriptions.byId(invoice.subscriptionId)
+        : null;
+      const lines = await storage.invoiceItems.listByInvoice(invoice.id);
+      const plans = new Map<string, NonNullable<Awaited<ReturnType<typeof storage.plans.byId>>>>();
+      for (const planId of new Set(lines.map((line) => line.planId).filter(Boolean))) {
+        const plan = await storage.plans.byId(planId as string);
+        if (plan) plans.set(plan.id, plan);
+      }
       return serializeInvoice(invoice, {
         subscription,
         customer: await storage.customers.byId(invoice.customerId),
         payment: invoice.paymentId ? await storage.payments.byId(invoice.paymentId) : null,
         plan: subscription ? await storage.plans.byId(subscription.planId) : null,
+        lines,
+        plans,
       });
     }
 

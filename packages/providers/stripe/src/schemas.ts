@@ -106,6 +106,64 @@ export const refundCreateSchema = z.object({
 });
 
 /**
+ * Invoices you build by hand.
+ *
+ * A draft is assembled from invoice items, finalised (which is when the money
+ * becomes owed), then paid, voided or written off.
+ */
+export const invoiceCreateSchema = z.object({
+  customer: z.string().min(1),
+  subscription: z.string().optional(),
+  currency: z.string().min(3).max(3).optional(),
+  description: z.string().optional(),
+  /** Stripe's flag for "finalise this automatically". */
+  auto_advance: formBool,
+  collection_method: z.enum(['charge_automatically', 'send_invoice']).optional(),
+  days_until_due: z.union([z.number(), z.string()]).optional(),
+  metadata,
+});
+
+export const invoiceUpdateSchema = z.object({
+  description: z.string().optional(),
+  auto_advance: formBool,
+  days_until_due: z.union([z.number(), z.string()]).optional(),
+  metadata,
+});
+
+export const invoicePaySchema = z.object({
+  payment_method: z.string().optional(),
+  source: z.string().optional(),
+  /** Settle the invoice without taking money -- Stripe's "pay out of band". */
+  paid_out_of_band: formBool,
+});
+
+export const invoiceFinalizeSchema = z.object({ auto_advance: formBool });
+
+export const invoiceVoidSchema = z.object({});
+
+/**
+ * A line item.
+ *
+ * With no `invoice` the item is *pending*: it waits for the next invoice to
+ * be finalised, which is how Stripe carries a mid-cycle change forward onto
+ * the customer's next bill instead of raising one of its own.
+ */
+export const invoiceItemCreateSchema = z.object({
+  customer: z.string().min(1),
+  invoice: z.string().optional(),
+  subscription: z.string().optional(),
+  price: z.string().optional(),
+  /** Signed: a negative amount is a credit. Not the positive-only `amount`. */
+  amount: z.union([z.number(), z.string()]).optional(),
+  unit_amount: z.union([z.number(), z.string()]).optional(),
+  currency: z.string().min(3).max(3).optional(),
+  description: z.string().optional(),
+  quantity: z.union([z.number(), z.string()]).optional(),
+  period: z.object({ start: z.union([z.number(), z.string()]).optional(), end: z.union([z.number(), z.string()]).optional() }).optional(),
+  metadata,
+});
+
+/**
  * SetupIntents: store an instrument without charging it.
  *
  * `usage` is Stripe's own field and matters -- an off-session mandate is the

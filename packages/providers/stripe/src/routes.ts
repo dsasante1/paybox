@@ -29,6 +29,12 @@ import {
   checkoutPaySchema,
   checkoutSessionCreateSchema,
   customerCreateSchema,
+  invoiceCreateSchema,
+  invoiceFinalizeSchema,
+  invoiceItemCreateSchema,
+  invoicePaySchema,
+  invoiceUpdateSchema,
+  invoiceVoidSchema,
   listQuerySchema,
   paymentIntentCancelSchema,
   paymentIntentCaptureSchema,
@@ -59,6 +65,7 @@ import {
   serializeCharge,
   serializeCheckoutSession,
   serializeInvoice,
+  serializeInvoiceItem,
   serializeLineItems,
   serializePrice,
   serializeProduct,
@@ -1071,12 +1078,25 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
   });
 
   async function decorateInvoice(invoice: Awaited<ReturnType<typeof loadInvoice>>) {
-    const subscription = await storage.subscriptions.byId(invoice.subscriptionId);
+    const subscription = invoice.subscriptionId
+      ? await storage.subscriptions.byId(invoice.subscriptionId)
+      : null;
+    const lines = await storage.invoiceItems.listByInvoice(invoice.id);
+
+    // One lookup per distinct plan across the lines, not one per line.
+    const plans = new Map<string, Awaited<ReturnType<typeof loadPrice>>>();
+    for (const planId of new Set(lines.map((line) => line.planId).filter(Boolean))) {
+      const plan = await storage.plans.byId(planId as string);
+      if (plan) plans.set(plan.id, plan);
+    }
+
     return serializeInvoice(invoice, {
       subscription,
       customer: await storage.customers.byId(invoice.customerId),
       payment: invoice.paymentId ? await storage.payments.byId(invoice.paymentId) : null,
       plan: subscription ? await storage.plans.byId(subscription.planId) : null,
+      lines,
+      plans,
     });
   }
 
@@ -1085,6 +1105,344 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
     const invoice = await storage.invoices.byId(canonical);
     if (invoice && invoice.provider === PROVIDER) return invoice;
     throw new PayboxError('not_found', `No such invoice: '${handle}'.`);
+  }
+
+  /* ---------------------------------------------------------------- *
+   * Invoice lifecycle
+   *
+   * A draft is assembled from line items, finalised -- which is the moment the
+   * money becomes owed -- and then paid, voided or written off. The invoice
+   * total is a fold over its lines rather than a separately-stored number, so
+   * the two can never disagree.
+   * ---------------------------------------------------------------- */
+
+  /**
+   * The instrument an invoice is paid with: an explicit one, or the customer's
+   * stored default.
+   */
+  async function invoiceInstrument(customerId: string, handle?: string) {
+    if (handle) {
+      const explicit = await loadAuthorization(handle);
+      engine.assertChargeable(explicit);
+      return explicit;
+    }
+    const stored = (await storage.authorizations.listByCustomer(customerId)).find(
+      (candidate) => candidate.reusable && candidate.active,
+    );
+    if (!stored) {
+      throw new PayboxError(
+        'validation_failed',
+        'Cannot pay this invoice: the customer has no default payment method.',
+      );
+    }
+    return stored;
+  }
+
+  fastify.post('/v1/invoices', async (request, reply) => {
+    authenticate(request);
+    const body = invoiceCreateSchema.parse(request.body);
+    const customer = await loadCustomer(body.customer);
+    const subscription = body.subscription ? await loadSubscription(body.subscription) : null;
+
+    const now = clock.nowISO();
+    const days = Number(body.days_until_due ?? 0);
+    const dueAt =
+      Number.isFinite(days) && days > 0
+        ? new Date(clock.now() + days * 24 * 60 * 60_000).toISOString()
+        : now;
+
+    const invoice = await engine.createInvoice({
+      provider: PROVIDER,
+      customerId: customer.id,
+      subscriptionId: subscription?.id ?? null,
+      currency: (body.currency ?? subscription?.currency ?? 'USD').toUpperCase(),
+      periodStart: now,
+      periodEnd: dueAt,
+      dueAt,
+      status: 'draft',
+      billingReason: 'manual',
+      metadata: {
+        ...(body.metadata ?? {}),
+        ...(body.description ? { description: body.description } : {}),
+      },
+    });
+
+    // `auto_advance` asks Stripe to finalise the draft for you.
+    const finalized = body.auto_advance === true ? await engine.finalizeInvoice(invoice.id) : invoice;
+    return reply.send(await decorateInvoice(finalized));
+  });
+
+  fastify.post<{ Params: { invoice: string } }>(
+    '/v1/invoices/:invoice/finalize',
+    async (request, reply) => {
+      authenticate(request);
+      invoiceFinalizeSchema.parse(request.body ?? {});
+      const invoice = await loadInvoice(request.params.invoice);
+      if (invoice.status !== 'draft') {
+        throw new PayboxError(
+          'invalid_state_transition',
+          `Invoice ${request.params.invoice} is already finalized.`,
+        );
+      }
+      return reply.send(await decorateInvoice(await engine.finalizeInvoice(invoice.id)));
+    },
+  );
+
+  /**
+   * Charge an open invoice.
+   *
+   * Goes through the ordinary payment path -- create, then settle according to
+   * the instrument -- so paying an invoice appends the same events and fires
+   * the same webhooks as any other charge. A decline leaves the invoice owed
+   * and payable again, which is the dunning loop a merchant has to build.
+   */
+  fastify.post<{ Params: { invoice: string } }>(
+    '/v1/invoices/:invoice/pay',
+    async (request, reply) => {
+      authenticate(request);
+      const body = invoicePaySchema.parse(request.body ?? {});
+      const invoice = await loadInvoice(request.params.invoice);
+
+      if (invoice.status === 'draft') {
+        throw new PayboxError(
+          'invalid_state_transition',
+          'Cannot pay a draft invoice. Finalize it first.',
+        );
+      }
+      if (invoice.status === 'success') {
+        throw new PayboxError('invalid_state_transition', 'This invoice is already paid.');
+      }
+      if (invoice.status === 'void') {
+        throw new PayboxError('invalid_state_transition', 'This invoice has been voided.');
+      }
+
+      // "Paid out of band" records settlement that happened elsewhere -- a bank
+      // transfer, cash. No money moves through the emulator, so no payment row
+      // is created either.
+      if (body.paid_out_of_band === true) {
+        const settled = await engine.transitionInvoice(invoice.id, 'success');
+        return reply.send(await decorateInvoice(settled));
+      }
+
+      const authorization = await invoiceInstrument(
+        invoice.customerId,
+        body.payment_method ?? body.source,
+      );
+
+      const payment = await engine.createPayment({
+        provider: PROVIDER,
+        amount: invoice.amount,
+        currency: invoice.currency,
+        customerId: invoice.customerId,
+        paymentMethod: authorization.channel,
+        paymentMethodDetails: authorizationDetails(authorization),
+        metadata: {
+          invoice_code: invoice.providerInvoiceCode,
+          ...(invoice.subscriptionId ? { subscription_id: invoice.subscriptionId } : {}),
+        },
+        status: 'pending',
+      });
+
+      const { outcome } = resolveInstrument(authorization.last4, authorization.channel, {
+        resolver: stripeInstrumentResolver,
+      });
+      const settled = await simulator.apply(payment.id, outcome);
+
+      const updated =
+        settled.status === 'successful'
+          ? await engine.transitionInvoice(invoice.id, 'success', { paymentId: settled.id })
+          : await engine.transitionInvoice(invoice.id, 'failed', { paymentId: settled.id });
+
+      return reply.send(await decorateInvoice(updated));
+    },
+  );
+
+  fastify.post<{ Params: { invoice: string } }>(
+    '/v1/invoices/:invoice/void',
+    async (request, reply) => {
+      authenticate(request);
+      invoiceVoidSchema.parse(request.body ?? {});
+      const invoice = await loadInvoice(request.params.invoice);
+      if (invoice.status === 'success') {
+        throw new PayboxError(
+          'invalid_state_transition',
+          'You cannot void an invoice that has been paid. Refund it instead.',
+        );
+      }
+      return reply.send(
+        await decorateInvoice(await engine.transitionInvoice(invoice.id, 'void')),
+      );
+    },
+  );
+
+  fastify.post<{ Params: { invoice: string } }>(
+    '/v1/invoices/:invoice/mark_uncollectible',
+    async (request, reply) => {
+      authenticate(request);
+      const invoice = await loadInvoice(request.params.invoice);
+      return reply.send(
+        await decorateInvoice(await engine.transitionInvoice(invoice.id, 'uncollectible')),
+      );
+    },
+  );
+
+  fastify.post<{ Params: { invoice: string } }>(
+    '/v1/invoices/:invoice',
+    async (request, reply) => {
+      authenticate(request);
+      const body = invoiceUpdateSchema.parse(request.body ?? {});
+      const invoice = await loadInvoice(request.params.invoice);
+      const updated = await storage.invoices.update(invoice.id, {
+        metadata: {
+          ...invoice.metadata,
+          ...(body.metadata ?? {}),
+          ...(body.description ? { description: body.description } : {}),
+        },
+        updatedAt: clock.nowISO(),
+      });
+      return reply.send(await decorateInvoice(updated));
+    },
+  );
+
+  /** Only a draft can be deleted; anything finalized is voided instead. */
+  fastify.delete<{ Params: { invoice: string } }>(
+    '/v1/invoices/:invoice',
+    async (request, reply) => {
+      authenticate(request);
+      const invoice = await loadInvoice(request.params.invoice);
+      if (invoice.status !== 'draft') {
+        throw new PayboxError(
+          'invalid_state_transition',
+          `You can only delete a draft invoice. Invoice ${request.params.invoice} is ` +
+            `${invoice.status}; void it instead.`,
+        );
+      }
+      // Voided rather than removed: the event log is append-only, and an
+      // invoice that vanished from it would leave a hole in the audit trail.
+      // docs/stripe.md records the difference from Stripe, which deletes.
+      await engine.transitionInvoice(invoice.id, 'void');
+      return reply.send({ id: stripeId('in', invoice.id), object: 'invoice', deleted: true });
+    },
+  );
+
+  fastify.get<{ Params: { invoice: string } }>(
+    '/v1/invoices/:invoice/lines',
+    async (request, reply) => {
+      authenticate(request);
+      const invoice = await loadInvoice(request.params.invoice);
+      const serialized = await decorateInvoice(invoice);
+      return reply.send(
+        list(serialized.lines.data, `/v1/invoices/${serialized.id}/lines`, false),
+      );
+    },
+  );
+
+  /* ---------------------------------------------------------------- *
+   * Invoice items
+   * ---------------------------------------------------------------- */
+
+  fastify.post('/v1/invoiceitems', async (request, reply) => {
+    authenticate(request);
+    const body = invoiceItemCreateSchema.parse(request.body);
+    const customer = await loadCustomer(body.customer);
+    const invoice = body.invoice ? await loadInvoice(body.invoice) : null;
+    const plan = body.price ? await loadPrice(body.price) : null;
+
+    const quantity = Math.max(1, Math.trunc(Number(body.quantity ?? 1)) || 1);
+    const unitAmount =
+      body.unit_amount !== undefined
+        ? Number(body.unit_amount)
+        : plan
+          ? plan.amount
+          : undefined;
+    const amount = body.amount !== undefined ? Number(body.amount) : undefined;
+
+    if (amount === undefined && unitAmount === undefined) {
+      throw new PayboxError(
+        'validation_failed',
+        'One of `amount`, `unit_amount` or `price` is required.',
+      );
+    }
+    if (amount !== undefined && !Number.isInteger(amount)) {
+      throw new PayboxError('validation_failed', 'Amount must be an integer.');
+    }
+
+    const currency = (
+      body.currency ?? plan?.currency ?? invoice?.currency ?? 'USD'
+    ).toUpperCase();
+    if (!isSupportedCurrency(currency)) {
+      throw new PayboxError('unsupported_currency', `The currency ${currency} is not supported.`);
+    }
+
+    const item = await engine.addInvoiceItem({
+      provider: PROVIDER,
+      customerId: customer.id,
+      invoiceId: invoice?.id ?? null,
+      subscriptionId: body.subscription
+        ? (await loadSubscription(body.subscription)).id
+        : (invoice?.subscriptionId ?? null),
+      planId: plan?.id ?? null,
+      description: body.description ?? plan?.name ?? null,
+      ...(amount !== undefined ? { amount } : {}),
+      ...(unitAmount !== undefined ? { unitAmount } : {}),
+      currency,
+      quantity,
+      ...(body.period?.start ? { periodStart: unixToIso(body.period.start) } : {}),
+      ...(body.period?.end ? { periodEnd: unixToIso(body.period.end) } : {}),
+      metadata: body.metadata ?? {},
+    });
+
+    return reply.send(serializeInvoiceItem(item));
+  });
+
+  fastify.get<{ Params: { item: string } }>('/v1/invoiceitems/:item', async (request, reply) => {
+    authenticate(request);
+    return reply.send(serializeInvoiceItem(await loadInvoiceItem(request.params.item)));
+  });
+
+  fastify.delete<{ Params: { item: string } }>(
+    '/v1/invoiceitems/:item',
+    async (request, reply) => {
+      authenticate(request);
+      const item = await loadInvoiceItem(request.params.item);
+      await engine.deleteInvoiceItem(item.id);
+      return reply.send({ id: stripeId('ii', item.id), object: 'invoiceitem', deleted: true });
+    },
+  );
+
+  fastify.get<{ Querystring: Record<string, string> }>(
+    '/v1/invoiceitems',
+    async (request, reply) => {
+      authenticate(request);
+      const query = listQuerySchema.parse(request.query);
+      const customer = query.customer ? await loadCustomer(query.customer) : null;
+      const { page, hasMore } = await paginate(
+        query,
+        (limit, offset) =>
+          storage.invoiceItems.list({
+            provider: PROVIDER,
+            limit,
+            offset,
+            ...(customer ? { customerId: customer.id } : {}),
+          }),
+        (item) => stripeId('ii', item.id),
+      );
+      return reply.send(list(page.map(serializeInvoiceItem), '/v1/invoiceitems', hasMore));
+    },
+  );
+
+  async function loadInvoiceItem(handle: string) {
+    const canonical = handle.replace(/^ii_/, 'ivi_');
+    const item =
+      (await storage.invoiceItems.byId(canonical)) ??
+      (await storage.invoiceItems.byId(handle));
+    if (item && item.provider === PROVIDER) return item;
+    throw new PayboxError('not_found', `No such invoiceitem: '${handle}'.`);
+  }
+
+  /** Stripe sends period bounds as unix seconds. */
+  function unixToIso(value: number | string): string {
+    return new Date(Number(value) * 1000).toISOString();
   }
 
   fastify.get<{ Params: { invoice: string } }>('/v1/invoices/:invoice', async (request, reply) => {

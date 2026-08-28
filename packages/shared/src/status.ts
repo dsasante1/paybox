@@ -99,8 +99,30 @@ export const SETUP_STATUSES = [
 ] as const;
 export type SetupStatus = (typeof SETUP_STATUSES)[number];
 
-/** One billing attempt against a subscription. */
-export const INVOICE_STATUSES = ['pending', 'success', 'failed'] as const;
+/**
+ * An invoice's life.
+ *
+ * `pending` is an invoice that has been issued and is awaiting payment --
+ * Stripe calls that `open`, Paystack calls it `pending`. The three additions
+ * beyond Paystack's vocabulary are the ones an invoice needs once it can be
+ * built by hand rather than only raised by a billing run:
+ *
+ *   draft          Being assembled. Not owed yet, and still editable.
+ *   void           Cancelled. The money was never owed after all.
+ *   uncollectible  Owed, given up on. A bookkeeping outcome, not a failure --
+ *                  and reversible, because a customer can still pay late.
+ *
+ * `failed` is a payment attempt that did not succeed, which leaves the invoice
+ * still owed; Stripe keeps such an invoice `open` and the adapter maps it back.
+ */
+export const INVOICE_STATUSES = [
+  'draft',
+  'pending',
+  'success',
+  'failed',
+  'void',
+  'uncollectible',
+] as const;
 export type InvoiceStatus = (typeof INVOICE_STATUSES)[number];
 
 /**

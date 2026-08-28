@@ -52,6 +52,7 @@ export {
   serializePrice,
   serializeSubscription,
   serializeInvoice,
+  serializeInvoiceItem,
   serializeLineItems,
   stripeEventId,
   stripeId,

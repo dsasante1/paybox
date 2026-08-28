@@ -3,6 +3,8 @@ import type {
   Customer,
   InstrumentSetup,
   Invoice,
+  InvoiceItem,
+  Metadata,
   Payment,
   PayboxEvent,
   Plan,
@@ -671,6 +673,55 @@ export function serializeSubscription(
   };
 }
 
+/** One line on an invoice, or a pending item not yet on one. */
+export function serializeInvoiceItem(item: InvoiceItem) {
+  return {
+    id: stripeId('ii', item.id),
+    object: 'invoiceitem' as const,
+    amount: item.amount,
+    currency: item.currency.toLowerCase(),
+    customer: stripeId('cus', item.customerId),
+    date: unix(item.createdAt),
+    description: item.description,
+    discountable: true,
+    invoice: item.invoiceId ? stripeId('in', item.invoiceId) : null,
+    livemode: false,
+    metadata: item.metadata,
+    period: { start: unix(item.periodStart), end: unix(item.periodEnd) },
+    price: item.planId ? stripeId('price', item.planId) : null,
+    proration: item.proration,
+    quantity: item.quantity,
+    subscription: item.subscriptionId ? stripeId('sub', item.subscriptionId) : null,
+    unit_amount: item.unitAmount,
+    unit_amount_decimal: String(item.unitAmount),
+  };
+}
+
+/** An invoice line, as it appears inside `invoice.lines`. */
+function serializeLine(item: InvoiceItem, invoiceId: string, plan?: Plan | null) {
+  // Two fields are annotated wider than this branch produces so the
+  // plan-derived fallback below is the same type; without that the two
+  // branches union and callers cannot treat `lines.data` as one shape.
+  return {
+    id: stripeId('il', item.id),
+    object: 'line_item' as const,
+    amount: item.amount,
+    currency: item.currency.toLowerCase(),
+    description: item.description,
+    discountable: true,
+    invoice: invoiceId,
+    invoice_item: stripeId('ii', item.id) as string | null,
+    livemode: false,
+    metadata: item.metadata as Metadata,
+    period: { start: unix(item.periodStart), end: unix(item.periodEnd) },
+    price: plan ? serializePrice(plan) : null,
+    proration: item.proration,
+    quantity: item.quantity,
+    subscription: item.subscriptionId ? stripeId('sub', item.subscriptionId) : null,
+    type: item.subscriptionId ? 'subscription' : 'invoiceitem',
+  };
+}
+
 export function serializeInvoice(
   invoice: Invoice,
   options: {
@@ -678,20 +729,62 @@ export function serializeInvoice(
     customer?: Customer | null;
     payment?: Payment | null;
     plan?: Plan | null;
+    /** Real stored lines. Empty falls back to one synthesised from the plan. */
+    lines?: InvoiceItem[];
+    /** Plans for the lines, keyed by canonical plan id. */
+    plans?: Map<string, Plan>;
   } = {},
 ) {
   const id = stripeId('in', invoice.id);
   const paid = invoice.status === 'success';
+  // A void or written-off invoice is owed nothing further; Stripe zeroes
+  // amount_remaining rather than leaving a debt that will never be collected.
+  const closed = paid || invoice.status === 'void' || invoice.status === 'uncollectible';
+  const stored = options.lines ?? [];
+
+  const lines: ReturnType<typeof serializeLine>[] =
+    stored.length > 0
+      ? stored.map((item) =>
+          serializeLine(
+            item,
+            id,
+            item.planId ? (options.plans?.get(item.planId) ?? options.plan) : options.plan,
+          ),
+        )
+      : [
+          // Rows raised before line items existed still have to serialise, so
+          // the plan-derived single line stays as a fallback.
+          {
+            id: `il_${id.slice(3)}`,
+            object: 'line_item' as const,
+            amount: invoice.amount,
+            currency: invoice.currency.toLowerCase(),
+            description: options.plan?.name ?? null,
+            discountable: true,
+            invoice: id,
+            invoice_item: null,
+            livemode: false,
+            metadata: {} as Metadata,
+            period: { start: unix(invoice.periodStart), end: unix(invoice.periodEnd) },
+            price: options.plan ? serializePrice(options.plan) : null,
+            proration: false,
+            quantity: options.subscription?.quantity ?? 1,
+            subscription: options.subscription ? stripeId('sub', options.subscription.id) : null,
+            type: (options.subscription ? 'subscription' : 'invoiceitem') as string,
+          },
+        ];
+
   return {
     id,
     object: 'invoice' as const,
     amount_due: invoice.amount,
     amount_paid: paid ? invoice.amount : 0,
-    amount_remaining: paid ? 0 : invoice.amount,
-    attempt_count: 1,
-    attempted: invoice.status !== 'pending',
-    auto_advance: !paid,
-    billing_reason: 'subscription_cycle',
+    amount_remaining: closed ? 0 : invoice.amount,
+    attempt_count: invoice.attemptCount,
+    attempted: invoice.attemptCount > 0,
+    // Stripe stops advancing an invoice that has reached an end state.
+    auto_advance: invoice.status === 'pending' || invoice.status === 'failed',
+    billing_reason: invoice.billingReason,
     collection_method: 'charge_automatically',
     created: unix(invoice.createdAt),
     currency: invoice.currency.toLowerCase(),
@@ -702,24 +795,13 @@ export function serializeInvoice(
     invoice_pdf: null,
     lines: {
       object: 'list' as const,
-      data: [
-        {
-          id: `il_${id.slice(3)}`,
-          object: 'line_item' as const,
-          amount: invoice.amount,
-          currency: invoice.currency.toLowerCase(),
-          description: options.plan?.name ?? null,
-          period: { start: unix(invoice.periodStart), end: unix(invoice.periodEnd) },
-          price: options.plan ? serializePrice(options.plan) : null,
-          quantity: options.subscription?.quantity ?? 1,
-        },
-      ],
+      data: lines,
       has_more: false,
       url: `/v1/invoices/${id}/lines`,
     },
     livemode: false,
     metadata: invoice.metadata,
-    number: null,
+    number: invoice.number,
     paid,
     payment_intent: options.payment ? stripeId('pi', options.payment.id) : null,
     period_end: unix(invoice.periodEnd),

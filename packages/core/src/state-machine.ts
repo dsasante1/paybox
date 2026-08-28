@@ -101,11 +101,34 @@ const SUBSCRIPTION_TRANSITIONS: Readonly<
   cancelled: [],
 };
 
-/** One billing attempt: raised, then either paid or not. */
+/**
+ * Invoice lifecycle.
+ *
+ *   draft ──> pending ──┬─> success
+ *     │          │      ├─> failed ──> success | pending
+ *     │          │      ├─> void
+ *     └─> void   │      └─> uncollectible ──> success
+ *
+ * Two deliberate non-obvious edges:
+ *
+ * `failed` is not terminal. A failed payment attempt leaves the invoice still
+ * owed, and paying it again with another instrument is the normal recovery --
+ * Stripe does not even change the invoice's status for a failed attempt.
+ *
+ * `uncollectible -> success` is allowed. Writing a debt off is a bookkeeping
+ * decision, not a fact about the customer; they can still pay late, and a
+ * model that refuses that would make the merchant reconcile by hand.
+ *
+ * `success` and `void` are terminal. A paid invoice cannot be voided -- that
+ * is a refund, which is a different object with different arithmetic.
+ */
 const INVOICE_TRANSITIONS: Readonly<Record<InvoiceStatus, readonly InvoiceStatus[]>> = {
-  pending: ['success', 'failed'],
+  draft: ['pending', 'void'],
+  pending: ['success', 'failed', 'void', 'uncollectible'],
+  failed: ['success', 'pending', 'void', 'uncollectible'],
+  uncollectible: ['success', 'void'],
   success: [],
-  failed: [],
+  void: [],
 };
 
 /**

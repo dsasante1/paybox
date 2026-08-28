@@ -6,6 +6,7 @@ import type {
   DisputeStatus,
   InstrumentSetup,
   Invoice,
+  InvoiceItem,
   InvoiceStatus,
   LedgerEntry,
   Metadata,
@@ -295,8 +296,41 @@ export interface InvoiceRepository {
   /** Oldest first, so a billing history reads in the order it happened. */
   listBySubscription(subscriptionId: string): Promise<Invoice[]>;
   list(
-    filter?: ListOptions & { provider?: ProviderId; status?: InvoiceStatus },
+    filter?: ListOptions & {
+      provider?: ProviderId;
+      status?: InvoiceStatus;
+      customerId?: string;
+      subscriptionId?: string;
+    },
   ): Promise<Page<Invoice>>;
+}
+
+/**
+ * Invoice line items.
+ *
+ * `listPending` is the load-bearing query: items with no invoice yet, waiting
+ * to be swept onto the next one. That is how a mid-cycle change is carried
+ * forward rather than billed immediately.
+ */
+export interface InvoiceItemRepository {
+  insert(item: InvoiceItem): Promise<InvoiceItem>;
+  /** The next insertion position. Monotonic across the whole table. */
+  nextPosition(): Promise<number>;
+  byId(id: string): Promise<InvoiceItem | null>;
+  byProviderItemId(provider: ProviderId, id: string): Promise<InvoiceItem | null>;
+  /** Oldest first, so an invoice reads in the order it was assembled. */
+  listByInvoice(invoiceId: string): Promise<InvoiceItem[]>;
+  /** Batch form of `listByInvoice`, keyed by invoice id. */
+  listByInvoices(invoiceIds: readonly string[]): Promise<Map<string, InvoiceItem[]>>;
+  /** Unbilled items for a customer, optionally narrowed to one subscription. */
+  listPending(customerId: string, subscriptionId?: string | null): Promise<InvoiceItem[]>;
+  update(id: string, patch: Partial<InvoiceItem>): Promise<InvoiceItem>;
+  delete(id: string): Promise<void>;
+  /** Sum of a single invoice's lines. The invoice total is a fold over these. */
+  totalFor(invoiceId: string): Promise<number>;
+  list(
+    filter?: ListOptions & { provider?: ProviderId; customerId?: string; pending?: boolean },
+  ): Promise<Page<InvoiceItem>>;
 }
 
 export interface SubaccountRepository {
@@ -419,6 +453,7 @@ export interface Storage {
   readonly plans: PlanRepository;
   readonly subscriptions: SubscriptionRepository;
   readonly invoices: InvoiceRepository;
+  readonly invoiceItems: InvoiceItemRepository;
   readonly subaccounts: SubaccountRepository;
   readonly splits: SplitRepository;
   readonly ledger: LedgerRepository;

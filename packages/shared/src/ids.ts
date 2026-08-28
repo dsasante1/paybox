@@ -21,6 +21,7 @@ export const ID_PREFIXES = [
   'prd', // product
   'sub', // subscription
   'inv', // invoice
+  'ivi', // invoice line item
   'sac', // subaccount
   'spl', // transaction split
   'led', // balance ledger entry

@@ -255,17 +255,42 @@ export interface InvoiceRow {
   id: string;
   provider: string;
   provider_invoice_code: string;
-  subscription_id: string;
+  subscription_id: string | null;
   customer_id: string;
   payment_id: string | null;
   amount: number;
   currency: string;
   status: string;
   provider_status: string;
+  billing_reason: string;
+  attempt_count: number;
+  number: string | null;
   period_start: string;
   period_end: string;
   due_at: string;
   paid_at: string | null;
+  metadata: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InvoiceItemRow {
+  id: string;
+  provider: string;
+  provider_item_id: string;
+  customer_id: string;
+  invoice_id: string | null;
+  subscription_id: string | null;
+  plan_id: string | null;
+  description: string | null;
+  amount: number;
+  currency: string;
+  quantity: number;
+  unit_amount: number;
+  period_start: string;
+  period_end: string;
+  proration: number;
+  position: number;
   metadata: string;
   created_at: string;
   updated_at: string;
@@ -395,6 +420,7 @@ export interface Database {
   plans: PlanRow;
   subscriptions: SubscriptionRow;
   invoices: InvoiceRow;
+  invoice_items: InvoiceItemRow;
   subaccounts: SubaccountRow;
   splits: SplitRow;
   split_subaccounts: SplitSubaccountRow;

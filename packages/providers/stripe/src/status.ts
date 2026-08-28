@@ -208,11 +208,18 @@ export function toStripeSubscriptionStatus(status: SubscriptionStatus): string {
  */
 export function toStripeInvoiceStatus(status: InvoiceStatus): string {
   switch (status) {
+    case 'draft':
+      return 'draft';
     case 'success':
       return 'paid';
+    case 'void':
+      return 'void';
+    case 'uncollectible':
+      return 'uncollectible';
+    // A *failed attempt* leaves the invoice open at Stripe -- the status
+    // describes the invoice, not the attempt, and Stripe keeps retrying it.
     case 'failed':
-      return 'open';
-    default:
+    case 'pending':
       return 'open';
   }
 }

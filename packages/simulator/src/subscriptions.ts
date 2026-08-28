@@ -173,11 +173,28 @@ export class SubscriptionRunner {
     if (!plan) {
       throw new PayboxError('not_found', `No plan with id ${subscription.planId}.`);
     }
+    const periodEnd = addInterval(dueAt, plan.interval, plan.intervalCount);
     return this.#engine.createInvoice({
       subscriptionId: subscription.id,
       periodStart: dueAt,
-      periodEnd: addInterval(dueAt, plan.interval, plan.intervalCount),
+      periodEnd,
       dueAt,
+      // A real line rather than one synthesised at serialisation time, so a
+      // renewal invoice and a hand-built one read identically.
+      items: [
+        {
+          planId: plan.id,
+          description: plan.name,
+          unitAmount: plan.amount,
+          quantity: subscription.quantity,
+          currency: subscription.currency,
+          periodStart: dueAt,
+          periodEnd,
+          subscriptionId: subscription.id,
+          customerId: subscription.customerId,
+          provider: subscription.provider,
+        },
+      ],
     });
   }
 
