@@ -32,23 +32,28 @@ const DAYS_PER_INTERVAL: Partial<Record<PlanInterval, number>> = {
  * over would shift every subsequent renewal by a month, which is the classic
  * off-by-one in hand-rolled billing code.
  */
-export function addInterval(fromISO: string, interval: PlanInterval): string {
+export function addInterval(fromISO: string, interval: PlanInterval, count = 1): string {
   const from = new Date(fromISO);
   if (Number.isNaN(from.getTime())) {
     throw new RangeError(`Cannot advance an invalid date: ${fromISO}`);
   }
+  // Stripe expresses "every three months" as interval=month, interval_count=3.
+  // Paystack has no equivalent and always sends 1, so the default keeps its
+  // behaviour identical.
+  const multiplier = Number.isInteger(count) && count > 0 ? count : 1;
 
   const days = DAYS_PER_INTERVAL[interval];
   if (days !== undefined) {
     const next = new Date(from.getTime());
-    next.setUTCDate(next.getUTCDate() + days);
+    next.setUTCDate(next.getUTCDate() + days * multiplier);
     return next.toISOString();
   }
 
-  const months = MONTHS_PER_INTERVAL[interval];
-  if (months === undefined) {
+  const perInterval = MONTHS_PER_INTERVAL[interval];
+  if (perInterval === undefined) {
     throw new RangeError(`Unknown billing interval: ${interval}`);
   }
+  const months = perInterval * multiplier;
 
   const day = from.getUTCDate();
   const next = new Date(from.getTime());
@@ -65,12 +70,17 @@ function daysInUtcMonth(year: number, monthIndex: number): number {
 }
 
 /** How many whole periods of `interval` fit between two instants. */
-export function periodsBetween(fromISO: string, toISO: string, interval: PlanInterval): number {
+export function periodsBetween(
+  fromISO: string,
+  toISO: string,
+  interval: PlanInterval,
+  intervalCount = 1,
+): number {
   let count = 0;
   let cursor = fromISO;
   const end = Date.parse(toISO);
   while (Date.parse(cursor) < end && count < 10_000) {
-    cursor = addInterval(cursor, interval);
+    cursor = addInterval(cursor, interval, intervalCount);
     count++;
   }
   return count;

@@ -133,7 +133,17 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
   });
   const simulator = new PaymentSimulator({ engine, clock });
   const scenarios = new ScenarioRunner({ storage, clock, ids, simulator, engine });
-  const subscriptions = new SubscriptionRunner({ storage, clock, ids, simulator, engine });
+  const subscriptions = new SubscriptionRunner({
+    storage,
+    clock,
+    ids,
+    simulator,
+    engine,
+    // Paystack raises the invoice three days ahead; Stripe finalises about an
+    // hour after creating it. Hardcoding either would land the other's
+    // invoice webhook at the wrong time.
+    invoiceLeadMs: { paystack: 3 * 24 * 60 * 60_000, stripe: 60 * 60_000 },
+  });
   const network = new NetworkSimulator(random);
 
   const dispatcher = new WebhookDispatcher({

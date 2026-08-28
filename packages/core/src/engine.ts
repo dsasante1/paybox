@@ -19,6 +19,7 @@ import {
   type PayboxEvent,
   type Plan,
   type PlanInterval,
+  type Product,
   type ProviderId,
   type Refund,
   type RefundStatus,
@@ -1060,12 +1061,35 @@ export class PaymentEngine {
    * Plans, subscriptions and invoices
    * ---------------------------------------------------------------- */
 
+  async createProduct(input: {
+    provider: ProviderId;
+    name: string;
+    description?: string | null;
+    providerProductId?: string;
+    metadata?: Metadata;
+  }): Promise<Product> {
+    const now = this.#clock.nowISO();
+    return this.#storage.products.insert({
+      id: this.#ids.next('prd'),
+      provider: input.provider,
+      providerProductId: input.providerProductId ?? this.#ids.token(12),
+      name: input.name,
+      description: input.description ?? null,
+      active: true,
+      metadata: input.metadata ?? {},
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
   async createPlan(input: {
     provider: ProviderId;
     name: string;
     amount: number;
     currency: string;
     interval: PlanInterval;
+    intervalCount?: number;
+    productId?: string | null;
     description?: string | null;
     invoiceLimit?: number;
     sendInvoices?: boolean;
@@ -1091,6 +1115,11 @@ export class PaymentEngine {
       amount: input.amount,
       currency: input.currency.toUpperCase(),
       interval: input.interval,
+      intervalCount:
+        Number.isInteger(input.intervalCount) && (input.intervalCount ?? 0) > 0
+          ? input.intervalCount!
+          : 1,
+      productId: input.productId ?? null,
       description: input.description ?? null,
       invoiceLimit: input.invoiceLimit ?? 0,
       sendInvoices: input.sendInvoices ?? true,

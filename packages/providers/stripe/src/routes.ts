@@ -7,13 +7,19 @@ import {
   type Payment,
   type PaymentMethod,
 } from '@paybox/shared';
-import type { PaymentEngine, Storage } from '@paybox/core';
-import { maskInstrument, resolveInstrument, type PaymentSimulator } from '@paybox/simulator';
+import { addInterval, type PaymentEngine, type Storage } from '@paybox/core';
+import {
+  maskInstrument,
+  resolveInstrument,
+  type PaymentSimulator,
+  type SubscriptionRunner,
+} from '@paybox/simulator';
 import { expandFormBody } from './form.js';
 import { assertStripeCredentials } from './auth.js';
 import { toStripeError } from './errors.js';
 import { stripeInstrumentResolver } from './instruments.js';
-import { fromStripeStatus } from './status.js';
+import { stripeAuthorizationMinter } from './authorization.js';
+import { fromStripeRecurring, fromStripeStatus } from './status.js';
 import {
   checkoutPaySchema,
   checkoutSessionCreateSchema,
@@ -26,14 +32,23 @@ import {
   paymentIntentUpdateSchema,
   paymentMethodAttachSchema,
   paymentMethodCreateSchema,
+  priceCreateSchema,
+  productCreateSchema,
   refundCreateSchema,
+  subscriptionCancelSchema,
+  subscriptionCreateSchema,
+  subscriptionUpdateSchema,
 } from './schemas.js';
 import { renderCheckoutPage, renderCheckoutResult } from './checkout.js';
 import {
   list,
   serializeCharge,
   serializeCheckoutSession,
+  serializeInvoice,
   serializeLineItems,
+  serializePrice,
+  serializeProduct,
+  serializeSubscription,
   serializeCustomer,
   serializePaymentIntent,
   serializePaymentMethod,
@@ -44,6 +59,8 @@ import {
 export interface StripePluginOptions {
   engine: PaymentEngine;
   simulator: PaymentSimulator;
+  /** Drives recurring billing; renewals are scheduled through it. */
+  subscriptions: SubscriptionRunner;
   storage: Storage;
   clock: Clock;
   ids: IdFactory;
@@ -72,7 +89,7 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
   fastify,
   options,
 ) => {
-  const { engine, simulator, storage, clock, ids } = options;
+  const { engine, simulator, subscriptions, storage, clock, ids } = options;
   const autoAdvance = options.autoAdvance ?? true;
   const autoAdvanceDelayMs = options.autoAdvanceDelayMs ?? 3_000;
 
@@ -450,6 +467,275 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
   );
 
   /* ---------------------------------------------------------------- *
+   * Products and Prices
+   *
+   * A canonical Plan is a Stripe Price: an amount plus how often. Stripe's
+   * Product -- what the thing is -- is a separate row, because one product can
+   * carry several prices.
+   * ---------------------------------------------------------------- */
+
+  async function loadProduct(handle: string) {
+    const canonical = handle.replace(/^prod_/, 'prd_');
+    const product = await storage.products.byId(canonical);
+    if (product && product.provider === PROVIDER) return product;
+    throw new PayboxError('not_found', `No such product: '${handle}'.`);
+  }
+
+  async function loadPrice(handle: string) {
+    const canonical = handle.replace(/^price_/, 'pln_');
+    const plan = await storage.plans.byId(canonical);
+    if (plan && plan.provider === PROVIDER) return plan;
+    throw new PayboxError('not_found', `No such price: '${handle}'.`);
+  }
+
+  fastify.post('/v1/products', async (request, reply) => {
+    authenticate(request);
+    const body = productCreateSchema.parse(request.body);
+    const product = await engine.createProduct({
+      provider: PROVIDER,
+      name: body.name,
+      description: body.description ?? null,
+      metadata: body.metadata ?? {},
+    });
+    return reply.send(serializeProduct(product));
+  });
+
+  fastify.get<{ Params: { id: string } }>('/v1/products/:id', async (request, reply) => {
+    authenticate(request);
+    return reply.send(serializeProduct(await loadProduct(request.params.id)));
+  });
+
+  fastify.get<{ Querystring: Record<string, string> }>('/v1/products', async (request, reply) => {
+    authenticate(request);
+    const query = listQuerySchema.parse(request.query);
+    const { page, hasMore } = await paginate(
+      query,
+      (limit, offset) => storage.products.list({ provider: PROVIDER, limit, offset }),
+      (product) => stripeId('prod', product.id),
+    );
+    return reply.send(list(page.map(serializeProduct), '/v1/products', hasMore));
+  });
+
+  fastify.post('/v1/prices', async (request, reply) => {
+    authenticate(request);
+    const body = priceCreateSchema.parse(request.body);
+    const currency = body.currency.toUpperCase();
+    if (!isSupportedCurrency(currency)) {
+      throw new PayboxError(
+        'unsupported_currency',
+        `The currency ${body.currency} is not supported.`,
+      );
+    }
+    if (!body.recurring) {
+      throw new PayboxError(
+        'unsupported_operation',
+        'paybox implements recurring prices only; a one-off price has no plan to model.',
+      );
+    }
+
+    const product = body.product
+      ? await loadProduct(body.product)
+      : body.product_data
+        ? await engine.createProduct({
+            provider: PROVIDER,
+            name: body.product_data.name,
+            description: body.product_data.description ?? null,
+          })
+        : null;
+    if (!product) {
+      throw new PayboxError(
+        'validation_failed',
+        'One of `product` or `product_data` is required.',
+      );
+    }
+
+    const { interval, intervalCount } = fromStripeRecurring(
+      body.recurring.interval,
+      body.recurring.interval_count,
+    );
+    const plan = await engine.createPlan({
+      provider: PROVIDER,
+      name: body.nickname ?? product.name,
+      amount: body.unit_amount,
+      currency,
+      interval,
+      intervalCount,
+      productId: product.id,
+      metadata: body.metadata ?? {},
+    });
+    return reply.send(serializePrice(plan, product));
+  });
+
+  fastify.get<{ Params: { price: string } }>('/v1/prices/:price', async (request, reply) => {
+    authenticate(request);
+    const plan = await loadPrice(request.params.price);
+    const product = plan.productId ? await storage.products.byId(plan.productId) : null;
+    return reply.send(serializePrice(plan, product));
+  });
+
+  fastify.get<{ Querystring: Record<string, string> }>('/v1/prices', async (request, reply) => {
+    authenticate(request);
+    const query = listQuerySchema.parse(request.query);
+    const { page, hasMore } = await paginate(
+      query,
+      (limit, offset) => storage.plans.list({ provider: PROVIDER, limit, offset }),
+      (plan) => stripeId('price', plan.id),
+    );
+    const data = await Promise.all(
+      page.map(async (plan) =>
+        serializePrice(plan, plan.productId ? await storage.products.byId(plan.productId) : null),
+      ),
+    );
+    return reply.send(list(data, '/v1/prices', hasMore));
+  });
+
+  /* ---------------------------------------------------------------- *
+   * Subscriptions and Invoices
+   * ---------------------------------------------------------------- */
+
+  async function loadSubscription(handle: string) {
+    const canonical = handle.replace(/^sub_/, 'sub_');
+    const subscription = await storage.subscriptions.byId(canonical);
+    if (subscription && subscription.provider === PROVIDER) return subscription;
+    throw new PayboxError('not_found', `No such subscription: '${handle}'.`);
+  }
+
+  async function decorateSubscription(
+    subscription: Awaited<ReturnType<typeof loadSubscription>>,
+  ) {
+    const plan = await storage.plans.byId(subscription.planId);
+    const invoices = await storage.invoices.listBySubscription(subscription.id);
+    return serializeSubscription(subscription, {
+      plan,
+      product: plan?.productId ? await storage.products.byId(plan.productId) : null,
+      customer: await storage.customers.byId(subscription.customerId),
+      latestInvoice: invoices.at(-1) ?? null,
+    });
+  }
+
+  fastify.post('/v1/subscriptions', async (request, reply) => {
+    authenticate(request);
+    const body = subscriptionCreateSchema.parse(request.body);
+    const customer = await loadCustomer(body.customer);
+
+    if (body.items.length > 1) {
+      throw new PayboxError(
+        'unsupported_operation',
+        'paybox models one price per subscription; multi-item subscriptions are not ' +
+          'implemented.',
+      );
+    }
+    const item = body.items[0]!;
+    const plan = await loadPrice(item.price);
+
+    const authorization = body.default_payment_method
+      ? await loadAuthorization(body.default_payment_method)
+      : (await storage.authorizations.listByCustomer(customer.id)).find((a) => a.reusable);
+    if (!authorization) {
+      throw new PayboxError(
+        'validation_failed',
+        `No default payment method for ${body.customer}. Attach a PaymentMethod first.`,
+      );
+    }
+
+    const subscription = await engine.createSubscription({
+      provider: PROVIDER,
+      customerId: customer.id,
+      planId: plan.id,
+      authorizationId: authorization.id,
+      ...(item.quantity != null ? { quantity: Number(item.quantity) } : {}),
+      metadata: body.metadata ?? {},
+    });
+    await subscriptions.start(subscription);
+
+    return reply.send(await decorateSubscription(subscription));
+  });
+
+  fastify.get<{ Params: { id: string } }>('/v1/subscriptions/:id', async (request, reply) => {
+    authenticate(request);
+    return reply.send(await decorateSubscription(await loadSubscription(request.params.id)));
+  });
+
+  fastify.get<{ Querystring: Record<string, string> }>(
+    '/v1/subscriptions',
+    async (request, reply) => {
+      authenticate(request);
+      const query = listQuerySchema.parse(request.query);
+      const { page, hasMore } = await paginate(
+        query,
+        (limit, offset) => storage.subscriptions.list({ provider: PROVIDER, limit, offset }),
+        (subscription) => stripeId('sub', subscription.id),
+      );
+      const data = await Promise.all(page.map((s) => decorateSubscription(s)));
+      return reply.send(list(data, '/v1/subscriptions', hasMore));
+    },
+  );
+
+  /** `cancel_at_period_end` is Stripe's non-renewing flag, not a status. */
+  fastify.post<{ Params: { id: string } }>('/v1/subscriptions/:id', async (request, reply) => {
+    authenticate(request);
+    const body = subscriptionUpdateSchema.parse(request.body ?? {});
+    const subscription = await loadSubscription(request.params.id);
+
+    if (body.cancel_at_period_end === true && subscription.status === 'active') {
+      await engine.transitionSubscription(subscription.id, 'non_renewing', {
+        // Keep billing the current period; only future renewals stop.
+        nextPaymentDate: subscription.nextPaymentDate,
+      });
+    } else if (body.cancel_at_period_end === false && subscription.status === 'non_renewing') {
+      const resumed = await engine.transitionSubscription(subscription.id, 'active', {
+        nextPaymentDate: subscription.nextPaymentDate ?? clock.nowISO(),
+      });
+      await subscriptions.start(resumed);
+    }
+
+    return reply.send(await decorateSubscription(await loadSubscription(request.params.id)));
+  });
+
+  /** Immediate cancellation. Stripe's DELETE, which its SDKs still use. */
+  fastify.delete<{ Params: { id: string } }>('/v1/subscriptions/:id', async (request, reply) => {
+    authenticate(request);
+    subscriptionCancelSchema.parse(request.body ?? {});
+    const subscription = await loadSubscription(request.params.id);
+    await engine.transitionSubscription(subscription.id, 'cancelled');
+    return reply.send(await decorateSubscription(await loadSubscription(request.params.id)));
+  });
+
+  async function decorateInvoice(invoice: Awaited<ReturnType<typeof loadInvoice>>) {
+    const subscription = await storage.subscriptions.byId(invoice.subscriptionId);
+    return serializeInvoice(invoice, {
+      subscription,
+      customer: await storage.customers.byId(invoice.customerId),
+      payment: invoice.paymentId ? await storage.payments.byId(invoice.paymentId) : null,
+      plan: subscription ? await storage.plans.byId(subscription.planId) : null,
+    });
+  }
+
+  async function loadInvoice(handle: string) {
+    const canonical = handle.replace(/^in_/, 'inv_');
+    const invoice = await storage.invoices.byId(canonical);
+    if (invoice && invoice.provider === PROVIDER) return invoice;
+    throw new PayboxError('not_found', `No such invoice: '${handle}'.`);
+  }
+
+  fastify.get<{ Params: { invoice: string } }>('/v1/invoices/:invoice', async (request, reply) => {
+    authenticate(request);
+    return reply.send(await decorateInvoice(await loadInvoice(request.params.invoice)));
+  });
+
+  fastify.get<{ Querystring: Record<string, string> }>('/v1/invoices', async (request, reply) => {
+    authenticate(request);
+    const query = listQuerySchema.parse(request.query);
+    const { page, hasMore } = await paginate(
+      query,
+      (limit, offset) => storage.invoices.list({ provider: PROVIDER, limit, offset }),
+      (invoice) => stripeId('in', invoice.id),
+    );
+    const data = await Promise.all(page.map((i) => decorateInvoice(i)));
+    return reply.send(list(data, '/v1/invoices', hasMore));
+  });
+
+  /* ---------------------------------------------------------------- *
    * Checkout Sessions
    *
    * A `mode: payment` session and the payment it collects are one lifecycle,
@@ -482,32 +768,42 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
     authenticate(request);
     const body = checkoutSessionCreateSchema.parse(request.body);
 
-    if (body.mode !== 'payment') {
+    if (body.mode === 'setup') {
       throw new PayboxError(
         'unsupported_operation',
-        `paybox implements Checkout in mode=payment only; received "${body.mode}". ` +
-          'Subscription mode arrives with the billing slice.',
+        'paybox does not implement Checkout in mode=setup; SetupIntents are not modelled.',
       );
     }
 
-    // Every line item must price itself: `price` ids belong to the Prices API,
-    // which this slice does not implement, so accepting one would silently
-    // produce a zero-amount session.
-    const priced = body.line_items.map((item) => {
-      if (!item.price_data) {
-        throw new PayboxError(
-          'unsupported_operation',
-          'paybox requires `price_data` on each line item; `price` ids need the Prices ' +
-            'API, which is not implemented yet.',
-        );
-      }
-      return {
-        name: item.price_data.product_data?.name ?? 'Item',
-        unit_amount: item.price_data.unit_amount,
-        quantity: item.quantity,
-        currency: item.price_data.currency,
-      };
-    });
+    // A line item prices itself with `price_data`, or points at a Price.
+    const priced = await Promise.all(
+      body.line_items.map(async (item) => {
+        if (item.price_data) {
+          return {
+            name: item.price_data.product_data?.name ?? 'Item',
+            unit_amount: item.price_data.unit_amount,
+            quantity: item.quantity,
+            currency: item.price_data.currency,
+            priceId: null as string | null,
+          };
+        }
+        if (!item.price) {
+          throw new PayboxError(
+            'validation_failed',
+            'Each line item needs one of `price` or `price_data`.',
+          );
+        }
+        const plan = await loadPrice(item.price);
+        const product = plan.productId ? await storage.products.byId(plan.productId) : null;
+        return {
+          name: product?.name ?? plan.name,
+          unit_amount: plan.amount,
+          quantity: item.quantity,
+          currency: plan.currency,
+          priceId: plan.id,
+        };
+      }),
+    );
 
     const currency = (body.currency ?? priced[0]!.currency).toUpperCase();
     if (!isSupportedCurrency(currency)) {
@@ -526,6 +822,18 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
     const total = priced.reduce((sum, item) => sum + item.unit_amount * item.quantity, 0);
     const customer = body.customer ? await loadCustomer(body.customer) : null;
 
+    // A subscription session must point at a real Price: there is nothing to
+    // renew against an inline one-off amount.
+    if (body.mode === 'subscription') {
+      const recurring = priced.find((item) => item.priceId);
+      if (!recurring) {
+        throw new PayboxError(
+          'validation_failed',
+          'A subscription Checkout Session needs a line item with a recurring `price`.',
+        );
+      }
+    }
+
     const payment = await engine.createPayment({
       provider: PROVIDER,
       amount: total,
@@ -536,6 +844,9 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
         ...(body.metadata ?? {}),
         mode: body.mode,
         line_items: priced,
+        ...(body.mode === 'subscription'
+          ? { subscription_price_id: priced.find((i) => i.priceId)?.priceId }
+          : {}),
         ...(body.success_url ? { success_url: body.success_url } : {}),
         ...(body.cancel_url ? { cancel_url: body.cancel_url } : {}),
         ...(body.customer_email ? { customer_email: body.customer_email } : {}),
@@ -605,6 +916,64 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
     },
   );
 
+  /**
+   * Turn a subscription session into a real subscription.
+   *
+   * The card is minted into a PaymentMethod up front rather than waiting for
+   * the session's payment to settle: the subscription needs something to
+   * charge, and the payment is still in flight at this point. The mint uses
+   * the same fingerprint the engine's minter does, so when the payment does
+   * succeed it finds this row and does not create a second.
+   *
+   * The session's own payment covers the first period, so the subscription is
+   * anchored one interval ahead rather than billing immediately -- otherwise
+   * the payer would be charged twice for the same period.
+   */
+  async function startSubscriptionFromSession(payment: Payment): Promise<void> {
+    const priceId = payment.metadata.subscription_price_id;
+    if (typeof priceId !== 'string' || !payment.customerId) return;
+
+    const plan = await storage.plans.byId(priceId);
+    if (!plan) return;
+
+    const existing = (await storage.authorizations.listByCustomer(payment.customerId)).find(
+      (a) => a.reusable,
+    );
+    const draft = stripeAuthorizationMinter(payment);
+    if (!existing && !draft) return;
+
+    const authorization =
+      existing ??
+      (await engine.createAuthorizationRecord({
+        provider: PROVIDER,
+        customerId: payment.customerId,
+        paymentId: payment.id,
+        channel: draft!.channel,
+        reusable: draft!.reusable,
+        ...(draft!.providerAuthorizationCode
+          ? { providerAuthorizationCode: draft!.providerAuthorizationCode }
+          : {}),
+        signature: draft!.signature ?? null,
+        bin: draft!.bin ?? null,
+        last4: draft!.last4 ?? null,
+        expMonth: draft!.expMonth ?? null,
+        expYear: draft!.expYear ?? null,
+        cardType: draft!.cardType ?? null,
+        brand: draft!.brand ?? null,
+        countryCode: draft!.countryCode ?? null,
+      }));
+
+    const subscription = await engine.createSubscription({
+      provider: PROVIDER,
+      customerId: payment.customerId,
+      planId: plan.id,
+      authorizationId: authorization.id,
+      startDate: addInterval(clock.nowISO(), plan.interval, plan.intervalCount),
+      metadata: { checkout_session: stripeId('cs', payment.id) },
+    });
+    await subscriptions.start(subscription);
+  }
+
   /* -------------------- the hosted page -------------------- */
 
   /**
@@ -664,6 +1033,13 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
       });
       const fresh = await loadSession(request.params.session);
       const started = await confirmPayment(fresh, form.card_number);
+
+      // A subscription session starts the subscription once the first payment
+      // is on its way, which is what makes `mode: subscription` more than a
+      // one-off charge.
+      if (fresh.metadata.mode === 'subscription') {
+        await startSubscriptionFromSession(fresh);
+      }
 
       const successUrl = payment.metadata.success_url;
       return reply.type('text/html').send(

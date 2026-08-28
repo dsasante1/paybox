@@ -128,6 +128,7 @@ export async function buildApp(context: PayboxContext): Promise<FastifyInstance>
         await scope.register(stripePlugin, {
           engine: context.engine,
           simulator: context.simulator,
+          subscriptions: context.subscriptions,
           storage: context.storage,
           clock: context.clock,
           ids: context.ids,

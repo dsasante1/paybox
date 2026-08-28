@@ -15,6 +15,7 @@ import type {
   PayboxEvent,
   Plan,
   PlanInterval,
+  Product,
   ProviderId,
   Refund,
   RefundStatus,
@@ -41,6 +42,7 @@ import type {
   InvoiceRow,
   LedgerEntryRow,
   PlanRow,
+  ProductRow,
   SplitRow,
   SubaccountRow,
   SubscriptionRow,
@@ -384,6 +386,8 @@ export const toPlan = (row: PlanRow): Plan => ({
   amount: row.amount,
   currency: row.currency,
   interval: row.interval as PlanInterval,
+  intervalCount: row.interval_count,
+  productId: row.product_id,
   description: row.description,
   invoiceLimit: row.invoice_limit,
   sendInvoices: row.send_invoices === 1,
@@ -402,6 +406,8 @@ export const fromPlan = (plan: Plan): PlanRow => ({
   amount: plan.amount,
   currency: plan.currency,
   interval: plan.interval,
+  interval_count: plan.intervalCount,
+  product_id: plan.productId,
   description: plan.description,
   invoice_limit: plan.invoiceLimit,
   send_invoices: plan.sendInvoices ? 1 : 0,
@@ -420,6 +426,40 @@ export function planPatch(patch: Partial<Plan>): Partial<PlanRow> {
   if (patch.invoiceLimit !== undefined) out.invoice_limit = patch.invoiceLimit;
   if (patch.sendInvoices !== undefined) out.send_invoices = patch.sendInvoices ? 1 : 0;
   if (patch.sendSms !== undefined) out.send_sms = patch.sendSms ? 1 : 0;
+  if (patch.active !== undefined) out.active = patch.active ? 1 : 0;
+  if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
+  if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
+  return out;
+}
+
+export const toProduct = (row: ProductRow): Product => ({
+  id: row.id,
+  provider: row.provider as ProviderId,
+  providerProductId: row.provider_product_id,
+  name: row.name,
+  description: row.description,
+  active: row.active === 1,
+  metadata: readJson(row.metadata),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+export const fromProduct = (product: Product): ProductRow => ({
+  id: product.id,
+  provider: product.provider,
+  provider_product_id: product.providerProductId,
+  name: product.name,
+  description: product.description,
+  active: product.active ? 1 : 0,
+  metadata: writeJson(product.metadata),
+  created_at: product.createdAt,
+  updated_at: product.updatedAt,
+});
+
+export function productPatch(patch: Partial<Product>): Partial<ProductRow> {
+  const out: Partial<ProductRow> = {};
+  if (patch.name !== undefined) out.name = patch.name;
+  if (patch.description !== undefined) out.description = patch.description;
   if (patch.active !== undefined) out.active = patch.active ? 1 : 0;
   if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
   if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;

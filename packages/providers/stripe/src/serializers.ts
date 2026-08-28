@@ -1,12 +1,19 @@
 import type {
   Authorization,
   Customer,
+  Invoice,
   Payment,
   PayboxEvent,
+  Plan,
+  Product,
   Refund,
+  Subscription,
 } from '@paybox/shared';
 import {
   cancellationReason,
+  toStripeInvoiceStatus,
+  toStripeRecurring,
+  toStripeSubscriptionStatus,
   toStripeChargeStatus,
   toStripeRefundStatus,
   toStripeStatus,
@@ -468,4 +475,185 @@ export function serializeLineItems(payment: Payment) {
       quantity,
     };
   });
+}
+
+
+export function serializeProduct(product: Product) {
+  return {
+    id: stripeId('prod', product.id),
+    object: 'product' as const,
+    active: product.active,
+    created: unix(product.createdAt),
+    default_price: null,
+    description: product.description,
+    images: [],
+    livemode: false,
+    marketing_features: [],
+    metadata: product.metadata,
+    name: product.name,
+    package_dimensions: null,
+    shippable: null,
+    statement_descriptor: null,
+    tax_code: null,
+    type: 'service',
+    unit_label: null,
+    updated: unix(product.updatedAt),
+    url: null,
+  };
+}
+
+/** A canonical Plan is a Stripe Price: an amount plus how often. */
+export function serializePrice(plan: Plan, product?: Product | null) {
+  return {
+    id: stripeId('price', plan.id),
+    object: 'price' as const,
+    active: plan.active,
+    billing_scheme: 'per_unit',
+    created: unix(plan.createdAt),
+    currency: plan.currency.toLowerCase(),
+    custom_unit_amount: null,
+    livemode: false,
+    lookup_key: null,
+    metadata: plan.metadata,
+    nickname: plan.name,
+    product: product ? stripeId('prod', product.id) : null,
+    recurring: {
+      ...toStripeRecurring(plan.interval, plan.intervalCount),
+      meter: null,
+      trial_period_days: null,
+      usage_type: 'licensed',
+    },
+    tax_behavior: 'unspecified',
+    tiers_mode: null,
+    transform_quantity: null,
+    type: 'recurring',
+    unit_amount: plan.amount,
+    unit_amount_decimal: String(plan.amount),
+  };
+}
+
+export interface SerializeSubscriptionOptions {
+  plan?: Plan | null;
+  product?: Product | null;
+  customer?: Customer | null;
+  latestInvoice?: Invoice | null;
+}
+
+export function serializeSubscription(
+  subscription: Subscription,
+  options: SerializeSubscriptionOptions = {},
+) {
+  const id = stripeId('sub', subscription.id);
+  const periodEnd = subscription.nextPaymentDate ?? subscription.updatedAt;
+  const item = options.plan
+    ? {
+        id: `si_${id.slice(4)}`,
+        object: 'subscription_item' as const,
+        created: unix(subscription.createdAt),
+        metadata: {},
+        price: serializePrice(options.plan, options.product),
+        quantity: subscription.quantity,
+        subscription: id,
+      }
+    : null;
+
+  return {
+    id,
+    object: 'subscription' as const,
+    // Stripe expresses "stops at period end" as a flag on an *active*
+    // subscription, not as a status of its own.
+    cancel_at: null,
+    cancel_at_period_end: subscription.status === 'non_renewing',
+    canceled_at: subscription.cancelledAt ? unix(subscription.cancelledAt) : null,
+    collection_method: 'charge_automatically',
+    created: unix(subscription.createdAt),
+    currency: subscription.currency.toLowerCase(),
+    current_period_end: unix(periodEnd),
+    current_period_start: unix(subscription.startDate),
+    customer: stripeId('cus', subscription.customerId),
+    days_until_due: null,
+    default_payment_method: stripeId('pm', subscription.authorizationId),
+    description: null,
+    discounts: [],
+    ended_at:
+      subscription.status === 'cancelled' || subscription.status === 'completed'
+        ? unix(subscription.updatedAt)
+        : null,
+    items: {
+      object: 'list' as const,
+      data: item ? [item] : [],
+      has_more: false,
+      url: `/v1/subscription_items?subscription=${id}`,
+    },
+    latest_invoice: options.latestInvoice
+      ? stripeId('in', options.latestInvoice.id)
+      : null,
+    livemode: false,
+    metadata: subscription.metadata,
+    pause_collection: null,
+    start_date: unix(subscription.startDate),
+    status: toStripeSubscriptionStatus(subscription.status),
+    trial_end: null,
+    trial_start: null,
+  };
+}
+
+export function serializeInvoice(
+  invoice: Invoice,
+  options: {
+    subscription?: Subscription | null;
+    customer?: Customer | null;
+    payment?: Payment | null;
+    plan?: Plan | null;
+  } = {},
+) {
+  const id = stripeId('in', invoice.id);
+  const paid = invoice.status === 'success';
+  return {
+    id,
+    object: 'invoice' as const,
+    amount_due: invoice.amount,
+    amount_paid: paid ? invoice.amount : 0,
+    amount_remaining: paid ? 0 : invoice.amount,
+    attempt_count: 1,
+    attempted: invoice.status !== 'pending',
+    auto_advance: !paid,
+    billing_reason: 'subscription_cycle',
+    collection_method: 'charge_automatically',
+    created: unix(invoice.createdAt),
+    currency: invoice.currency.toLowerCase(),
+    customer: stripeId('cus', invoice.customerId),
+    customer_email: options.customer?.email ?? null,
+    due_date: unix(invoice.dueAt),
+    hosted_invoice_url: null,
+    invoice_pdf: null,
+    lines: {
+      object: 'list' as const,
+      data: [
+        {
+          id: `il_${id.slice(3)}`,
+          object: 'line_item' as const,
+          amount: invoice.amount,
+          currency: invoice.currency.toLowerCase(),
+          description: options.plan?.name ?? null,
+          period: { start: unix(invoice.periodStart), end: unix(invoice.periodEnd) },
+          price: options.plan ? serializePrice(options.plan) : null,
+          quantity: options.subscription?.quantity ?? 1,
+        },
+      ],
+      has_more: false,
+      url: `/v1/invoices/${id}/lines`,
+    },
+    livemode: false,
+    metadata: invoice.metadata,
+    number: null,
+    paid,
+    payment_intent: options.payment ? stripeId('pi', options.payment.id) : null,
+    period_end: unix(invoice.periodEnd),
+    period_start: unix(invoice.periodStart),
+    status: toStripeInvoiceStatus(invoice.status),
+    subscription: options.subscription ? stripeId('sub', options.subscription.id) : null,
+    subtotal: invoice.amount,
+    total: invoice.amount,
+  };
 }
