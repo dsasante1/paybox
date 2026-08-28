@@ -170,6 +170,68 @@ describe('confirming separately', () => {
   });
 });
 
+describe('one card, two customers', () => {
+  it('gives each customer their own PaymentMethod', async () => {
+    const ada = await customer('ada@example.com');
+    const grace = await customer('grace@example.com');
+
+    const first = (
+      await post('/stripe/v1/setup_intents', {
+        customer: ada.id,
+        confirm: 'true',
+        ...card(VISA),
+      })
+    ).json();
+    const second = (
+      await post('/stripe/v1/setup_intents', {
+        customer: grace.id,
+        confirm: 'true',
+        ...card(VISA),
+      })
+    ).json();
+
+    expect(first.status).toBe('succeeded');
+    expect(second.status).toBe('succeeded');
+    // A stored instrument belongs to a customer. Deduping across customers
+    // would hand Ada's saved card to Grace.
+    expect(second.payment_method).not.toBe(first.payment_method);
+
+    const gracesCard = (await get(`/stripe/v1/payment_methods/${second.payment_method}`)).json();
+    expect(gracesCard.customer).toBe(grace.id);
+  });
+
+  it('still gives one customer a single PaymentMethod for one card', async () => {
+    const ada = await customer('ada@example.com');
+    const first = (
+      await post('/stripe/v1/setup_intents', { customer: ada.id, confirm: 'true', ...card(VISA) })
+    ).json();
+    const again = (
+      await post('/stripe/v1/setup_intents', { customer: ada.id, confirm: 'true', ...card(VISA) })
+    ).json();
+
+    expect(again.payment_method).toBe(first.payment_method);
+  });
+
+  it('charging a stored card does not mint a second one', async () => {
+    const ada = await customer('ada@example.com');
+    const setup = (
+      await post('/stripe/v1/setup_intents', { customer: ada.id, confirm: 'true', ...card(VISA) })
+    ).json();
+
+    await post('/stripe/v1/charges', {
+      amount: 1_200,
+      currency: 'usd',
+      customer: ada.id,
+      source: setup.payment_method,
+    });
+
+    const stored = await context.storage.authorizations.listByCustomer(
+      ada.id.replace('cus_', 'cus_'),
+    );
+    expect(stored).toHaveLength(1);
+  });
+});
+
 describe('a declined setup', () => {
   it('reports the reason and stays retryable, as Stripe does', async () => {
     const setup = (

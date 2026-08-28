@@ -231,8 +231,21 @@ export interface AuthorizationRepository {
   byCode(provider: ProviderId, code: string): Promise<Authorization | null>;
   /** Batch form of `byCode`, keyed by provider authorization code. */
   byCodes(provider: ProviderId, codes: readonly string[]): Promise<Map<string, Authorization>>;
-  /** Deduping lookup: one instrument charged twice yields one authorization. */
-  bySignature(provider: ProviderId, signature: string): Promise<Authorization | null>;
+  /**
+   * Deduping lookup, **scoped to one customer**.
+   *
+   * One customer saving the same card twice has one stored instrument. Two
+   * different customers saving the same card have two, because a stored
+   * instrument belongs to a customer at every provider we model -- Paystack
+   * mints a separate `authorization_code` per customer, and a Stripe
+   * PaymentMethod attaches to exactly one. Deduping across customers would
+   * hand one customer's saved card to another.
+   */
+  bySignature(
+    provider: ProviderId,
+    signature: string,
+    customerId: string,
+  ): Promise<Authorization | null>;
   /** Most recent first -- a subscription with no explicit authorization uses
    *  the customer's latest, which is what Paystack documents. */
   listByCustomer(customerId: string): Promise<Authorization[]>;

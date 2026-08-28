@@ -282,6 +282,7 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
 
   /** Masked card detail carried by a stored instrument. */
   function authorizationDetails(authorization: {
+    id: string;
     bin: string | null;
     last4: string | null;
     expMonth: string | null;
@@ -296,6 +297,10 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
       exp_year: authorization.expYear,
       brand: authorization.brand,
       country: authorization.countryCode,
+      // Which stored instrument this payment used. The minter reads it and
+      // mints nothing: charging a PaymentMethod you already have must not
+      // produce a second one for the same card.
+      authorization_id: authorization.id,
     };
   }
 
@@ -666,13 +671,22 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
   async function setupInstrument(body: {
     payment_method?: string | undefined;
     payment_method_data?: { card?: { number: string; exp_month?: unknown; exp_year?: unknown } } | undefined;
-  }): Promise<{ number: string | null; details: Record<string, unknown> } | null> {
+  }): Promise<{
+    number: string | null;
+    details: Record<string, unknown>;
+    /** Set when the caller named an instrument they already hold. */
+    authorizationId?: string;
+  } | null> {
     const inline = body.payment_method_data?.card;
     if (inline) return { number: inline.number, details: cardDetailsFrom(inline) };
     if (body.payment_method) {
       const authorization = await loadAuthorization(body.payment_method);
       engine.assertChargeable(authorization);
-      return { number: authorization.last4, details: authorizationDetails(authorization) };
+      return {
+        number: authorization.last4,
+        details: authorizationDetails(authorization),
+        authorizationId: authorization.id,
+      };
     }
     return null;
   }
@@ -689,6 +703,9 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
       usage: body.usage ?? 'off_session',
       channel: 'card',
       ...(instrument ? { instrument: instrument.details } : {}),
+      // Named an instrument they already hold: attach that one on success
+      // rather than minting a second for the same card.
+      ...(instrument?.authorizationId ? { authorizationId: instrument.authorizationId } : {}),
       status: instrument ? 'pending' : 'created',
       metadata: {
         ...(body.metadata ?? {}),
@@ -696,6 +713,7 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
         ...(body.return_url ? { return_url: body.return_url } : {}),
       },
     });
+
 
     if (body.confirm && instrument) {
       return reply.send(await decorateSetup(await confirmSetup(setup, instrument.number)));
@@ -715,6 +733,9 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
         setup = await engine.transitionInstrumentSetup(setup.id, 'pending', {
           instrument: instrument.details,
           channel: 'card',
+          // Named an instrument they already hold: attach that one on success
+          // rather than minting a second for the same card.
+          authorizationId: instrument.authorizationId ?? null,
           ...(setup.status === 'failed' ? { retry: true } : {}),
         });
       } else if (Object.keys(setup.instrument).length === 0) {
@@ -2384,7 +2405,10 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
 
     // Through the same draft builder the charge and setup paths use, so one
     // card is one PaymentMethod whichever door it came in by.
-    const draft = stripeInstrumentDraft('card', cardDetailsFrom(body.card), body.card.number);
+    // No customer yet, so the owner is unique to this call: Stripe mints a
+    // fresh PaymentMethod for every POST /v1/payment_methods, even for a card
+    // it has seen before.
+    const draft = stripeInstrumentDraft('card', cardDetailsFrom(body.card), ids.token(12));
     const created = await engine.createAuthorizationRecord({
       provider: PROVIDER,
       channel: 'card',

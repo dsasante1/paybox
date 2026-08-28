@@ -491,12 +491,14 @@ class SqliteStorage implements Storage {
         .executeTakeFirst();
       return row ? map.toAuthorization(row) : null;
     },
-    bySignature: async (provider, signature) => {
+    bySignature: async (provider, signature, customerId) => {
       const row = await this.#db
         .selectFrom('authorizations')
         .selectAll()
         .where('provider', '=', provider)
         .where('signature', '=', signature)
+        .where('customer_id', '=', customerId)
+        .orderBy('created_at', 'asc')
         .executeTakeFirst();
       return row ? map.toAuthorization(row) : null;
     },

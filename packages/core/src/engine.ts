@@ -901,18 +901,20 @@ export class PaymentEngine {
   }): Promise<Authorization> {
     // A supplied signature asserts "this identifies the instrument", so the
     // same card reaching the engine by two doors -- created directly, saved
-    // through a setup, or left behind by a charge -- must resolve to one row.
-    // Two would show a merchant duplicate saved cards no provider would.
-    if (input.signature) {
+    // through a setup, or left behind by a charge -- resolves to one row.
+    //
+    // Scoped to the customer, never global: two customers who happen to save
+    // the same card must get two stored instruments, or one customer's saved
+    // card would be handed to another. An instrument with no customer never
+    // dedupes, which is what both providers do -- Stripe mints a fresh
+    // PaymentMethod for every `POST /v1/payment_methods`.
+    if (input.signature && input.customerId) {
       const existing = await this.#storage.authorizations.bySignature(
         input.provider,
         input.signature,
+        input.customerId,
       );
-      if (existing) {
-        return input.customerId && existing.customerId !== input.customerId
-          ? this.attachAuthorization(existing.id, input.customerId)
-          : existing;
-      }
+      if (existing) return existing;
     }
 
     const now = this.#clock.nowISO();
@@ -1086,13 +1088,18 @@ export class PaymentEngine {
   ): Promise<{ authorization: Authorization; event: PayboxEvent } | null> {
     const { draft } = input;
 
-    // A signature is the provider's fingerprint for the instrument, so the
-    // same card charged twice must yield one authorization, not two. Channels
-    // without a signature (mobile money) mint a fresh row every time, which is
-    // what the provider does.
+    // A signature is the provider's fingerprint for the instrument, so one
+    // customer's card charged twice yields one authorization, not two.
+    // Scoped to that customer for the same reason as above. Channels without a
+    // signature (mobile money) mint a fresh row every time, which is what the
+    // provider does.
     const signature = draft.signature ?? null;
-    if (signature) {
-      const existing = await tx.authorizations.bySignature(input.provider, signature);
+    if (signature && input.customerId) {
+      const existing = await tx.authorizations.bySignature(
+        input.provider,
+        signature,
+        input.customerId,
+      );
       if (existing) return null;
     }
 
@@ -1154,6 +1161,8 @@ export class PaymentEngine {
     usage?: 'on_session' | 'off_session';
     channel?: PaymentMethod | null;
     instrument?: Metadata;
+    /** An instrument the caller already holds; attached rather than reminted. */
+    authorizationId?: string | null;
     status?: SetupStatus;
     providerSetupId?: string;
     metadata?: Metadata;
@@ -1165,7 +1174,7 @@ export class PaymentEngine {
       provider: input.provider,
       providerSetupId: input.providerSetupId ?? this.#ids.token(16),
       customerId: input.customerId ?? null,
-      authorizationId: null,
+      authorizationId: input.authorizationId ?? null,
       status,
       providerStatus: status,
       usage: input.usage ?? 'off_session',
@@ -1213,6 +1222,16 @@ export class PaymentEngine {
       cancellationReason?: string | null;
       channel?: PaymentMethod | null;
       instrument?: Metadata;
+      /**
+       * An instrument the caller already holds.
+       *
+       * Set when the setup was run against an existing stored instrument
+       * rather than fresh details: the setup then *attaches* that one instead
+       * of minting a second, which is what a provider does -- confirming a
+       * SetupIntent against a PaymentMethod you already have does not give you
+       * a different PaymentMethod.
+       */
+      authorizationId?: string | null;
       /** Resume a failed setup with another instrument. */
       retry?: boolean;
       eventData?: Metadata;
@@ -1232,6 +1251,9 @@ export class PaymentEngine {
         ...(options.instrument !== undefined
           ? { instrument: { ...setup.instrument, ...options.instrument } }
           : {}),
+        ...(options.authorizationId !== undefined
+          ? { authorizationId: options.authorizationId }
+          : {}),
         ...(options.cancellationReason !== undefined
           ? { cancellationReason: options.cancellationReason }
           : {}),
@@ -1249,7 +1271,32 @@ export class PaymentEngine {
       };
 
       const extra: PayboxEvent[] = [];
-      if (to === 'successful' && !setup.authorizationId) {
+      const held = patch.authorizationId ?? setup.authorizationId;
+
+      // Ran against an instrument the caller already had: attach it rather
+      // than minting a second one for the same card.
+      if (to === 'successful' && held && setup.customerId) {
+        const existing = await tx.authorizations.byId(held);
+        if (existing && existing.customerId !== setup.customerId) {
+          const attached = await tx.authorizations.update(existing.id, {
+            customerId: setup.customerId,
+            updatedAt: now,
+          });
+          extra.push(
+            await this.#appendEvent(tx, {
+              type: 'authorization.attached',
+              provider: attached.provider,
+              resourceId: attached.id,
+              resourceType: 'authorization',
+              data: authorizationEventData(attached),
+              previousStatus: existing.customerId ? 'attached' : 'detached',
+              currentStatus: 'attached',
+            }),
+          );
+        }
+      }
+
+      if (to === 'successful' && !held) {
         const draft = this.#mintSetupAuthorization({ ...setup, ...patch } as InstrumentSetup);
         if (draft) {
           const minted = await this.#insertDraft(tx, {
@@ -1262,13 +1309,14 @@ export class PaymentEngine {
           if (minted) {
             patch.authorizationId = minted.authorization.id;
             extra.push(minted.event);
-          } else if (draft.signature) {
-            // The instrument was already stored, by an earlier setup or an
-            // earlier charge. Point at the existing row rather than leaving
-            // the setup successful with nothing to charge.
+          } else if (draft.signature && setup.customerId) {
+            // This customer had already stored the card, by an earlier setup
+            // or an earlier charge. Point at that row rather than leaving the
+            // setup successful with nothing to charge.
             const existing = await tx.authorizations.bySignature(
               setup.provider,
               draft.signature,
+              setup.customerId,
             );
             if (existing) patch.authorizationId = existing.id;
           }

@@ -335,6 +335,15 @@ expected to react.
    Gaps: no `latest_attempt` (paybox has no SetupAttempt object), no `mandate`,
    and `verify_microdeposits` is absent because no bank-debit method is
    implemented.
+
+   **A stored instrument belongs to a customer.** One customer saving the same
+   card twice has one PaymentMethod; two customers saving the same card have
+   two, because that is what both providers do -- Paystack mints a separate
+   `authorization_code` per customer and a Stripe PaymentMethod attaches to
+   exactly one. `POST /v1/payment_methods` mints a fresh one every time, since
+   it has no customer to dedupe against, and confirming a SetupIntent against a
+   PaymentMethod you already hold attaches *that* one rather than minting a
+   second for the same card.
 16. **A subscription can carry several prices on one cycle**, and every price
    on it must share an interval and currency -- a mismatch is refused rather
    than producing a subscription whose renewal date is a lie about half its

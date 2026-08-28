@@ -682,4 +682,26 @@ export const MIGRATIONS: readonly Migration[] = [
       FROM subscriptions;
     `,
   },
+  {
+    id: '0013_authorization_signature_per_customer',
+    sql: `
+      -- A stored instrument belongs to a customer.
+      --
+      -- The signature index was unique on (provider, signature), which said
+      -- "one row per card, ever". That is wrong: two customers who happen to
+      -- save the same card must get two stored instruments, and the global
+      -- rule handed the first customer's saved card to the second. Every
+      -- provider we model scopes this to the customer -- Paystack mints a
+      -- separate authorization_code per customer, and a Stripe PaymentMethod
+      -- attaches to exactly one.
+      --
+      -- SQLite treats NULLs as distinct in a unique index, so instruments with
+      -- no customer never collide with each other, which is also what both
+      -- providers do: POST /v1/payment_methods mints a fresh one every time.
+      DROP INDEX IF EXISTS idx_authorizations_signature;
+      CREATE UNIQUE INDEX idx_authorizations_signature
+        ON authorizations (provider, signature, customer_id)
+        WHERE signature IS NOT NULL;
+    `,
+  },
 ];
