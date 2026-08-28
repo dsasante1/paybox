@@ -1,5 +1,25 @@
-import type { Customer, Payment, PayboxEvent, Refund, Transfer } from '@paybox/shared';
-import { gatewayResponse, toPaystackStatus } from './status.js';
+import type {
+  Authorization,
+  Customer,
+  DedicatedAccount,
+  Dispute,
+  Invoice,
+  Plan,
+  Split,
+  Subaccount,
+  Subscription,
+  Payment,
+  PayboxEvent,
+  Refund,
+  Transfer,
+} from '@paybox/shared';
+import {
+  gatewayCodes,
+  gatewayResponse,
+  toPaystackStatus,
+  toPaystackSubscriptionStatus,
+} from './status.js';
+import { serializeAuthorization } from './authorization.js';
 
 /**
  * Paystack response serialisation.
@@ -50,6 +70,16 @@ export interface SerializeOptions {
   /** Canonical events for this payment, rendered into Paystack's `log`. */
   events?: PayboxEvent[];
   includeFees?: boolean;
+  /** The split this transaction was divided under, if any. */
+  split?: Split | null;
+  /** What each subaccount received, computed by the engine. */
+  splitBreakdown?: { entries: { subaccountCode: string; amount: number }[]; merchant: number };
+  /**
+   * The authorization minted when this payment succeeded, if there is one.
+   * Preferred over the synthesised shape below, so the `authorization_code` a
+   * caller reads back from `verify` is the one they can actually charge.
+   */
+  authorization?: Authorization | null;
 }
 
 function paystackCustomer(payment: Payment, customer: Customer | null | undefined) {
@@ -72,7 +102,10 @@ function paystackCustomer(payment: Payment, customer: Customer | null | undefine
  * Card fields are synthetic by construction -- the emulator never sees a real
  * PAN, only a test card identifier -- and CVV is never present in any shape.
  */
-function paystackAuthorization(payment: Payment) {
+function paystackAuthorization(payment: Payment, stored?: Authorization | null) {
+  // A real, chargeable code whenever the payment actually minted one.
+  if (stored) return serializeAuthorization(stored);
+
   const details = payment.paymentMethodDetails;
   const channel = paystackChannel(payment);
 
@@ -138,6 +171,8 @@ export function paystackChannel(payment: Payment): string {
       return 'bank_transfer';
     case 'ussd':
       return 'ussd';
+    case 'eft':
+      return 'eft';
     case 'qr':
       return 'qr';
     default:
@@ -190,6 +225,14 @@ export function serializeTransaction(payment: Payment, options: SerializeOptions
     amount: payment.amount,
     message: payment.failureMessage,
     gateway_response: gatewayResponse(payment.status, payment.failureCode),
+    // `response_code` is card-only at Paystack; other channels carry the
+    // string classification alone.
+    response_code:
+      payment.paymentMethod === 'card'
+        ? gatewayCodes(payment.status, payment.failureCode).responseCode
+        : null,
+    gateway_response_code: gatewayCodes(payment.status, payment.failureCode)
+      .gatewayResponseCode,
     paid_at: payment.paidAt,
     created_at: payment.createdAt,
     channel: paystackChannel(payment),
@@ -198,11 +241,16 @@ export function serializeTransaction(payment: Payment, options: SerializeOptions
     metadata: payment.metadata,
     log: paystackLog(payment, options.events),
     fees,
-    fees_split: null,
-    authorization: paystackAuthorization(payment),
+    fees_split: options.splitBreakdown
+      ? {
+          subaccounts: options.splitBreakdown.entries,
+          merchant: options.splitBreakdown.merchant,
+        }
+      : null,
+    authorization: paystackAuthorization(payment, options.authorization),
     customer: paystackCustomer(payment, options.customer),
     plan: null,
-    split: {},
+    split: options.split ? serializeSplit(options.split) : {},
     order_id: null,
     // Paystack returns both snake_case and camelCase spellings of these two.
     paidAt: payment.paidAt,
@@ -238,8 +286,21 @@ export function serializeRefund(refund: Refund, payment: Payment | null) {
     merchant_note: refund.reason,
     created_at: refund.createdAt,
     updated_at: refund.updatedAt,
-    status: refund.status === 'successful' ? 'processed' : refund.status,
+    status: toPaystackRefundStatus(refund.status),
+    refund_account_details: refund.accountDetails,
   };
+}
+
+/**
+ * Canonical refund status -> Paystack's.
+ *
+ * Two differ: `successful` is `processed` there, and `needs_attention` is
+ * hyphenated. The rest are already the same word.
+ */
+function toPaystackRefundStatus(status: Refund['status']): string {
+  if (status === 'successful') return 'processed';
+  if (status === 'needs_attention') return 'needs-attention';
+  return status;
 }
 
 export function serializeCustomer(customer: Customer) {
@@ -290,6 +351,223 @@ export function serializeTransfer(transfer: Transfer) {
         bank_name: null,
       },
     },
+  };
+}
+
+/**
+ * A dedicated virtual account, shaped as `DedicatedNubanCreateResponse.data`.
+ * The bank `id` is derived from the slug so it is stable across runs.
+ */
+export function serializeDedicatedAccount(
+  account: DedicatedAccount,
+  customer: Customer | null,
+) {
+  return {
+    bank: {
+      name: account.bankName,
+      id: numericTransactionId(account.bankSlug) % 1_000,
+      slug: account.bankSlug,
+    },
+    account_name: account.accountName,
+    account_number: account.accountNumber,
+    assigned: account.assigned,
+    currency: account.currency,
+    metadata: null,
+    active: account.active,
+    id: numericTransactionId(account.providerAccountId),
+    created_at: account.createdAt,
+    updated_at: account.updatedAt,
+    assignment: {
+      integration: 100_000,
+      assignee_id: customer ? numericTransactionId(customer.providerCustomerId) : null,
+      assignee_type: 'Customer',
+      expired: false,
+      account_type: 'PAY-WITH-TRANSFER-RECURRING',
+      assigned_at: account.createdAt,
+      expired_at: null,
+    },
+    ...(customer ? { customer: serializeCustomer(customer) } : {}),
+  };
+}
+
+/** Schema `PlanCreateResponse.data`. */
+export function serializePlan(plan: Plan) {
+  return {
+    id: numericTransactionId(plan.providerPlanCode),
+    name: plan.name,
+    amount: plan.amount,
+    interval: plan.interval,
+    integration: 100_000,
+    domain: 'test',
+    plan_code: `PLN_${plan.providerPlanCode}`,
+    description: plan.description,
+    send_invoices: plan.sendInvoices,
+    send_sms: plan.sendSms,
+    hosted_page: false,
+    hosted_page_url: null,
+    hosted_page_summary: null,
+    currency: plan.currency,
+    invoice_limit: plan.invoiceLimit,
+    migrate: false,
+    is_deleted: false,
+    is_archived: !plan.active,
+    createdAt: plan.createdAt,
+    updatedAt: plan.updatedAt,
+  };
+}
+
+/**
+ * Schema `SubscriptionCreateResponse.data`.
+ *
+ * `cron_expression` and `easy_cron_id` are Paystack implementation details
+ * leaking through their API. The emulator does not run cron -- renewals are
+ * jobs compared against virtual time -- so `easy_cron_id` is null and the
+ * cron expression is derived from the next payment date for shape only.
+ */
+export function serializeSubscription(
+  subscription: Subscription,
+  context: {
+    plan?: Plan | null;
+    customer?: Customer | null;
+    authorization?: Authorization | null;
+  } = {},
+) {
+  return {
+    id: numericTransactionId(subscription.providerSubscriptionCode),
+    domain: 'test',
+    status: toPaystackSubscriptionStatus(subscription.status),
+    subscription_code: `SUB_${subscription.providerSubscriptionCode}`,
+    email_token: subscription.emailToken,
+    amount: subscription.amount,
+    cron_expression: cronFor(subscription.nextPaymentDate),
+    next_payment_date: subscription.nextPaymentDate,
+    open_invoice: null,
+    integration: 100_000,
+    invoice_limit: subscription.invoiceLimit,
+    split_code: null,
+    quantity: subscription.quantity,
+    start: Math.floor(Date.parse(subscription.startDate) / 1000),
+    easy_cron_id: null,
+    cancelledAt: subscription.cancelledAt,
+    createdAt: subscription.createdAt,
+    updatedAt: subscription.updatedAt,
+    metadata: subscription.metadata,
+    ...(context.plan ? { plan: serializePlan(context.plan) } : {}),
+    ...(context.customer ? { customer: serializeCustomer(context.customer) } : {}),
+    ...(context.authorization
+      ? { authorization: serializeAuthorization(context.authorization) }
+      : {}),
+  };
+}
+
+/** Shape-only: the emulator schedules jobs, not cron. */
+function cronFor(nextPaymentDate: string | null): string | null {
+  if (!nextPaymentDate) return null;
+  const date = new Date(nextPaymentDate);
+  return `${date.getUTCMinutes()} ${date.getUTCHours()} ${date.getUTCDate()} * *`;
+}
+
+/** Paystack calls these invoices on subscriptions and payment requests alike. */
+export function serializeInvoice(invoice: Invoice, payment?: Payment | null) {
+  return {
+    id: numericTransactionId(invoice.providerInvoiceCode),
+    domain: 'test',
+    invoice_code: `INV_${invoice.providerInvoiceCode}`,
+    amount: invoice.amount,
+    currency: invoice.currency,
+    status: invoice.status,
+    paid: invoice.status === 'success',
+    paid_at: invoice.paidAt,
+    description: null,
+    period_start: invoice.periodStart,
+    period_end: invoice.periodEnd,
+    due_date: invoice.dueAt,
+    created_at: invoice.createdAt,
+    updated_at: invoice.updatedAt,
+    transaction: payment ? serializeTransaction(payment) : null,
+  };
+}
+
+/** Schema `SubaccountCreateResponse.data`. */
+export function serializeSubaccount(subaccount: Subaccount) {
+  return {
+    id: numericTransactionId(subaccount.providerSubaccountCode),
+    subaccount_code: `ACCT_${subaccount.providerSubaccountCode}`,
+    business_name: subaccount.businessName,
+    description: subaccount.description,
+    primary_contact_name: subaccount.primaryContactName,
+    primary_contact_email: subaccount.primaryContactEmail,
+    primary_contact_phone: subaccount.primaryContactPhone,
+    metadata: subaccount.metadata,
+    percentage_charge: subaccount.percentageCharge,
+    is_verified: true,
+    settlement_bank: subaccount.settlementBank,
+    account_number: subaccount.accountNumber,
+    settlement_schedule: 'AUTO',
+    active: subaccount.active,
+    migrate: false,
+    integration: 100_000,
+    domain: 'test',
+    currency: subaccount.currency,
+    createdAt: subaccount.createdAt,
+    updatedAt: subaccount.updatedAt,
+  };
+}
+
+/** Schema `SplitCreateResponse.data`. */
+export function serializeSplit(split: Split, subaccounts: Map<string, Subaccount> = new Map()) {
+  return {
+    id: numericTransactionId(split.providerSplitCode),
+    name: split.name,
+    type: split.type,
+    currency: split.currency,
+    integration: 100_000,
+    domain: 'test',
+    split_code: `SPL_${split.providerSplitCode}`,
+    active: split.active,
+    bearer_type: split.bearerType,
+    bearer_subaccount: split.bearerSubaccountId
+      ? numericTransactionId(split.bearerSubaccountId)
+      : null,
+    createdAt: split.createdAt,
+    updatedAt: split.updatedAt,
+    subaccounts: split.entries.map((entry) => {
+      const subaccount = subaccounts.get(entry.subaccountId);
+      return {
+        subaccount: subaccount
+          ? serializeSubaccount(subaccount)
+          : { subaccount_code: `ACCT_${entry.subaccountCode}` },
+        share: entry.share,
+      };
+    }),
+    total_subaccounts: split.entries.length,
+  };
+}
+
+/** Schema `DisputeFetchResponse.data`. */
+export function serializeDispute(dispute: Dispute, payment?: Payment | null) {
+  return {
+    id: numericTransactionId(dispute.providerDisputeId),
+    refund_amount: dispute.refundAmount,
+    currency: dispute.currency,
+    status: dispute.providerStatus,
+    resolution: dispute.resolution,
+    domain: 'test',
+    transaction: payment ? serializeTransaction(payment) : null,
+    transaction_reference: payment?.reference ?? null,
+    category: dispute.category,
+    customer: null,
+    bin: null,
+    last4: null,
+    dueAt: dispute.dueAt,
+    resolvedAt: dispute.resolvedAt,
+    evidence: dispute.evidence,
+    attachments: null,
+    note: dispute.message,
+    history: [],
+    messages: [],
+    createdAt: dispute.createdAt,
+    updatedAt: dispute.updatedAt,
   };
 }
 

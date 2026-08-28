@@ -11,7 +11,19 @@ export interface PayboxConfig {
   freezeClock: boolean;
   startAt: string | null;
   webhooks: {
-    retry: { enabled: boolean; maxAttempts: number };
+    retry: {
+      enabled: boolean;
+      maxAttempts: number;
+      /**
+       * `exponential` (default) or `paystack`.
+       *
+       * Paystack's real ladder is hourly for ten hours, which is unhelpful
+       * when you are watching it happen -- but costs nothing under a frozen
+       * clock, where `paybox time advance 12h` runs it to exhaustion
+       * instantly. That is exactly when you want the real timings.
+       */
+      schedule: 'exponential' | 'paystack';
+    };
     timeoutMs: number;
   };
   providers: Record<string, { enabled: boolean }>;
@@ -22,6 +34,28 @@ export interface PayboxConfig {
   simulation: {
     autoAdvance: boolean;
     autoAdvanceDelayMs: number;
+  };
+  balance: {
+    /** Refuse a transfer the balance cannot cover, as a provider would. */
+    enforce: boolean;
+    /**
+     * Opening test float per currency, in minor units.
+     *
+     * Without it, a fresh emulator could not pay out until it had collected
+     * something, which makes testing a payout flow needlessly circuitous. Set
+     * it to 0 to start empty and exercise the insufficient-funds path from the
+     * first transfer.
+     */
+    opening: number;
+    /**
+     * Flat transfer fee **override** per currency, in minor units.
+     *
+     * Empty by default, and deliberately so: the adapter applies the
+     * provider's own published schedule, which is tiered by amount and split
+     * by destination. Set a currency here only to pin your negotiated rate,
+     * in which case it replaces the schedule outright for that currency.
+     */
+    transferFee: Record<string, number>;
   };
   logLevel: string;
 }
@@ -35,12 +69,21 @@ const DEFAULTS: PayboxConfig = {
   freezeClock: false,
   startAt: null,
   webhooks: {
-    retry: { enabled: true, maxAttempts: 5 },
+    retry: { enabled: true, maxAttempts: 5, schedule: 'exponential' },
     timeoutMs: 10_000,
   },
   providers: { paystack: { enabled: true } },
   security: { allowAnyKey: false },
   simulation: { autoAdvance: true, autoAdvanceDelayMs: 3_000 },
+  // 10,000,000 minor units — NGN 100,000 or GHS 100,000. Large enough that a
+  // payout test never trips over it by accident, small enough to drain
+  // deliberately.
+  balance: {
+    enforce: true,
+    opening: 10_000_000,
+    // Empty: the provider's published schedule applies unless overridden.
+    transferFee: {},
+  },
   logLevel: 'info',
 };
 
@@ -89,6 +132,10 @@ export function loadConfig(options: { configPath?: string; cwd?: string } = {}):
             fromFile.webhooks?.retry?.maxAttempts ??
             DEFAULTS.webhooks.retry.maxAttempts,
         ),
+        schedule:
+          (env.PAYBOX_WEBHOOK_SCHEDULE as 'paystack' | undefined) ??
+          fromFile.webhooks?.retry?.schedule ??
+          DEFAULTS.webhooks.retry.schedule,
       },
       timeoutMs: Number(
         env.PAYBOX_WEBHOOK_TIMEOUT_MS ?? fromFile.webhooks?.timeoutMs ?? DEFAULTS.webhooks.timeoutMs,
@@ -111,6 +158,16 @@ export function loadConfig(options: { configPath?: string; cwd?: string } = {}):
           fromFile.simulation?.autoAdvanceDelayMs ??
           DEFAULTS.simulation.autoAdvanceDelayMs,
       ),
+    },
+    balance: {
+      enforce: boolFrom(
+        env.PAYBOX_ENFORCE_BALANCE,
+        fromFile.balance?.enforce ?? DEFAULTS.balance.enforce,
+      ),
+      opening: Number(
+        env.PAYBOX_OPENING_BALANCE ?? fromFile.balance?.opening ?? DEFAULTS.balance.opening,
+      ),
+      transferFee: { ...(fromFile.balance?.transferFee ?? {}) },
     },
     logLevel: env.PAYBOX_LOG_LEVEL ?? fromFile.logLevel ?? DEFAULTS.logLevel,
   };

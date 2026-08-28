@@ -1,12 +1,24 @@
 import type {
+  Authorization,
   Customer,
+  DedicatedAccount,
+  Dispute,
+  DisputeStatus,
+  Invoice,
+  InvoiceStatus,
+  LedgerEntry,
   Metadata,
   Payment,
   PayboxEvent,
   PaymentStatus,
+  Plan,
   ProviderId,
   Refund,
   RefundStatus,
+  Split,
+  Subaccount,
+  Subscription,
+  SubscriptionStatus,
   Transfer,
   TransferStatus,
 } from '@paybox/shared';
@@ -125,8 +137,20 @@ export interface ListOptions {
 export interface PaymentFilter extends ListOptions {
   provider?: ProviderId;
   status?: PaymentStatus;
+  /** Match any of these. Ignored when `status` is set. */
+  statuses?: readonly PaymentStatus[];
   reference?: string;
   customerId?: string;
+  /** Inclusive ISO bounds on `createdAt`. */
+  from?: string;
+  to?: string;
+}
+
+/** One currency's share of an aggregate. */
+export interface CurrencyTotal {
+  currency: string;
+  amount: number;
+  count: number;
 }
 
 export interface Page<T> {
@@ -142,6 +166,14 @@ export interface PaymentRepository {
   update(id: string, patch: Partial<Payment>): Promise<Payment>;
   list(filter?: PaymentFilter): Promise<Page<Payment>>;
   countByStatus(): Promise<Record<string, number>>;
+  /**
+   * Sum amounts per currency across **every** matching row.
+   *
+   * Aggregated in SQL rather than by adding up a page: a totals endpoint that
+   * sums only the first page reports a number that is silently wrong, and
+   * quietly disagrees with the count beside it.
+   */
+  sumByCurrency(filter?: Omit<PaymentFilter, 'limit' | 'offset'>): Promise<CurrencyTotal[]>;
 }
 
 export interface RefundRepository {
@@ -171,13 +203,125 @@ export interface RecipientRepository {
   list(filter?: ListOptions): Promise<Page<TransferRecipient>>;
 }
 
+export interface CustomerFilter extends ListOptions {
+  provider?: ProviderId;
+  /** Case-insensitive substring match on email, first name or last name. */
+  search?: string;
+}
+
 export interface CustomerRepository {
   insert(customer: Customer): Promise<Customer>;
   byId(id: string): Promise<Customer | null>;
   byProviderCustomerId(provider: ProviderId, id: string): Promise<Customer | null>;
   byEmail(provider: ProviderId, email: string): Promise<Customer | null>;
   update(id: string, patch: Partial<Customer>): Promise<Customer>;
-  list(filter?: ListOptions): Promise<Page<Customer>>;
+  list(filter?: CustomerFilter): Promise<Page<Customer>>;
+  /** Batch fetch, so listing N payments does not cost N customer queries. */
+  byIds(ids: readonly string[]): Promise<Map<string, Customer>>;
+}
+
+export interface AuthorizationRepository {
+  insert(authorization: Authorization): Promise<Authorization>;
+  byId(id: string): Promise<Authorization | null>;
+  byCode(provider: ProviderId, code: string): Promise<Authorization | null>;
+  /** Batch form of `byCode`, keyed by provider authorization code. */
+  byCodes(provider: ProviderId, codes: readonly string[]): Promise<Map<string, Authorization>>;
+  /** Deduping lookup: one instrument charged twice yields one authorization. */
+  bySignature(provider: ProviderId, signature: string): Promise<Authorization | null>;
+  /** Most recent first -- a subscription with no explicit authorization uses
+   *  the customer's latest, which is what Paystack documents. */
+  listByCustomer(customerId: string): Promise<Authorization[]>;
+  update(id: string, patch: Partial<Authorization>): Promise<Authorization>;
+  list(filter?: ListOptions & { provider?: ProviderId }): Promise<Page<Authorization>>;
+}
+
+export interface DedicatedAccountRepository {
+  insert(account: DedicatedAccount): Promise<DedicatedAccount>;
+  byId(id: string): Promise<DedicatedAccount | null>;
+  byProviderAccountId(provider: ProviderId, id: string): Promise<DedicatedAccount | null>;
+  /** The inbound rail: money arriving at this number belongs to its customer. */
+  byAccountNumber(provider: ProviderId, accountNumber: string): Promise<DedicatedAccount | null>;
+  byCustomer(customerId: string): Promise<DedicatedAccount | null>;
+  update(id: string, patch: Partial<DedicatedAccount>): Promise<DedicatedAccount>;
+  list(filter?: ListOptions & { provider?: ProviderId }): Promise<Page<DedicatedAccount>>;
+}
+
+export interface PlanRepository {
+  insert(plan: Plan): Promise<Plan>;
+  byId(id: string): Promise<Plan | null>;
+  byCode(provider: ProviderId, code: string): Promise<Plan | null>;
+  update(id: string, patch: Partial<Plan>): Promise<Plan>;
+  list(filter?: ListOptions & { provider?: ProviderId }): Promise<Page<Plan>>;
+}
+
+export interface SubscriptionRepository {
+  insert(subscription: Subscription): Promise<Subscription>;
+  byId(id: string): Promise<Subscription | null>;
+  byCode(provider: ProviderId, code: string): Promise<Subscription | null>;
+  update(id: string, patch: Partial<Subscription>): Promise<Subscription>;
+  listByCustomer(customerId: string): Promise<Subscription[]>;
+  list(
+    filter?: ListOptions & { provider?: ProviderId; status?: SubscriptionStatus },
+  ): Promise<Page<Subscription>>;
+}
+
+export interface InvoiceRepository {
+  insert(invoice: Invoice): Promise<Invoice>;
+  byId(id: string): Promise<Invoice | null>;
+  byCode(provider: ProviderId, code: string): Promise<Invoice | null>;
+  update(id: string, patch: Partial<Invoice>): Promise<Invoice>;
+  /** Oldest first, so a billing history reads in the order it happened. */
+  listBySubscription(subscriptionId: string): Promise<Invoice[]>;
+  list(
+    filter?: ListOptions & { provider?: ProviderId; status?: InvoiceStatus },
+  ): Promise<Page<Invoice>>;
+}
+
+export interface SubaccountRepository {
+  insert(subaccount: Subaccount): Promise<Subaccount>;
+  byId(id: string): Promise<Subaccount | null>;
+  byCode(provider: ProviderId, code: string): Promise<Subaccount | null>;
+  update(id: string, patch: Partial<Subaccount>): Promise<Subaccount>;
+  list(filter?: ListOptions & { provider?: ProviderId }): Promise<Page<Subaccount>>;
+}
+
+export interface SplitRepository {
+  /** Writes the split and its subaccount entries in one transaction. */
+  insert(split: Split): Promise<Split>;
+  byId(id: string): Promise<Split | null>;
+  byCode(provider: ProviderId, code: string): Promise<Split | null>;
+  /** Batch form of `byCode`, keyed by provider split code. */
+  byCodes(provider: ProviderId, codes: readonly string[]): Promise<Map<string, Split>>;
+  update(id: string, patch: Partial<Omit<Split, 'entries'>>): Promise<Split>;
+  addSubaccount(splitId: string, subaccountId: string, share: number): Promise<Split>;
+  removeSubaccount(splitId: string, subaccountId: string): Promise<Split>;
+  list(filter?: ListOptions & { provider?: ProviderId }): Promise<Page<Split>>;
+}
+
+/**
+ * The balance ledger. Append-only: there is no update or delete, because the
+ * balance is a fold over these rows rather than a stored number.
+ */
+export interface LedgerRepository {
+  append(entry: LedgerEntry): Promise<LedgerEntry>;
+  /** Net of credits and debits, per currency. Excludes any opening float. */
+  net(provider: ProviderId, currency: string): Promise<number>;
+  list(
+    filter?: ListOptions & { provider?: ProviderId; currency?: string },
+  ): Promise<Page<LedgerEntry>>;
+  /** Distinct currencies that have seen movement. */
+  currencies(provider: ProviderId): Promise<string[]>;
+}
+
+export interface DisputeRepository {
+  insert(dispute: Dispute): Promise<Dispute>;
+  byId(id: string): Promise<Dispute | null>;
+  byProviderDisputeId(provider: ProviderId, id: string): Promise<Dispute | null>;
+  listByPayment(paymentId: string): Promise<Dispute[]>;
+  update(id: string, patch: Partial<Dispute>): Promise<Dispute>;
+  list(
+    filter?: ListOptions & { provider?: ProviderId; status?: DisputeStatus },
+  ): Promise<Page<Dispute>>;
 }
 
 export interface EventFilter extends ListOptions {
@@ -190,6 +334,8 @@ export interface EventRepository {
   append(event: PayboxEvent): Promise<PayboxEvent>;
   byId(id: string): Promise<PayboxEvent | null>;
   listByResource(resourceId: string): Promise<PayboxEvent[]>;
+  /** Batch form of `listByResource`, keyed by resource id and ordered. */
+  listByResources(resourceIds: readonly string[]): Promise<Map<string, PayboxEvent[]>>;
   list(filter?: EventFilter): Promise<Page<PayboxEvent>>;
   /** Next per-resource sequence number. Must be called inside a transaction. */
   nextSequence(resourceId: string): Promise<number>;
@@ -244,6 +390,15 @@ export interface Storage {
   readonly refunds: RefundRepository;
   readonly transfers: TransferRepository;
   readonly customers: CustomerRepository;
+  readonly authorizations: AuthorizationRepository;
+  readonly dedicatedAccounts: DedicatedAccountRepository;
+  readonly plans: PlanRepository;
+  readonly subscriptions: SubscriptionRepository;
+  readonly invoices: InvoiceRepository;
+  readonly subaccounts: SubaccountRepository;
+  readonly splits: SplitRepository;
+  readonly ledger: LedgerRepository;
+  readonly disputes: DisputeRepository;
   readonly recipients: RecipientRepository;
   readonly events: EventRepository;
   readonly webhooks: WebhookRepository;

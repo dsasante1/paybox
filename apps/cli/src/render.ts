@@ -36,6 +36,18 @@ export function shortTime(iso: string | null): string {
   return iso.slice(11, 19);
 }
 
+/**
+ * Date and time, for values that can be days or months apart.
+ *
+ * `shortTime` shows only the clock, which is right for a list of payments from
+ * the last few minutes and actively misleading for billing periods a month
+ * apart -- twelve renewals would all render identically.
+ */
+export function shortDateTime(iso: string | null): string {
+  if (!iso) return '—';
+  return `${iso.slice(0, 10)} ${iso.slice(11, 16)}`;
+}
+
 export function keyValue(pairs: Array<[string, string]>): string {
   const width = Math.max(...pairs.map(([k]) => k.length));
   return pairs.map(([k, v]) => `  ${pc.dim(k.padEnd(width))}  ${v}`).join('\n');

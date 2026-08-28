@@ -37,6 +37,7 @@ export interface RefundRow {
   status: string;
   provider_status: string;
   reason: string | null;
+  account_details: string | null;
   metadata: string;
   created_at: string;
   updated_at: string;
@@ -165,6 +166,180 @@ export interface TransferRecipientRow {
   updated_at: string;
 }
 
+export interface AuthorizationRow {
+  id: string;
+  provider: string;
+  provider_authorization_code: string;
+  customer_id: string | null;
+  payment_id: string | null;
+  channel: string;
+  bin: string | null;
+  last4: string | null;
+  exp_month: string | null;
+  exp_year: string | null;
+  card_type: string | null;
+  bank: string | null;
+  brand: string | null;
+  country_code: string | null;
+  signature: string | null;
+  reusable: number;
+  active: number;
+  account_name: string | null;
+  mobile_money_number: string | null;
+  metadata: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DedicatedAccountRow {
+  id: string;
+  provider: string;
+  provider_account_id: string;
+  customer_id: string;
+  account_number: string;
+  account_name: string;
+  bank_name: string;
+  bank_slug: string;
+  currency: string;
+  active: number;
+  assigned: number;
+  metadata: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PlanRow {
+  id: string;
+  provider: string;
+  provider_plan_code: string;
+  name: string;
+  amount: number;
+  currency: string;
+  interval: string;
+  description: string | null;
+  invoice_limit: number;
+  send_invoices: number;
+  send_sms: number;
+  active: number;
+  metadata: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SubscriptionRow {
+  id: string;
+  provider: string;
+  provider_subscription_code: string;
+  customer_id: string;
+  plan_id: string;
+  authorization_id: string;
+  status: string;
+  provider_status: string;
+  quantity: number;
+  amount: number;
+  currency: string;
+  start_date: string;
+  next_payment_date: string | null;
+  invoice_limit: number;
+  invoice_count: number;
+  email_token: string;
+  cancelled_at: string | null;
+  metadata: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InvoiceRow {
+  id: string;
+  provider: string;
+  provider_invoice_code: string;
+  subscription_id: string;
+  customer_id: string;
+  payment_id: string | null;
+  amount: number;
+  currency: string;
+  status: string;
+  provider_status: string;
+  period_start: string;
+  period_end: string;
+  due_at: string;
+  paid_at: string | null;
+  metadata: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SubaccountRow {
+  id: string;
+  provider: string;
+  provider_subaccount_code: string;
+  business_name: string;
+  settlement_bank: string;
+  account_number: string;
+  percentage_charge: number;
+  description: string | null;
+  primary_contact_email: string | null;
+  primary_contact_name: string | null;
+  primary_contact_phone: string | null;
+  currency: string;
+  active: number;
+  metadata: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SplitRow {
+  id: string;
+  provider: string;
+  provider_split_code: string;
+  name: string;
+  type: string;
+  currency: string;
+  bearer_type: string;
+  bearer_subaccount_id: string | null;
+  active: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SplitSubaccountRow {
+  split_id: string;
+  subaccount_id: string;
+  share: number;
+}
+
+export interface LedgerEntryRow {
+  id: string;
+  provider: string;
+  currency: string;
+  direction: string;
+  amount: number;
+  reason: string;
+  resource_id: string | null;
+  created_at: string;
+}
+
+export interface DisputeRow {
+  id: string;
+  provider: string;
+  provider_dispute_id: string;
+  payment_id: string;
+  customer_id: string | null;
+  category: string;
+  status: string;
+  provider_status: string;
+  resolution: string | null;
+  refund_amount: number;
+  currency: string;
+  due_at: string;
+  resolved_at: string | null;
+  evidence: string | null;
+  message: string | null;
+  metadata: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface MigrationRow {
   id: string;
   applied_at: string;
@@ -180,6 +355,16 @@ export interface Database {
   webhook_deliveries: WebhookDeliveryRow;
   jobs: JobRow;
   idempotency_keys: IdempotencyRow;
+  authorizations: AuthorizationRow;
+  dedicated_accounts: DedicatedAccountRow;
+  plans: PlanRow;
+  subscriptions: SubscriptionRow;
+  invoices: InvoiceRow;
+  subaccounts: SubaccountRow;
+  splits: SplitRow;
+  split_subaccounts: SplitSubaccountRow;
+  balance_ledger: LedgerEntryRow;
+  disputes: DisputeRow;
   transfer_recipients: TransferRecipientRow;
   event_sequences: EventSequenceRow;
   schema_migrations: MigrationRow;

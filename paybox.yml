@@ -19,6 +19,10 @@ webhooks:
   retry:
     enabled: true
     maxAttempts: 5
+    # "exponential" (default) or "paystack" for the provider's real ladder:
+    # hourly for ten hours. Unhelpful live, free under a frozen clock --
+    # `paybox time advance 12h` runs it to exhaustion instantly.
+    schedule: exponential
   timeoutMs: 10000
 
 providers:
@@ -35,5 +39,17 @@ simulation:
   # drive every transition explicitly.
   autoAdvance: true
   autoAdvanceDelayMs: 3000
+
+balance:
+  # Refuse a transfer the balance cannot cover, as a real provider does.
+  enforce: true
+  # Opening test float per currency, in minor units. Set to 0 to start empty
+  # and exercise the insufficient-funds path from the very first transfer.
+  opening: 10000000
+  # Flat transfer-fee override per currency, in minor units. Leave empty to
+  # use each provider's published schedule (tiered by amount, and split by
+  # destination in GHS and KES). Set a currency here to pin your own
+  # negotiated rate, which then replaces the schedule for that currency.
+  transferFee: {}
 
 logLevel: info

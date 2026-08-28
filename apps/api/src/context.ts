@@ -12,9 +12,13 @@ import { openStorage } from '@paybox/storage';
 import { createIdFactory, createRandom, type IdFactory, type Random } from '@paybox/shared';
 import {
   PAYMENT_SIMULATE_JOB,
+  REFUND_SETTLE_JOB,
   PaymentSimulator,
   ScenarioRunner,
   SCENARIO_STEP_JOB,
+  SUBSCRIPTION_CHARGE_JOB,
+  SUBSCRIPTION_INVOICE_JOB,
+  SubscriptionRunner,
   type SimulatedOutcome,
 } from '@paybox/simulator';
 import {
@@ -23,7 +27,14 @@ import {
   createRetryPolicy,
   type DeliveryTransport,
 } from '@paybox/webhooks';
-import { PaystackWebhookFormatter, generateLocalKeys, toPaystackStatus } from '@paybox/paystack';
+import {
+  PaystackWebhookFormatter,
+  generateLocalKeys,
+  paystackAuthorizationMinter,
+  paystackRetrySchedule,
+  PAYSTACK_TEST_MODE_MAX_ATTEMPTS,
+  toPaystackStatus,
+} from '@paybox/paystack';
 import type { PayboxConfig } from './config.js';
 import { PayboxLogger, type LogEntry } from './logger.js';
 import { NetworkSimulator } from './network.js';
@@ -38,6 +49,7 @@ export interface PayboxContext {
   engine: PaymentEngine;
   simulator: PaymentSimulator;
   scenarios: ScenarioRunner;
+  subscriptions: SubscriptionRunner;
   dispatcher: WebhookDispatcher;
   scheduler: Scheduler;
   network: NetworkSimulator;
@@ -90,9 +102,24 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
   const providerStatus: ProviderStatusResolver = (provider, status) =>
     provider === 'paystack' ? toPaystackStatus(status) : status;
 
-  const engine = new PaymentEngine({ storage, clock, ids, bus, providerStatus });
+  // Which channels mint a reusable authorization is also provider knowledge,
+  // injected the same way and for the same reason as the status mapping above.
+  const mintAuthorization = (payment: Parameters<typeof paystackAuthorizationMinter>[0]) =>
+    payment.provider === 'paystack' ? paystackAuthorizationMinter(payment) : null;
+
+  const engine = new PaymentEngine({
+    storage,
+    clock,
+    ids,
+    bus,
+    providerStatus,
+    mintAuthorization,
+    enforceBalance: config.balance.enforce,
+    openingBalance: config.balance.opening,
+  });
   const simulator = new PaymentSimulator({ engine, clock });
   const scenarios = new ScenarioRunner({ storage, clock, ids, simulator, engine });
+  const subscriptions = new SubscriptionRunner({ storage, clock, ids, simulator, engine });
   const network = new NetworkSimulator(random);
 
   const dispatcher = new WebhookDispatcher({
@@ -104,7 +131,15 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
     ...(options.transport ? { transport: options.transport } : {}),
     retry: createRetryPolicy({
       enabled: config.webhooks.retry.enabled,
-      maxAttempts: config.webhooks.retry.maxAttempts,
+      // Paystack's own ladder is a fixed ten attempts; overriding maxAttempts
+      // alongside it would produce a schedule that is neither.
+      maxAttempts:
+        config.webhooks.retry.schedule === 'paystack'
+          ? PAYSTACK_TEST_MODE_MAX_ATTEMPTS
+          : config.webhooks.retry.maxAttempts,
+      ...(config.webhooks.retry.schedule === 'paystack'
+        ? { backoff: (attempt: number) => paystackRetrySchedule(attempt, 'test') }
+        : {}),
       jitter: () => random.fork('webhook-jitter').next(),
     }),
     timeoutMs: config.webhooks.timeoutMs,
@@ -146,12 +181,57 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
 
   scheduler.register(WEBHOOK_DELIVERY_JOB, dispatcher.handleJob);
   scheduler.register(SCENARIO_STEP_JOB, scenarios.handleJob);
+  scheduler.register(SUBSCRIPTION_INVOICE_JOB, subscriptions.handleInvoiceJob);
+  scheduler.register(SUBSCRIPTION_CHARGE_JOB, subscriptions.handleChargeJob);
   scheduler.register(PAYMENT_SIMULATE_JOB, async (job) => {
     const paymentId = String(job.payload.paymentId ?? '');
     const outcome = job.payload.outcome as SimulatedOutcome | undefined;
     if (!paymentId || !outcome) return;
     await simulator.apply(paymentId, outcome);
   });
+  /**
+   * The deadline reminder a provider sends before a dispute expires.
+   *
+   * A scheduled job rather than a timer, so "nobody answered in time" is one
+   * `paybox time advance` away.
+   */
+  /**
+   * Settle a queued refund, the way a refund processor eventually would.
+   *
+   * Walks pending -> processing -> outcome rather than jumping, so the
+   * intermediate `refund.processing` webhook actually fires. A refund that
+   * lands in `needs_attention` stops there and waits for bank details.
+   */
+  scheduler.register(REFUND_SETTLE_JOB, async (job) => {
+    const refundId = String(job.payload.refundId ?? '');
+    const outcome = String(job.payload.outcome ?? 'successful') as
+      | 'successful'
+      | 'failed'
+      | 'needs_attention';
+    if (!refundId) return;
+
+    const refund = await storage.refunds.byId(refundId);
+    // Someone may have settled it by hand from the CLI in the meantime.
+    if (!refund || refund.status !== 'pending') return;
+
+    await engine.transitionRefund(refundId, 'processing');
+    if (outcome === 'needs_attention') {
+      await engine.transitionRefund(refundId, 'needs_attention');
+      return;
+    }
+    await engine.transitionRefund(refundId, outcome);
+  });
+
+  scheduler.register('dispute.remind', async (job) => {
+    const disputeId = String(job.payload.disputeId ?? '');
+    const dispute = await engine.getDispute(disputeId);
+    // Nothing to remind anyone about once it has been settled.
+    if (!dispute || dispute.status === 'resolved') return;
+    await engine.transitionDispute(dispute.id, 'awaiting_bank_feedback', {
+      eventType: 'dispute.reminder',
+    });
+  });
+
   scheduler.register('payment.expire', async (job) => {
     const paymentId = String(job.payload.paymentId ?? '');
     const payment = await engine.getPayment(paymentId);
@@ -174,6 +254,7 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
     engine,
     simulator,
     scenarios,
+    subscriptions,
     dispatcher,
     scheduler,
     network,

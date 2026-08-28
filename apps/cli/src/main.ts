@@ -1,10 +1,27 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import pc from 'picocolors';
-import type { Payment, PayboxEvent, Refund } from '@paybox/shared';
+import type {
+  Authorization,
+  Dispute,
+  Invoice,
+  Payment,
+  PayboxEvent,
+  Plan,
+  Refund,
+  Subscription,
+} from '@paybox/shared';
 import type { Job, WebhookDelivery, WebhookEndpoint } from '@paybox/core';
 import { CliError, PayboxClient } from './client.js';
-import { heading, keyValue, money, shortTime, statusColour, table } from './render.js';
+import {
+  heading,
+  keyValue,
+  money,
+  shortDateTime,
+  shortTime,
+  statusColour,
+  table,
+} from './render.js';
 
 const DEFAULT_URL = process.env.PAYBOX_URL ?? 'http://127.0.0.1:8080';
 
@@ -608,6 +625,234 @@ program
       ),
     );
   });
+
+/* ------------------------------------------------------------------ *
+ * Recurring billing
+ * ------------------------------------------------------------------ */
+
+const plan = program.command('plan').description('Inspect subscription plans');
+
+plan
+  .command('list')
+  .description('List plans')
+  .action(async () => {
+    const { items } = await client().get<{ items: Plan[] }>('/api/plans');
+    output(items, () =>
+      items.length === 0
+        ? pc.dim('No plans. Create one with POST /paystack/plan.')
+        : table(
+            ['CODE', 'NAME', 'AMOUNT', 'INTERVAL', 'LIMIT'],
+            items.map((p) => [
+              p.providerPlanCode,
+              p.name,
+              money(p.amount, p.currency),
+              p.interval,
+              p.invoiceLimit === 0 ? pc.dim('unlimited') : String(p.invoiceLimit),
+            ]),
+          ),
+    );
+  });
+
+const subscription = program
+  .command('subscription')
+  .description('Inspect and control subscriptions');
+
+subscription
+  .command('list')
+  .description('List subscriptions')
+  .option('--status <status>', 'filter by canonical status')
+  .action(async (options: { status?: string }) => {
+    const query = options.status ? `?status=${encodeURIComponent(options.status)}` : '';
+    const { items } = await client().get<{ items: Subscription[] }>(
+      `/api/subscriptions${query}`,
+    );
+    output(items, () =>
+      items.length === 0
+        ? pc.dim('No subscriptions.')
+        : table(
+            ['ID', 'STATUS', 'AMOUNT', 'INVOICES', 'NEXT PAYMENT'],
+            items.map((sub) => [
+              sub.id,
+              statusColour(sub.status),
+              money(sub.amount, sub.currency),
+              sub.invoiceLimit === 0
+                ? String(sub.invoiceCount)
+                : `${sub.invoiceCount}/${sub.invoiceLimit}`,
+              sub.nextPaymentDate ? shortDateTime(sub.nextPaymentDate) : pc.dim('—'),
+            ]),
+          ),
+    );
+  });
+
+subscription
+  .command('get <id>')
+  .description('Show a subscription and its billing history')
+  .action(async (id: string) => {
+    const detail = await client().get<{
+      subscription: Subscription;
+      plan: Plan | null;
+      invoices: Invoice[];
+    }>(`/api/subscriptions/${id}`);
+
+    output(detail, () => {
+      const { subscription: sub, invoices } = detail;
+      const lines = [
+        heading('Subscription'),
+        keyValue([
+          ['id', sub.id],
+          ['code', sub.providerSubscriptionCode],
+          ['status', statusColour(sub.status)],
+          ['plan', detail.plan?.name ?? sub.planId],
+          ['amount', money(sub.amount, sub.currency)],
+          ['started', shortDateTime(sub.startDate)],
+          ['next', sub.nextPaymentDate ? shortDateTime(sub.nextPaymentDate) : '—'],
+        ]),
+        '',
+        heading(`Invoices (${invoices.length})`),
+      ];
+      lines.push(
+        invoices.length === 0
+          ? pc.dim('None raised yet.')
+          : table(
+              ['PERIOD', 'AMOUNT', 'STATUS', 'PAID'],
+              invoices.map((invoice) => [
+                shortDateTime(invoice.periodStart),
+                money(invoice.amount, invoice.currency),
+                statusColour(invoice.status),
+                invoice.paidAt ? shortDateTime(invoice.paidAt) : pc.dim('—'),
+              ]),
+            ),
+      );
+      return lines.join('\n');
+    });
+  });
+
+subscription
+  .command('disable <id>')
+  .description('Stop a subscription renewing')
+  .action(async (id: string) => {
+    const updated = await client().post<Subscription>(`/api/subscriptions/${id}/disable`);
+    output(updated, () => `${pc.green('✓')} Subscription ${id} is now ${updated.status}.`);
+  });
+
+program
+  .command('authorizations')
+  .description('List stored authorizations')
+  .action(async () => {
+    const { items } = await client().get<{ items: Authorization[] }>('/api/authorizations');
+    output(items, () =>
+      items.length === 0
+        ? pc.dim('No stored authorizations. Charge a card to mint one.')
+        : table(
+            ['CODE', 'CHANNEL', 'LAST4', 'REUSABLE', 'ACTIVE'],
+            items.map((a) => [
+              a.providerAuthorizationCode,
+              a.channel,
+              a.last4 ?? pc.dim('—'),
+              a.reusable ? pc.green('yes') : pc.dim('no'),
+              a.active ? pc.green('yes') : pc.red('no'),
+            ]),
+          ),
+    );
+  });
+
+/* ------------------------------------------------------------------ *
+ * Balance
+ * ------------------------------------------------------------------ */
+
+const balance = program.command('balance').description('Inspect and top up the balance');
+
+balance
+  .command('show', { isDefault: true })
+  .description('Show the balance per currency')
+  .action(async () => {
+    const { balances } = await client().get<{
+      balances: { currency: string; balance: number }[];
+    }>('/api/balance');
+    output(balances, () =>
+      table(
+        ['CURRENCY', 'BALANCE'],
+        balances.map((b) => [b.currency, money(b.balance, b.currency)]),
+      ),
+    );
+  });
+
+balance
+  .command('credit <amount>')
+  .description('Add test funds, in minor units (emulator-only)')
+  .option('--currency <currency>', 'currency to credit', 'NGN')
+  .option('--reason <reason>', 'ledger reason', 'manual_credit')
+  .action(async (amount: string, options: { currency: string; reason: string }) => {
+    const entry = await client().post<{ amount: number; currency: string }>(
+      '/api/balance/credit',
+      { amount: Number(amount), currency: options.currency, reason: options.reason },
+    );
+    output(entry, () =>
+      `${pc.green('✓')} Credited ${money(entry.amount, entry.currency)} to the test balance.`,
+    );
+  });
+
+/* ------------------------------------------------------------------ *
+ * Disputes
+ * ------------------------------------------------------------------ */
+
+const dispute = program.command('dispute').description('Open and resolve chargebacks');
+
+dispute
+  .command('list')
+  .description('List disputes')
+  .action(async () => {
+    const { items } = await client().get<{ items: Dispute[] }>('/api/disputes');
+    output(items, () =>
+      items.length === 0
+        ? pc.dim('No disputes.')
+        : table(
+            ['ID', 'STATUS', 'AMOUNT', 'CATEGORY', 'DUE'],
+            items.map((d) => [
+              d.id,
+              statusColour(d.status),
+              money(d.refundAmount, d.currency),
+              d.category,
+              shortDateTime(d.dueAt),
+            ]),
+          ),
+    );
+  });
+
+dispute
+  .command('open <paymentId>')
+  .description('Open a dispute against a payment (emulator-only)')
+  .option('--category <category>', 'dispute category', 'chargeback')
+  .option('--amount <amount>', 'disputed amount in minor units')
+  .action(async (paymentId: string, options: { category: string; amount?: string }) => {
+    const created = await client().post<Dispute>('/api/disputes', {
+      paymentId,
+      category: options.category,
+      ...(options.amount ? { refundAmount: Number(options.amount) } : {}),
+    });
+    output(created, () =>
+      `${pc.green('✓')} Dispute ${created.id} opened; response due ${shortDateTime(created.dueAt)}.`,
+    );
+  });
+
+dispute
+  .command('resolve <id>')
+  .description('Resolve a dispute')
+  .option('--decline', 'decline it instead of accepting', false)
+  .option('--message <message>', 'reason for the resolution', 'Resolved from the CLI')
+  .option('--amount <amount>', 'refund amount in minor units')
+  .action(
+    async (id: string, options: { decline: boolean; message: string; amount?: string }) => {
+      const resolved = await client().post<Dispute>(`/api/disputes/${id}/resolve`, {
+        resolution: options.decline ? 'declined' : 'merchant-accepted',
+        message: options.message,
+        ...(options.amount ? { refundAmount: Number(options.amount) } : {}),
+      });
+      output(resolved, () =>
+        `${pc.green('✓')} Dispute ${id} resolved as ${resolved.resolution}.`,
+      );
+    },
+  );
 
 program
   .command('jobs')

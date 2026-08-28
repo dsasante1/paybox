@@ -11,6 +11,16 @@ import type { SimulatedOutcome } from './instruments.js';
 /** Job kind used to play an instrument's outcome out over virtual time. */
 export const PAYMENT_SIMULATE_JOB = 'payment.simulate';
 
+/**
+ * Job kind used to settle a queued refund.
+ *
+ * Refunds are asynchronous at every provider we emulate: the API queues one
+ * and the outcome arrives later by webhook. Leaving them `pending` forever
+ * would make the refund half of an integration untestable without hand-driving
+ * every one from the CLI.
+ */
+export const REFUND_SETTLE_JOB = 'refund.settle';
+
 export interface SimulationOptions {
   /** Provider-specific status to record alongside the canonical one. */
   providerStatus?: string;

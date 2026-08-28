@@ -1,7 +1,16 @@
 import { Kysely, sql, type Transaction } from 'kysely';
-import { PayboxError, type Customer, type Payment, type PayboxEvent, type ProviderId, type Refund, type Transfer } from '@paybox/shared';
+import { PayboxError, type Customer, type Payment, type PayboxEvent, type ProviderId, type Refund, type Split, type Transfer } from '@paybox/shared';
 import type {
+  AuthorizationRepository,
   CustomerRepository,
+  DedicatedAccountRepository,
+  DisputeRepository,
+  InvoiceRepository,
+  LedgerRepository,
+  PlanRepository,
+  SplitRepository,
+  SubaccountRepository,
+  SubscriptionRepository,
   EventFilter,
   EventRepository,
   IdempotencyRecord,
@@ -78,6 +87,19 @@ class SqliteStorage implements Storage {
       'refunds',
       'transfers',
       'transfer_recipients',
+      // Invoices reference subscriptions, which reference plans and
+      // authorizations; drop them in dependency order.
+      'invoices',
+      'subscriptions',
+      'plans',
+      'disputes',
+      'split_subaccounts',
+      'splits',
+      'subaccounts',
+      'balance_ledger',
+      // Before payments and customers: these reference both.
+      'authorizations',
+      'dedicated_accounts',
       'payments',
       'customers',
     ] as const;
@@ -148,6 +170,10 @@ class SqliteStorage implements Storage {
       if (filter?.status) {
         query = query.where('status', '=', filter.status);
         count = count.where('status', '=', filter.status);
+      } else if (filter?.statuses && filter.statuses.length > 0) {
+        const statuses = [...filter.statuses];
+        query = query.where('status', 'in', statuses);
+        count = count.where('status', 'in', statuses);
       }
       if (filter?.reference) {
         query = query.where('reference', '=', filter.reference);
@@ -157,6 +183,16 @@ class SqliteStorage implements Storage {
         query = query.where('customer_id', '=', filter.customerId);
         count = count.where('customer_id', '=', filter.customerId);
       }
+      // Inclusive bounds. Timestamps are ISO-8601 UTC, which sorts
+      // lexicographically, so a string comparison is a date comparison.
+      if (filter?.from) {
+        query = query.where('created_at', '>=', filter.from);
+        count = count.where('created_at', '>=', filter.from);
+      }
+      if (filter?.to) {
+        query = query.where('created_at', '<=', filter.to);
+        count = count.where('created_at', '<=', filter.to);
+      }
       const rows = await query
         .orderBy('created_at', 'desc')
         .orderBy('id', 'desc')
@@ -165,6 +201,31 @@ class SqliteStorage implements Storage {
         .execute();
       const total = await count.executeTakeFirst();
       return { items: rows.map(map.toPayment), total: Number(total?.total ?? 0) };
+    },
+    sumByCurrency: async (filter) => {
+      let query = this.#db
+        .selectFrom('payments')
+        .select(['currency'])
+        .select(({ fn }) => [
+          fn.sum<number>('amount').as('amount'),
+          fn.countAll<number>().as('count'),
+        ])
+        .groupBy('currency');
+      if (filter?.provider) query = query.where('provider', '=', filter.provider);
+      if (filter?.status) {
+        query = query.where('status', '=', filter.status);
+      } else if (filter?.statuses && filter.statuses.length > 0) {
+        query = query.where('status', 'in', [...filter.statuses]);
+      }
+      if (filter?.customerId) query = query.where('customer_id', '=', filter.customerId);
+      if (filter?.from) query = query.where('created_at', '>=', filter.from);
+      if (filter?.to) query = query.where('created_at', '<=', filter.to);
+      const rows = await query.execute();
+      return rows.map((r) => ({
+        currency: r.currency,
+        amount: Number(r.amount ?? 0),
+        count: Number(r.count ?? 0),
+      }));
     },
     countByStatus: async () => {
       const rows = await this.#db
@@ -346,18 +407,707 @@ class SqliteStorage implements Storage {
     },
     list: async (filter) => {
       const { limit, offset } = page(filter);
-      const rows = await this.#db
+      let query = this.#db.selectFrom('customers').selectAll();
+      let count = this.#db
         .selectFrom('customers')
-        .selectAll()
+        .select(({ fn }) => fn.countAll<number>().as('total'));
+      if (filter?.provider) {
+        query = query.where('provider', '=', filter.provider);
+        count = count.where('provider', '=', filter.provider);
+      }
+      if (filter?.search) {
+        // SQLite's LIKE is already case-insensitive for ASCII, which is what
+        // an email search needs; lowering the term keeps it predictable.
+        const term = `%${filter.search.toLowerCase()}%`;
+        const matches = (qb: typeof query) =>
+          qb.where((eb) =>
+            eb.or([
+              eb('email', 'like', term),
+              eb('first_name', 'like', term),
+              eb('last_name', 'like', term),
+            ]),
+          );
+        query = matches(query);
+        count = count.where((eb) =>
+          eb.or([
+            eb('email', 'like', term),
+            eb('first_name', 'like', term),
+            eb('last_name', 'like', term),
+          ]),
+        );
+      }
+      const rows = await query
         .orderBy('created_at', 'desc')
         .limit(limit)
         .offset(offset)
         .execute();
-      const total = await this.#db
-        .selectFrom('customers')
-        .select(({ fn }) => fn.countAll<number>().as('total'))
-        .executeTakeFirst();
+      const total = await count.executeTakeFirst();
       return { items: rows.map(map.toCustomer), total: Number(total?.total ?? 0) };
+    },
+    byIds: async (ids) => {
+      if (ids.length === 0) return new Map();
+      const rows = await this.#db
+        .selectFrom('customers')
+        .selectAll()
+        .where('id', 'in', [...new Set(ids)])
+        .execute();
+      return new Map(rows.map((row) => [row.id, map.toCustomer(row)]));
+    },
+  };
+
+  readonly authorizations: AuthorizationRepository = {
+    insert: async (authorization) => {
+      await this.#db
+        .insertInto('authorizations')
+        .values(map.fromAuthorization(authorization))
+        .execute();
+      return authorization;
+    },
+    byId: async (id) => {
+      const row = await this.#db
+        .selectFrom('authorizations')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toAuthorization(row) : null;
+    },
+    byCode: async (provider, code) => {
+      const row = await this.#db
+        .selectFrom('authorizations')
+        .selectAll()
+        .where('provider', '=', provider)
+        .where('provider_authorization_code', '=', code)
+        .executeTakeFirst();
+      return row ? map.toAuthorization(row) : null;
+    },
+    bySignature: async (provider, signature) => {
+      const row = await this.#db
+        .selectFrom('authorizations')
+        .selectAll()
+        .where('provider', '=', provider)
+        .where('signature', '=', signature)
+        .executeTakeFirst();
+      return row ? map.toAuthorization(row) : null;
+    },
+    byCodes: async (provider, codes) => {
+      if (codes.length === 0) return new Map();
+      const rows = await this.#db
+        .selectFrom('authorizations')
+        .selectAll()
+        .where('provider', '=', provider)
+        .where('provider_authorization_code', 'in', [...new Set(codes)])
+        .execute();
+      return new Map(
+        rows.map((row) => [row.provider_authorization_code, map.toAuthorization(row)]),
+      );
+    },
+    listByCustomer: async (customerId) => {
+      const rows = await this.#db
+        .selectFrom('authorizations')
+        .selectAll()
+        .where('customer_id', '=', customerId)
+        .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
+        .execute();
+      return rows.map(map.toAuthorization);
+    },
+    update: async (id, patch) => {
+      const columns = map.authorizationPatch(patch);
+      if (Object.keys(columns).length > 0) {
+        await this.#db
+          .updateTable('authorizations')
+          .set(columns)
+          .where('id', '=', id)
+          .execute();
+      }
+      const row = await this.#db
+        .selectFrom('authorizations')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toAuthorization(row) : notFound('authorization', id);
+    },
+    list: async (filter) => {
+      const { limit, offset } = page(filter);
+      let query = this.#db.selectFrom('authorizations').selectAll();
+      let count = this.#db
+        .selectFrom('authorizations')
+        .select(({ fn }) => fn.countAll<number>().as('total'));
+      if (filter?.provider) {
+        query = query.where('provider', '=', filter.provider);
+        count = count.where('provider', '=', filter.provider);
+      }
+      const rows = await query
+        .orderBy('created_at', 'desc')
+        .limit(limit)
+        .offset(offset)
+        .execute();
+      const total = await count.executeTakeFirst();
+      return { items: rows.map(map.toAuthorization), total: Number(total?.total ?? 0) };
+    },
+  };
+
+  readonly dedicatedAccounts: DedicatedAccountRepository = {
+    insert: async (account) => {
+      await this.#db
+        .insertInto('dedicated_accounts')
+        .values(map.fromDedicatedAccount(account))
+        .execute();
+      return account;
+    },
+    byId: async (id) => {
+      const row = await this.#db
+        .selectFrom('dedicated_accounts')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toDedicatedAccount(row) : null;
+    },
+    byProviderAccountId: async (provider, id) => {
+      const row = await this.#db
+        .selectFrom('dedicated_accounts')
+        .selectAll()
+        .where('provider', '=', provider)
+        .where('provider_account_id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toDedicatedAccount(row) : null;
+    },
+    byAccountNumber: async (provider, accountNumber) => {
+      const row = await this.#db
+        .selectFrom('dedicated_accounts')
+        .selectAll()
+        .where('provider', '=', provider)
+        .where('account_number', '=', accountNumber)
+        .executeTakeFirst();
+      return row ? map.toDedicatedAccount(row) : null;
+    },
+    byCustomer: async (customerId) => {
+      const row = await this.#db
+        .selectFrom('dedicated_accounts')
+        .selectAll()
+        .where('customer_id', '=', customerId)
+        .orderBy('created_at', 'desc')
+        .executeTakeFirst();
+      return row ? map.toDedicatedAccount(row) : null;
+    },
+    update: async (id, patch) => {
+      const columns = map.dedicatedAccountPatch(patch);
+      if (Object.keys(columns).length > 0) {
+        await this.#db
+          .updateTable('dedicated_accounts')
+          .set(columns)
+          .where('id', '=', id)
+          .execute();
+      }
+      const row = await this.#db
+        .selectFrom('dedicated_accounts')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toDedicatedAccount(row) : notFound('dedicated account', id);
+    },
+    list: async (filter) => {
+      const { limit, offset } = page(filter);
+      let query = this.#db.selectFrom('dedicated_accounts').selectAll();
+      let count = this.#db
+        .selectFrom('dedicated_accounts')
+        .select(({ fn }) => fn.countAll<number>().as('total'));
+      if (filter?.provider) {
+        query = query.where('provider', '=', filter.provider);
+        count = count.where('provider', '=', filter.provider);
+      }
+      const rows = await query
+        .orderBy('created_at', 'desc')
+        .limit(limit)
+        .offset(offset)
+        .execute();
+      const total = await count.executeTakeFirst();
+      return { items: rows.map(map.toDedicatedAccount), total: Number(total?.total ?? 0) };
+    },
+  };
+
+  readonly plans: PlanRepository = {
+    insert: async (plan) => {
+      await this.#db.insertInto('plans').values(map.fromPlan(plan)).execute();
+      return plan;
+    },
+    byId: async (id) => {
+      const row = await this.#db
+        .selectFrom('plans')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toPlan(row) : null;
+    },
+    byCode: async (provider, code) => {
+      const row = await this.#db
+        .selectFrom('plans')
+        .selectAll()
+        .where('provider', '=', provider)
+        .where('provider_plan_code', '=', code)
+        .executeTakeFirst();
+      return row ? map.toPlan(row) : null;
+    },
+    update: async (id, patch) => {
+      const columns = map.planPatch(patch);
+      if (Object.keys(columns).length > 0) {
+        await this.#db.updateTable('plans').set(columns).where('id', '=', id).execute();
+      }
+      const row = await this.#db
+        .selectFrom('plans')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toPlan(row) : notFound('plan', id);
+    },
+    list: async (filter) => {
+      const { limit, offset } = page(filter);
+      let query = this.#db.selectFrom('plans').selectAll();
+      let count = this.#db.selectFrom('plans').select(({ fn }) => fn.countAll<number>().as('total'));
+      if (filter?.provider) {
+        query = query.where('provider', '=', filter.provider);
+        count = count.where('provider', '=', filter.provider);
+      }
+      const rows = await query
+        .orderBy('created_at', 'desc')
+        .limit(limit)
+        .offset(offset)
+        .execute();
+      const total = await count.executeTakeFirst();
+      return { items: rows.map(map.toPlan), total: Number(total?.total ?? 0) };
+    },
+  };
+
+  readonly subscriptions: SubscriptionRepository = {
+    insert: async (subscription) => {
+      await this.#db
+        .insertInto('subscriptions')
+        .values(map.fromSubscription(subscription))
+        .execute();
+      return subscription;
+    },
+    byId: async (id) => {
+      const row = await this.#db
+        .selectFrom('subscriptions')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toSubscription(row) : null;
+    },
+    byCode: async (provider, code) => {
+      const row = await this.#db
+        .selectFrom('subscriptions')
+        .selectAll()
+        .where('provider', '=', provider)
+        .where('provider_subscription_code', '=', code)
+        .executeTakeFirst();
+      return row ? map.toSubscription(row) : null;
+    },
+    update: async (id, patch) => {
+      const columns = map.subscriptionPatch(patch);
+      if (Object.keys(columns).length > 0) {
+        await this.#db.updateTable('subscriptions').set(columns).where('id', '=', id).execute();
+      }
+      const row = await this.#db
+        .selectFrom('subscriptions')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toSubscription(row) : notFound('subscription', id);
+    },
+    listByCustomer: async (customerId) => {
+      const rows = await this.#db
+        .selectFrom('subscriptions')
+        .selectAll()
+        .where('customer_id', '=', customerId)
+        .orderBy('created_at', 'desc')
+        .execute();
+      return rows.map(map.toSubscription);
+    },
+    list: async (filter) => {
+      const { limit, offset } = page(filter);
+      let query = this.#db.selectFrom('subscriptions').selectAll();
+      let count = this.#db
+        .selectFrom('subscriptions')
+        .select(({ fn }) => fn.countAll<number>().as('total'));
+      if (filter?.provider) {
+        query = query.where('provider', '=', filter.provider);
+        count = count.where('provider', '=', filter.provider);
+      }
+      if (filter?.status) {
+        query = query.where('status', '=', filter.status);
+        count = count.where('status', '=', filter.status);
+      }
+      const rows = await query
+        .orderBy('created_at', 'desc')
+        .limit(limit)
+        .offset(offset)
+        .execute();
+      const total = await count.executeTakeFirst();
+      return { items: rows.map(map.toSubscription), total: Number(total?.total ?? 0) };
+    },
+  };
+
+  readonly invoices: InvoiceRepository = {
+    insert: async (invoice) => {
+      await this.#db.insertInto('invoices').values(map.fromInvoice(invoice)).execute();
+      return invoice;
+    },
+    byId: async (id) => {
+      const row = await this.#db
+        .selectFrom('invoices')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toInvoice(row) : null;
+    },
+    byCode: async (provider, code) => {
+      const row = await this.#db
+        .selectFrom('invoices')
+        .selectAll()
+        .where('provider', '=', provider)
+        .where('provider_invoice_code', '=', code)
+        .executeTakeFirst();
+      return row ? map.toInvoice(row) : null;
+    },
+    update: async (id, patch) => {
+      const columns = map.invoicePatch(patch);
+      if (Object.keys(columns).length > 0) {
+        await this.#db.updateTable('invoices').set(columns).where('id', '=', id).execute();
+      }
+      const row = await this.#db
+        .selectFrom('invoices')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toInvoice(row) : notFound('invoice', id);
+    },
+    listBySubscription: async (subscriptionId) => {
+      const rows = await this.#db
+        .selectFrom('invoices')
+        .selectAll()
+        .where('subscription_id', '=', subscriptionId)
+        .orderBy('period_start', 'asc')
+        .orderBy('id', 'asc')
+        .execute();
+      return rows.map(map.toInvoice);
+    },
+    list: async (filter) => {
+      const { limit, offset } = page(filter);
+      let query = this.#db.selectFrom('invoices').selectAll();
+      let count = this.#db
+        .selectFrom('invoices')
+        .select(({ fn }) => fn.countAll<number>().as('total'));
+      if (filter?.provider) {
+        query = query.where('provider', '=', filter.provider);
+        count = count.where('provider', '=', filter.provider);
+      }
+      if (filter?.status) {
+        query = query.where('status', '=', filter.status);
+        count = count.where('status', '=', filter.status);
+      }
+      const rows = await query
+        .orderBy('created_at', 'desc')
+        .limit(limit)
+        .offset(offset)
+        .execute();
+      const total = await count.executeTakeFirst();
+      return { items: rows.map(map.toInvoice), total: Number(total?.total ?? 0) };
+    },
+  };
+
+  readonly subaccounts: SubaccountRepository = {
+    insert: async (subaccount) => {
+      await this.#db.insertInto('subaccounts').values(map.fromSubaccount(subaccount)).execute();
+      return subaccount;
+    },
+    byId: async (id) => {
+      const row = await this.#db
+        .selectFrom('subaccounts')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toSubaccount(row) : null;
+    },
+    byCode: async (provider, code) => {
+      const row = await this.#db
+        .selectFrom('subaccounts')
+        .selectAll()
+        .where('provider', '=', provider)
+        .where('provider_subaccount_code', '=', code)
+        .executeTakeFirst();
+      return row ? map.toSubaccount(row) : null;
+    },
+    update: async (id, patch) => {
+      const columns = map.subaccountPatch(patch);
+      if (Object.keys(columns).length > 0) {
+        await this.#db.updateTable('subaccounts').set(columns).where('id', '=', id).execute();
+      }
+      const row = await this.#db
+        .selectFrom('subaccounts')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toSubaccount(row) : notFound('subaccount', id);
+    },
+    list: async (filter) => {
+      const { limit, offset } = page(filter);
+      let query = this.#db.selectFrom('subaccounts').selectAll();
+      let count = this.#db
+        .selectFrom('subaccounts')
+        .select(({ fn }) => fn.countAll<number>().as('total'));
+      if (filter?.provider) {
+        query = query.where('provider', '=', filter.provider);
+        count = count.where('provider', '=', filter.provider);
+      }
+      const rows = await query
+        .orderBy('created_at', 'desc')
+        .limit(limit)
+        .offset(offset)
+        .execute();
+      const total = await count.executeTakeFirst();
+      return { items: rows.map(map.toSubaccount), total: Number(total?.total ?? 0) };
+    },
+  };
+
+  readonly splits: SplitRepository = {
+    insert: async (split) => {
+      return this.transaction(async (tx) => {
+        const inner = (tx as SqliteStorage).#db;
+        await inner.insertInto('splits').values(map.fromSplit(split)).execute();
+        for (const entry of split.entries) {
+          await inner
+            .insertInto('split_subaccounts')
+            .values({
+              split_id: split.id,
+              subaccount_id: entry.subaccountId,
+              share: entry.share,
+            })
+            .execute();
+        }
+        return split;
+      });
+    },
+    byId: async (id) => this.#loadSplit('id', id),
+    byCode: async (provider, code) => {
+      const row = await this.#db
+        .selectFrom('splits')
+        .selectAll()
+        .where('provider', '=', provider)
+        .where('provider_split_code', '=', code)
+        .executeTakeFirst();
+      return row ? map.toSplit(row, await this.#splitEntries(row.id)) : null;
+    },
+    byCodes: async (provider, codes) => {
+      if (codes.length === 0) return new Map();
+      const rows = await this.#db
+        .selectFrom('splits')
+        .selectAll()
+        .where('provider', '=', provider)
+        .where('provider_split_code', 'in', [...new Set(codes)])
+        .execute();
+      const out = new Map<string, Split>();
+      for (const row of rows) {
+        out.set(row.provider_split_code, map.toSplit(row, await this.#splitEntries(row.id)));
+      }
+      return out;
+    },
+    update: async (id, patch) => {
+      const columns: Record<string, unknown> = {};
+      if (patch.name !== undefined) columns.name = patch.name;
+      if (patch.bearerType !== undefined) columns.bearer_type = patch.bearerType;
+      if (patch.bearerSubaccountId !== undefined) {
+        columns.bearer_subaccount_id = patch.bearerSubaccountId;
+      }
+      if (patch.active !== undefined) columns.active = patch.active ? 1 : 0;
+      if (patch.updatedAt !== undefined) columns.updated_at = patch.updatedAt;
+      if (Object.keys(columns).length > 0) {
+        await this.#db
+          .updateTable('splits')
+          .set(columns as never)
+          .where('id', '=', id)
+          .execute();
+      }
+      return (await this.#loadSplit('id', id)) ?? notFound('split', id);
+    },
+    addSubaccount: async (splitId, subaccountId, share) => {
+      await sql`
+        INSERT INTO split_subaccounts (split_id, subaccount_id, share)
+        VALUES (${splitId}, ${subaccountId}, ${share})
+        ON CONFLICT (split_id, subaccount_id) DO UPDATE SET share = ${share}
+      `.execute(this.#db);
+      return (await this.#loadSplit('id', splitId)) ?? notFound('split', splitId);
+    },
+    removeSubaccount: async (splitId, subaccountId) => {
+      await this.#db
+        .deleteFrom('split_subaccounts')
+        .where('split_id', '=', splitId)
+        .where('subaccount_id', '=', subaccountId)
+        .execute();
+      return (await this.#loadSplit('id', splitId)) ?? notFound('split', splitId);
+    },
+    list: async (filter) => {
+      const { limit, offset } = page(filter);
+      let query = this.#db.selectFrom('splits').selectAll();
+      let count = this.#db
+        .selectFrom('splits')
+        .select(({ fn }) => fn.countAll<number>().as('total'));
+      if (filter?.provider) {
+        query = query.where('provider', '=', filter.provider);
+        count = count.where('provider', '=', filter.provider);
+      }
+      const rows = await query
+        .orderBy('created_at', 'desc')
+        .limit(limit)
+        .offset(offset)
+        .execute();
+      const items = await Promise.all(
+        rows.map(async (row) => map.toSplit(row, await this.#splitEntries(row.id))),
+      );
+      const total = await count.executeTakeFirst();
+      return { items, total: Number(total?.total ?? 0) };
+    },
+  };
+
+  readonly ledger: LedgerRepository = {
+    append: async (entry) => {
+      await this.#db.insertInto('balance_ledger').values(map.fromLedgerEntry(entry)).execute();
+      return entry;
+    },
+    net: async (provider, currency) => {
+      const row = await sql<{ net: number }>`
+        SELECT COALESCE(SUM(CASE WHEN direction = 'credit' THEN amount ELSE -amount END), 0)
+               AS net
+          FROM balance_ledger
+         WHERE provider = ${provider} AND currency = ${currency}
+      `.execute(this.#db);
+      return Number(row.rows[0]?.net ?? 0);
+    },
+    list: async (filter) => {
+      const { limit, offset } = page(filter);
+      let query = this.#db.selectFrom('balance_ledger').selectAll();
+      let count = this.#db
+        .selectFrom('balance_ledger')
+        .select(({ fn }) => fn.countAll<number>().as('total'));
+      if (filter?.provider) {
+        query = query.where('provider', '=', filter.provider);
+        count = count.where('provider', '=', filter.provider);
+      }
+      if (filter?.currency) {
+        query = query.where('currency', '=', filter.currency);
+        count = count.where('currency', '=', filter.currency);
+      }
+      const rows = await query
+        .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
+        .limit(limit)
+        .offset(offset)
+        .execute();
+      const total = await count.executeTakeFirst();
+      return { items: rows.map(map.toLedgerEntry), total: Number(total?.total ?? 0) };
+    },
+    currencies: async (provider) => {
+      const rows = await this.#db
+        .selectFrom('balance_ledger')
+        .select('currency')
+        .distinct()
+        .where('provider', '=', provider)
+        .execute();
+      return rows.map((r) => r.currency);
+    },
+  };
+
+  async #splitEntries(splitId: string) {
+    const rows = await this.#db
+      .selectFrom('split_subaccounts')
+      .innerJoin('subaccounts', 'subaccounts.id', 'split_subaccounts.subaccount_id')
+      .select([
+        'split_subaccounts.subaccount_id as subaccountId',
+        'subaccounts.provider_subaccount_code as subaccountCode',
+        'split_subaccounts.share as share',
+      ])
+      .where('split_subaccounts.split_id', '=', splitId)
+      .execute();
+    return rows.map((r) => ({
+      subaccountId: r.subaccountId,
+      subaccountCode: r.subaccountCode,
+      share: r.share,
+    }));
+  }
+
+  async #loadSplit(column: 'id', value: string) {
+    const row = await this.#db
+      .selectFrom('splits')
+      .selectAll()
+      .where(column, '=', value)
+      .executeTakeFirst();
+    return row ? map.toSplit(row, await this.#splitEntries(row.id)) : null;
+  }
+
+  readonly disputes: DisputeRepository = {
+    insert: async (dispute) => {
+      await this.#db.insertInto('disputes').values(map.fromDispute(dispute)).execute();
+      return dispute;
+    },
+    byId: async (id) => {
+      const row = await this.#db
+        .selectFrom('disputes')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toDispute(row) : null;
+    },
+    byProviderDisputeId: async (provider, id) => {
+      const row = await this.#db
+        .selectFrom('disputes')
+        .selectAll()
+        .where('provider', '=', provider)
+        .where('provider_dispute_id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toDispute(row) : null;
+    },
+    listByPayment: async (paymentId) => {
+      const rows = await this.#db
+        .selectFrom('disputes')
+        .selectAll()
+        .where('payment_id', '=', paymentId)
+        .orderBy('created_at', 'asc')
+        .execute();
+      return rows.map(map.toDispute);
+    },
+    update: async (id, patch) => {
+      const columns = map.disputePatch(patch);
+      if (Object.keys(columns).length > 0) {
+        await this.#db.updateTable('disputes').set(columns).where('id', '=', id).execute();
+      }
+      const row = await this.#db
+        .selectFrom('disputes')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toDispute(row) : notFound('dispute', id);
+    },
+    list: async (filter) => {
+      const { limit, offset } = page(filter);
+      let query = this.#db.selectFrom('disputes').selectAll();
+      let count = this.#db
+        .selectFrom('disputes')
+        .select(({ fn }) => fn.countAll<number>().as('total'));
+      if (filter?.provider) {
+        query = query.where('provider', '=', filter.provider);
+        count = count.where('provider', '=', filter.provider);
+      }
+      if (filter?.status) {
+        query = query.where('status', '=', filter.status);
+        count = count.where('status', '=', filter.status);
+      }
+      const rows = await query
+        .orderBy('created_at', 'desc')
+        .limit(limit)
+        .offset(offset)
+        .execute();
+      const total = await count.executeTakeFirst();
+      return { items: rows.map(map.toDispute), total: Number(total?.total ?? 0) };
     },
   };
 
@@ -451,6 +1201,23 @@ class SqliteStorage implements Storage {
         .execute();
       const total = await count.executeTakeFirst();
       return { items: rows.map(map.toEvent), total: Number(total?.total ?? 0) };
+    },
+    listByResources: async (resourceIds) => {
+      const grouped = new Map<string, PayboxEvent[]>();
+      if (resourceIds.length === 0) return grouped;
+      const rows = await this.#db
+        .selectFrom('events')
+        .selectAll()
+        .where('resource_id', 'in', [...new Set(resourceIds)])
+        .orderBy('resource_id', 'asc')
+        .orderBy('sequence', 'asc')
+        .execute();
+      for (const row of rows) {
+        const list = grouped.get(row.resource_id) ?? [];
+        list.push(map.toEvent(row));
+        grouped.set(row.resource_id, list);
+      }
+      return grouped;
     },
     nextSequence: async (resourceId) => {
       // Upsert-and-return in one statement so concurrent appends to the same

@@ -36,6 +36,30 @@ See [docs/architecture.md](docs/architecture.md#adding-a-provider). Nothing in
 `packages/core` should need to change; if it does, that is the design telling
 you something.
 
+## Verifying against a large database
+
+The repository caps a single page at 500 rows, so reporting endpoints and
+lookups by a derived id behave differently either side of that boundary. Bugs
+there are invisible to a suite that works with a handful of rows, and there is
+no way to stage volume over the HTTP API.
+
+`scripts/seed-volume.ts` writes settled payments straight through the engine
+into a file-backed database. Serve that file and the HTTP surface is then
+exercised over a realistic dataset:
+
+```bash
+npm run seed:volume -- ./data/volume.db 520 1000
+PAYBOX_DATABASE=./data/volume.db npm start
+
+curl -H "Authorization: Bearer sk_test_local_x" \
+  localhost:8080/paystack/transaction/totals     # total_volume must be 520000
+curl -H "Authorization: Bearer sk_test_local_x" \
+  localhost:8080/paystack/transaction/export     # must return all 520 rows
+```
+
+Seeding 520 payments takes about a second. Use it whenever you touch an
+endpoint that aggregates, exports, or resolves an id by scanning.
+
 ## Tests
 
 Three levels, all offline:

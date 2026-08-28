@@ -1,13 +1,28 @@
 import type {
+  Authorization,
   Customer,
+  DedicatedAccount,
+  Dispute,
+  DisputeResolution,
+  DisputeStatus,
+  Invoice,
+  InvoiceStatus,
+  LedgerEntry,
   Metadata,
   Payment,
   PaymentMethod,
   PaymentStatus,
   PayboxEvent,
+  Plan,
+  PlanInterval,
   ProviderId,
   Refund,
   RefundStatus,
+  Split,
+  SplitEntry,
+  Subaccount,
+  Subscription,
+  SubscriptionStatus,
   Transfer,
   TransferStatus,
 } from '@paybox/shared';
@@ -20,6 +35,15 @@ import type {
   WebhookEndpoint,
 } from '@paybox/core';
 import type {
+  AuthorizationRow,
+  DedicatedAccountRow,
+  DisputeRow,
+  InvoiceRow,
+  LedgerEntryRow,
+  PlanRow,
+  SplitRow,
+  SubaccountRow,
+  SubscriptionRow,
   TransferRecipientRow,
   CustomerRow,
   EventRow,
@@ -127,6 +151,7 @@ export const toRefund = (row: RefundRow): Refund => ({
   status: row.status as RefundStatus,
   providerStatus: row.provider_status,
   reason: row.reason,
+  accountDetails: row.account_details ? readJson(row.account_details) : null,
   metadata: readJson(row.metadata),
   createdAt: row.created_at,
   updatedAt: row.updated_at,
@@ -142,6 +167,7 @@ export const fromRefund = (refund: Refund): RefundRow => ({
   status: refund.status,
   provider_status: refund.providerStatus,
   reason: refund.reason,
+  account_details: refund.accountDetails ? writeJson(refund.accountDetails) : null,
   metadata: writeJson(refund.metadata),
   created_at: refund.createdAt,
   updated_at: refund.updatedAt,
@@ -152,6 +178,9 @@ export function refundPatch(patch: Partial<Refund>): Partial<RefundRow> {
   if (patch.status !== undefined) out.status = patch.status;
   if (patch.providerStatus !== undefined) out.provider_status = patch.providerStatus;
   if (patch.reason !== undefined) out.reason = patch.reason;
+  if (patch.accountDetails !== undefined) {
+    out.account_details = patch.accountDetails ? writeJson(patch.accountDetails) : null;
+  }
   if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
   if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
   return out;
@@ -237,6 +266,438 @@ export function customerPatch(patch: Partial<Customer>): Partial<CustomerRow> {
   if (patch.firstName !== undefined) out.first_name = patch.firstName;
   if (patch.lastName !== undefined) out.last_name = patch.lastName;
   if (patch.phone !== undefined) out.phone = patch.phone;
+  if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
+  if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
+  return out;
+}
+
+export const toAuthorization = (row: AuthorizationRow): Authorization => ({
+  id: row.id,
+  provider: row.provider as ProviderId,
+  providerAuthorizationCode: row.provider_authorization_code,
+  customerId: row.customer_id,
+  paymentId: row.payment_id,
+  channel: row.channel as PaymentMethod,
+  bin: row.bin,
+  last4: row.last4,
+  expMonth: row.exp_month,
+  expYear: row.exp_year,
+  cardType: row.card_type,
+  bank: row.bank,
+  brand: row.brand,
+  countryCode: row.country_code,
+  signature: row.signature,
+  reusable: row.reusable === 1,
+  active: row.active === 1,
+  accountName: row.account_name,
+  mobileMoneyNumber: row.mobile_money_number,
+  metadata: readJson(row.metadata),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+export const fromAuthorization = (auth: Authorization): AuthorizationRow => ({
+  id: auth.id,
+  provider: auth.provider,
+  provider_authorization_code: auth.providerAuthorizationCode,
+  customer_id: auth.customerId,
+  payment_id: auth.paymentId,
+  channel: auth.channel,
+  bin: auth.bin,
+  last4: auth.last4,
+  exp_month: auth.expMonth,
+  exp_year: auth.expYear,
+  card_type: auth.cardType,
+  bank: auth.bank,
+  brand: auth.brand,
+  country_code: auth.countryCode,
+  signature: auth.signature,
+  reusable: auth.reusable ? 1 : 0,
+  active: auth.active ? 1 : 0,
+  account_name: auth.accountName,
+  mobile_money_number: auth.mobileMoneyNumber,
+  metadata: writeJson(auth.metadata),
+  created_at: auth.createdAt,
+  updated_at: auth.updatedAt,
+});
+
+export function authorizationPatch(patch: Partial<Authorization>): Partial<AuthorizationRow> {
+  const out: Partial<AuthorizationRow> = {};
+  if (patch.customerId !== undefined) out.customer_id = patch.customerId;
+  if (patch.reusable !== undefined) out.reusable = patch.reusable ? 1 : 0;
+  if (patch.active !== undefined) out.active = patch.active ? 1 : 0;
+  if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
+  if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
+  return out;
+}
+
+export const toDedicatedAccount = (row: DedicatedAccountRow): DedicatedAccount => ({
+  id: row.id,
+  provider: row.provider as ProviderId,
+  providerAccountId: row.provider_account_id,
+  customerId: row.customer_id,
+  accountNumber: row.account_number,
+  accountName: row.account_name,
+  bankName: row.bank_name,
+  bankSlug: row.bank_slug,
+  currency: row.currency,
+  active: row.active === 1,
+  assigned: row.assigned === 1,
+  metadata: readJson(row.metadata),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+export const fromDedicatedAccount = (a: DedicatedAccount): DedicatedAccountRow => ({
+  id: a.id,
+  provider: a.provider,
+  provider_account_id: a.providerAccountId,
+  customer_id: a.customerId,
+  account_number: a.accountNumber,
+  account_name: a.accountName,
+  bank_name: a.bankName,
+  bank_slug: a.bankSlug,
+  currency: a.currency,
+  active: a.active ? 1 : 0,
+  assigned: a.assigned ? 1 : 0,
+  metadata: writeJson(a.metadata),
+  created_at: a.createdAt,
+  updated_at: a.updatedAt,
+});
+
+export function dedicatedAccountPatch(
+  patch: Partial<DedicatedAccount>,
+): Partial<DedicatedAccountRow> {
+  const out: Partial<DedicatedAccountRow> = {};
+  if (patch.active !== undefined) out.active = patch.active ? 1 : 0;
+  if (patch.assigned !== undefined) out.assigned = patch.assigned ? 1 : 0;
+  if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
+  if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
+  return out;
+}
+
+export const toPlan = (row: PlanRow): Plan => ({
+  id: row.id,
+  provider: row.provider as ProviderId,
+  providerPlanCode: row.provider_plan_code,
+  name: row.name,
+  amount: row.amount,
+  currency: row.currency,
+  interval: row.interval as PlanInterval,
+  description: row.description,
+  invoiceLimit: row.invoice_limit,
+  sendInvoices: row.send_invoices === 1,
+  sendSms: row.send_sms === 1,
+  active: row.active === 1,
+  metadata: readJson(row.metadata),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+export const fromPlan = (plan: Plan): PlanRow => ({
+  id: plan.id,
+  provider: plan.provider,
+  provider_plan_code: plan.providerPlanCode,
+  name: plan.name,
+  amount: plan.amount,
+  currency: plan.currency,
+  interval: plan.interval,
+  description: plan.description,
+  invoice_limit: plan.invoiceLimit,
+  send_invoices: plan.sendInvoices ? 1 : 0,
+  send_sms: plan.sendSms ? 1 : 0,
+  active: plan.active ? 1 : 0,
+  metadata: writeJson(plan.metadata),
+  created_at: plan.createdAt,
+  updated_at: plan.updatedAt,
+});
+
+export function planPatch(patch: Partial<Plan>): Partial<PlanRow> {
+  const out: Partial<PlanRow> = {};
+  if (patch.name !== undefined) out.name = patch.name;
+  if (patch.amount !== undefined) out.amount = patch.amount;
+  if (patch.description !== undefined) out.description = patch.description;
+  if (patch.invoiceLimit !== undefined) out.invoice_limit = patch.invoiceLimit;
+  if (patch.sendInvoices !== undefined) out.send_invoices = patch.sendInvoices ? 1 : 0;
+  if (patch.sendSms !== undefined) out.send_sms = patch.sendSms ? 1 : 0;
+  if (patch.active !== undefined) out.active = patch.active ? 1 : 0;
+  if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
+  if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
+  return out;
+}
+
+export const toSubscription = (row: SubscriptionRow): Subscription => ({
+  id: row.id,
+  provider: row.provider as ProviderId,
+  providerSubscriptionCode: row.provider_subscription_code,
+  customerId: row.customer_id,
+  planId: row.plan_id,
+  authorizationId: row.authorization_id,
+  status: row.status as SubscriptionStatus,
+  providerStatus: row.provider_status,
+  quantity: row.quantity,
+  amount: row.amount,
+  currency: row.currency,
+  startDate: row.start_date,
+  nextPaymentDate: row.next_payment_date,
+  invoiceLimit: row.invoice_limit,
+  invoiceCount: row.invoice_count,
+  emailToken: row.email_token,
+  cancelledAt: row.cancelled_at,
+  metadata: readJson(row.metadata),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+export const fromSubscription = (sub: Subscription): SubscriptionRow => ({
+  id: sub.id,
+  provider: sub.provider,
+  provider_subscription_code: sub.providerSubscriptionCode,
+  customer_id: sub.customerId,
+  plan_id: sub.planId,
+  authorization_id: sub.authorizationId,
+  status: sub.status,
+  provider_status: sub.providerStatus,
+  quantity: sub.quantity,
+  amount: sub.amount,
+  currency: sub.currency,
+  start_date: sub.startDate,
+  next_payment_date: sub.nextPaymentDate,
+  invoice_limit: sub.invoiceLimit,
+  invoice_count: sub.invoiceCount,
+  email_token: sub.emailToken,
+  cancelled_at: sub.cancelledAt,
+  metadata: writeJson(sub.metadata),
+  created_at: sub.createdAt,
+  updated_at: sub.updatedAt,
+});
+
+export function subscriptionPatch(patch: Partial<Subscription>): Partial<SubscriptionRow> {
+  const out: Partial<SubscriptionRow> = {};
+  if (patch.status !== undefined) out.status = patch.status;
+  if (patch.providerStatus !== undefined) out.provider_status = patch.providerStatus;
+  if (patch.nextPaymentDate !== undefined) out.next_payment_date = patch.nextPaymentDate;
+  if (patch.invoiceCount !== undefined) out.invoice_count = patch.invoiceCount;
+  if (patch.cancelledAt !== undefined) out.cancelled_at = patch.cancelledAt;
+  if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
+  if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
+  return out;
+}
+
+export const toInvoice = (row: InvoiceRow): Invoice => ({
+  id: row.id,
+  provider: row.provider as ProviderId,
+  providerInvoiceCode: row.provider_invoice_code,
+  subscriptionId: row.subscription_id,
+  customerId: row.customer_id,
+  paymentId: row.payment_id,
+  amount: row.amount,
+  currency: row.currency,
+  status: row.status as InvoiceStatus,
+  providerStatus: row.provider_status,
+  periodStart: row.period_start,
+  periodEnd: row.period_end,
+  dueAt: row.due_at,
+  paidAt: row.paid_at,
+  metadata: readJson(row.metadata),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+export const fromInvoice = (invoice: Invoice): InvoiceRow => ({
+  id: invoice.id,
+  provider: invoice.provider,
+  provider_invoice_code: invoice.providerInvoiceCode,
+  subscription_id: invoice.subscriptionId,
+  customer_id: invoice.customerId,
+  payment_id: invoice.paymentId,
+  amount: invoice.amount,
+  currency: invoice.currency,
+  status: invoice.status,
+  provider_status: invoice.providerStatus,
+  period_start: invoice.periodStart,
+  period_end: invoice.periodEnd,
+  due_at: invoice.dueAt,
+  paid_at: invoice.paidAt,
+  metadata: writeJson(invoice.metadata),
+  created_at: invoice.createdAt,
+  updated_at: invoice.updatedAt,
+});
+
+export function invoicePatch(patch: Partial<Invoice>): Partial<InvoiceRow> {
+  const out: Partial<InvoiceRow> = {};
+  if (patch.status !== undefined) out.status = patch.status;
+  if (patch.providerStatus !== undefined) out.provider_status = patch.providerStatus;
+  if (patch.paymentId !== undefined) out.payment_id = patch.paymentId;
+  if (patch.paidAt !== undefined) out.paid_at = patch.paidAt;
+  if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
+  if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
+  return out;
+}
+
+export const toSubaccount = (row: SubaccountRow): Subaccount => ({
+  id: row.id,
+  provider: row.provider as ProviderId,
+  providerSubaccountCode: row.provider_subaccount_code,
+  businessName: row.business_name,
+  settlementBank: row.settlement_bank,
+  accountNumber: row.account_number,
+  percentageCharge: row.percentage_charge,
+  description: row.description,
+  primaryContactEmail: row.primary_contact_email,
+  primaryContactName: row.primary_contact_name,
+  primaryContactPhone: row.primary_contact_phone,
+  currency: row.currency,
+  active: row.active === 1,
+  metadata: readJson(row.metadata),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+export const fromSubaccount = (a: Subaccount): SubaccountRow => ({
+  id: a.id,
+  provider: a.provider,
+  provider_subaccount_code: a.providerSubaccountCode,
+  business_name: a.businessName,
+  settlement_bank: a.settlementBank,
+  account_number: a.accountNumber,
+  percentage_charge: a.percentageCharge,
+  description: a.description,
+  primary_contact_email: a.primaryContactEmail,
+  primary_contact_name: a.primaryContactName,
+  primary_contact_phone: a.primaryContactPhone,
+  currency: a.currency,
+  active: a.active ? 1 : 0,
+  metadata: writeJson(a.metadata),
+  created_at: a.createdAt,
+  updated_at: a.updatedAt,
+});
+
+export function subaccountPatch(patch: Partial<Subaccount>): Partial<SubaccountRow> {
+  const out: Partial<SubaccountRow> = {};
+  if (patch.businessName !== undefined) out.business_name = patch.businessName;
+  if (patch.settlementBank !== undefined) out.settlement_bank = patch.settlementBank;
+  if (patch.accountNumber !== undefined) out.account_number = patch.accountNumber;
+  if (patch.percentageCharge !== undefined) out.percentage_charge = patch.percentageCharge;
+  if (patch.description !== undefined) out.description = patch.description;
+  if (patch.primaryContactEmail !== undefined) {
+    out.primary_contact_email = patch.primaryContactEmail;
+  }
+  if (patch.primaryContactName !== undefined) out.primary_contact_name = patch.primaryContactName;
+  if (patch.primaryContactPhone !== undefined) {
+    out.primary_contact_phone = patch.primaryContactPhone;
+  }
+  if (patch.active !== undefined) out.active = patch.active ? 1 : 0;
+  if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
+  if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
+  return out;
+}
+
+/** Splits are assembled from two tables; `entries` comes from the join. */
+export const toSplit = (row: SplitRow, entries: SplitEntry[]): Split => ({
+  id: row.id,
+  provider: row.provider as ProviderId,
+  providerSplitCode: row.provider_split_code,
+  name: row.name,
+  type: row.type as Split['type'],
+  currency: row.currency,
+  bearerType: row.bearer_type as Split['bearerType'],
+  bearerSubaccountId: row.bearer_subaccount_id,
+  active: row.active === 1,
+  entries,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+export const fromSplit = (split: Split): SplitRow => ({
+  id: split.id,
+  provider: split.provider,
+  provider_split_code: split.providerSplitCode,
+  name: split.name,
+  type: split.type,
+  currency: split.currency,
+  bearer_type: split.bearerType,
+  bearer_subaccount_id: split.bearerSubaccountId,
+  active: split.active ? 1 : 0,
+  created_at: split.createdAt,
+  updated_at: split.updatedAt,
+});
+
+export const toLedgerEntry = (row: LedgerEntryRow): LedgerEntry => ({
+  id: row.id,
+  provider: row.provider as ProviderId,
+  currency: row.currency,
+  direction: row.direction as LedgerEntry['direction'],
+  amount: row.amount,
+  reason: row.reason,
+  resourceId: row.resource_id,
+  createdAt: row.created_at,
+});
+
+export const fromLedgerEntry = (entry: LedgerEntry): LedgerEntryRow => ({
+  id: entry.id,
+  provider: entry.provider,
+  currency: entry.currency,
+  direction: entry.direction,
+  amount: entry.amount,
+  reason: entry.reason,
+  resource_id: entry.resourceId,
+  created_at: entry.createdAt,
+});
+
+export const toDispute = (row: DisputeRow): Dispute => ({
+  id: row.id,
+  provider: row.provider as ProviderId,
+  providerDisputeId: row.provider_dispute_id,
+  paymentId: row.payment_id,
+  customerId: row.customer_id,
+  category: row.category,
+  status: row.status as DisputeStatus,
+  providerStatus: row.provider_status,
+  resolution: row.resolution as DisputeResolution | null,
+  refundAmount: row.refund_amount,
+  currency: row.currency,
+  dueAt: row.due_at,
+  resolvedAt: row.resolved_at,
+  evidence: row.evidence ? readJson(row.evidence) : null,
+  message: row.message,
+  metadata: readJson(row.metadata),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+export const fromDispute = (dispute: Dispute): DisputeRow => ({
+  id: dispute.id,
+  provider: dispute.provider,
+  provider_dispute_id: dispute.providerDisputeId,
+  payment_id: dispute.paymentId,
+  customer_id: dispute.customerId,
+  category: dispute.category,
+  status: dispute.status,
+  provider_status: dispute.providerStatus,
+  resolution: dispute.resolution,
+  refund_amount: dispute.refundAmount,
+  currency: dispute.currency,
+  due_at: dispute.dueAt,
+  resolved_at: dispute.resolvedAt,
+  evidence: dispute.evidence ? writeJson(dispute.evidence) : null,
+  message: dispute.message,
+  metadata: writeJson(dispute.metadata),
+  created_at: dispute.createdAt,
+  updated_at: dispute.updatedAt,
+});
+
+export function disputePatch(patch: Partial<Dispute>): Partial<DisputeRow> {
+  const out: Partial<DisputeRow> = {};
+  if (patch.status !== undefined) out.status = patch.status;
+  if (patch.providerStatus !== undefined) out.provider_status = patch.providerStatus;
+  if (patch.resolution !== undefined) out.resolution = patch.resolution;
+  if (patch.refundAmount !== undefined) out.refund_amount = patch.refundAmount;
+  if (patch.resolvedAt !== undefined) out.resolved_at = patch.resolvedAt;
+  if (patch.evidence !== undefined) {
+    out.evidence = patch.evidence ? writeJson(patch.evidence) : null;
+  }
+  if (patch.message !== undefined) out.message = patch.message;
   if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
   if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
   return out;

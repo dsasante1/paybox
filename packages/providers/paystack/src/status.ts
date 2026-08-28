@@ -1,4 +1,10 @@
-import type { PaymentStatus } from '@paybox/shared';
+import {
+  DISPUTE_STATUSES,
+  PayboxError,
+  type DisputeStatus,
+  type PaymentStatus,
+  type SubscriptionStatus,
+} from '@paybox/shared';
 
 /**
  * Paystack's transaction status vocabulary.
@@ -81,4 +87,95 @@ export function gatewayResponse(status: PaymentStatus, failureCode: string | nul
     default:
       return 'Transaction failed';
   }
+}
+
+
+/**
+ * Subscription status: canonical -> Paystack.
+ *
+ * Only one differs in spelling. Paystack writes `non-renewing` with a hyphen;
+ * the canonical vocabulary is snake_case throughout, so the adapter maps it
+ * here rather than letting a provider's punctuation into the engine.
+ *
+ * Schema `SubscriptionCreateResponse.data.status` in the pinned OpenAPI spec.
+ */
+const SUBSCRIPTION_TO_PAYSTACK: Record<SubscriptionStatus, string> = {
+  active: 'active',
+  non_renewing: 'non-renewing',
+  attention: 'attention',
+  completed: 'complete',
+  cancelled: 'cancelled',
+};
+
+export function toPaystackSubscriptionStatus(status: SubscriptionStatus): string {
+  return SUBSCRIPTION_TO_PAYSTACK[status];
+}
+
+
+/**
+ * ISO 8583 response codes and their string classification.
+ *
+ * Paystack returns two extra fields on a transaction: `response_code`, the raw
+ * 2-digit processor code (cards only), and `gateway_response_code`, a
+ * string classification of it. Transcribed from
+ * <https://paystack.com/docs/payments/gateway-responses/>, read 2026-08-28.
+ *
+ * Only the codes the emulator can actually produce are mapped. Paystack's full
+ * table is ~60 entries; inventing a code for a failure paybox cannot simulate
+ * would be worse than leaving it out. Anything unmapped resolves to `unknown`,
+ * which is what Paystack documents for unlisted codes.
+ */
+interface GatewayCodes {
+  responseCode: string;
+  gatewayResponseCode: string;
+}
+
+const FAILURE_CODES: Record<string, GatewayCodes> = {
+  card_declined: { responseCode: '05', gatewayResponseCode: 'do_not_honor' },
+  insufficient_funds: { responseCode: '51', gatewayResponseCode: 'insufficient_funds' },
+  expired_card: { responseCode: '54', gatewayResponseCode: 'expired_card' },
+  provider_error: { responseCode: '06', gatewayResponseCode: 'processing_error' },
+  authentication_required: { responseCode: '55', gatewayResponseCode: 'invalid_pin' },
+  authorization_rejected: { responseCode: '17', gatewayResponseCode: 'customer_cancellation' },
+  transaction_timeout: { responseCode: '91', gatewayResponseCode: 'issuer_or_switch_inoperative' },
+  network_error: { responseCode: '96', gatewayResponseCode: 'system_malfunction' },
+};
+
+export function gatewayCodes(
+  status: PaymentStatus,
+  failureCode: string | null,
+): GatewayCodes {
+  // `approved` is the only success value Paystack documents.
+  if (status === 'successful' || status === 'partially_refunded' || status === 'refunded') {
+    return { responseCode: '00', gatewayResponseCode: 'approved' };
+  }
+  if (status === 'pending' || status === 'processing' || status === 'requires_action') {
+    return { responseCode: '09', gatewayResponseCode: 'processing' };
+  }
+  return (
+    (failureCode ? FAILURE_CODES[failureCode] : undefined) ?? {
+      responseCode: '06',
+      gatewayResponseCode: 'unknown',
+    }
+  );
+}
+
+
+/**
+ * Paystack's hyphenated dispute status -> canonical.
+ *
+ * Rejects anything outside the documented enum. Casting an unknown value
+ * through to the repository instead produces a query that matches nothing and
+ * an empty 200, which reads as "no disputes" rather than "bad filter".
+ */
+export function fromPaystackDisputeStatus(status: string): DisputeStatus {
+  const canonical = status.replace(/-/g, '_') as DisputeStatus;
+  if ((DISPUTE_STATUSES as readonly string[]).includes(canonical)) return canonical;
+  throw new PayboxError(
+    'validation_failed',
+    `Unknown dispute status "${status}". Expected one of: ${DISPUTE_STATUSES.map((s) =>
+      s.replace(/_/g, '-'),
+    ).join(', ')}.`,
+    { details: { status } },
+  );
 }

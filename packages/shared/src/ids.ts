@@ -14,6 +14,15 @@ export const ID_PREFIXES = [
   'ref', // refund
   'trf', // transfer
   'cus', // customer
+  'aut', // stored authorization
+  'dva', // dedicated virtual account
+  'pln', // plan
+  'sub', // subscription
+  'inv', // invoice
+  'sac', // subaccount
+  'spl', // transaction split
+  'led', // balance ledger entry
+  'dsp', // dispute
   'whd', // webhook delivery
   'whe', // webhook endpoint
   'job', // scheduled job
