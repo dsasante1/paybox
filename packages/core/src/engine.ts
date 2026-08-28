@@ -811,6 +811,78 @@ export class PaymentEngine {
     }
   }
 
+  /**
+   * Create a reusable instrument with no payment behind it.
+   *
+   * Paystack only ever mints an authorization as a side effect of a successful
+   * charge, which `#mintFor` handles. Stripe lets a PaymentMethod be created
+   * outright and attached to a customer later, so the engine needs a way in
+   * that does not start from a payment.
+   */
+  async createAuthorizationRecord(input: {
+    provider: ProviderId;
+    channel: PaymentMethod;
+    reusable: boolean;
+    customerId?: string | null;
+    paymentId?: string | null;
+    providerAuthorizationCode?: string;
+    bin?: string | null;
+    last4?: string | null;
+    expMonth?: string | null;
+    expYear?: string | null;
+    cardType?: string | null;
+    bank?: string | null;
+    brand?: string | null;
+    countryCode?: string | null;
+    signature?: string | null;
+    accountName?: string | null;
+    mobileMoneyNumber?: string | null;
+    metadata?: Metadata;
+  }): Promise<Authorization> {
+    const now = this.#clock.nowISO();
+    const authorization: Authorization = {
+      id: this.#ids.next('aut'),
+      provider: input.provider,
+      providerAuthorizationCode: input.providerAuthorizationCode ?? this.#ids.token(12),
+      customerId: input.customerId ?? null,
+      paymentId: input.paymentId ?? null,
+      channel: input.channel,
+      bin: input.bin ?? null,
+      last4: input.last4 ?? null,
+      expMonth: input.expMonth ?? null,
+      expYear: input.expYear ?? null,
+      cardType: input.cardType ?? null,
+      bank: input.bank ?? null,
+      brand: input.brand ?? null,
+      countryCode: input.countryCode ?? null,
+      signature: input.signature ?? null,
+      reusable: input.reusable,
+      active: true,
+      accountName: input.accountName ?? null,
+      mobileMoneyNumber: input.mobileMoneyNumber ?? null,
+      metadata: input.metadata ?? {},
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const created = await tx.authorizations.insert(authorization);
+      const event = await this.#appendEvent(tx, {
+        type: 'authorization.created',
+        provider: created.provider,
+        resourceId: created.id,
+        resourceType: 'authorization',
+        data: authorizationEventData(created),
+        previousStatus: null,
+        currentStatus: 'active',
+      });
+      return { result: created, events: [event] };
+    });
+
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
   async deactivateAuthorization(id: string): Promise<Authorization> {
     const { result, events } = await this.#storage.transaction(async (tx) => {
       const existing = await tx.authorizations.byId(id);

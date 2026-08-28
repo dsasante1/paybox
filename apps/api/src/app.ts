@@ -1,5 +1,6 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
+import { stripePlugin } from '@paybox/stripe';
 import { paystackPlugin, fail } from '@paybox/paystack';
 import type { PayboxContext } from './context.js';
 import { controlApiPlugin } from './control-api.js';
@@ -98,6 +99,46 @@ export async function buildApp(context: PayboxContext): Promise<FastifyInstance>
         });
       },
       { prefix: '/paystack' },
+    );
+  }
+
+  if (context.config.providers.stripe?.enabled !== false) {
+    await app.register(
+      async (scope) => {
+        await scope.register(networkPlugin, {
+          simulator: context.network,
+          // Stripe's envelope, not Paystack's. Answering a Stripe client in
+          // the wrong shape is exactly the confusion encapsulation prevents.
+          errorBody: (status) => ({
+            error: {
+              type: status === 429 ? 'invalid_request_error' : 'api_error',
+              message:
+                status === 429
+                  ? 'Too many requests'
+                  : 'The provider is temporarily unavailable (simulated by paybox).',
+              ...(status === 429 ? { code: 'rate_limit' } : {}),
+            },
+          }),
+        });
+        await scope.register(idempotencyPlugin, {
+          storage: context.storage,
+          clock: context.clock,
+          provider: 'stripe',
+        });
+        await scope.register(stripePlugin, {
+          engine: context.engine,
+          simulator: context.simulator,
+          storage: context.storage,
+          clock: context.clock,
+          ids: context.ids,
+          baseUrl: context.baseUrl,
+          basePath: '/stripe',
+          allowAnyKey: context.config.security.allowAnyKey,
+          autoAdvance: context.config.simulation.autoAdvance,
+          autoAdvanceDelayMs: context.config.simulation.autoAdvanceDelayMs,
+        });
+      },
+      { prefix: '/stripe' },
     );
   }
 
