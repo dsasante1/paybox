@@ -132,7 +132,10 @@ export class WebhookDispatcher {
         created.push(
           await this.#createAndSchedule(endpoint, event, formatted.eventType, rawBody, {
             ...(formatted.headers ?? {}),
-            ...formatter.sign(rawBody, endpoint.secret),
+            ...formatter.sign(rawBody, endpoint.secret, {
+              timestamp: this.#clock.now(),
+              attempt: 0,
+            }),
           }),
         );
       }
@@ -288,9 +291,40 @@ export class WebhookDispatcher {
     return this.#transport.send({
       url: delivery.url,
       body: delivery.payload,
-      headers: delivery.headers,
+      headers: await this.#headersFor(delivery),
       timeoutMs: this.#timeoutMs,
     });
+  }
+
+  /**
+   * The headers for one attempt.
+   *
+   * Stored headers are replayed as-is by default, which is what keeps a retry
+   * byte-identical and the delivery log trustworthy. A formatter whose
+   * signature covers a timestamp has to re-sign instead: Stripe generates a
+   * fresh signature per attempt, and replaying a stale one would fail the
+   * receiver's tolerance window -- a failure the emulator would have invented.
+   *
+   * Only the signature headers are recomputed; the payload and everything else
+   * are untouched, so what the developer's app receives still matches what the
+   * dashboard shows it was sent.
+   */
+  async #headersFor(delivery: WebhookDelivery): Promise<Record<string, string>> {
+    const formatter = this.#formatters.get(delivery.provider);
+    if (!formatter?.resignsPerAttempt) return delivery.headers;
+
+    const endpoint = await this.#storage.webhooks.endpointById(delivery.endpointId);
+    // The endpoint can be deleted mid-flight; the stored headers are then the
+    // best we have, and failing the attempt outright would be worse.
+    if (!endpoint) return delivery.headers;
+
+    return {
+      ...delivery.headers,
+      ...formatter.sign(delivery.payload, endpoint.secret, {
+        timestamp: this.#clock.now(),
+        attempt: delivery.attempt,
+      }),
+    };
   }
 
   #pickForcedOutcome(): ForcedOutcome | null {
@@ -323,9 +357,12 @@ export class WebhookDispatcher {
    * Replay: a brand-new delivery carrying the identical signed payload.
    *
    * Distinct from retry because the developer's app should see it as a fresh
-   * POST -- same body, same signature, new delivery row -- which is exactly
-   * what a provider's "resend event" button does, and the thing that exposes
-   * missing idempotency handling on their side.
+   * POST -- same body, new delivery row -- which is exactly what a provider's
+   * "resend event" button does, and the thing that exposes missing idempotency
+   * handling on their side.
+   *
+   * The signature is reused too, unless the provider's covers a timestamp, in
+   * which case it is regenerated at send time like any other attempt.
    */
   async replay(deliveryId: string): Promise<WebhookDelivery> {
     const original = await this.#storage.webhooks.deliveryById(deliveryId);

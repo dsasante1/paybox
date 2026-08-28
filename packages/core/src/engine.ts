@@ -85,6 +85,13 @@ export interface TransitionOptions {
   paymentMethodDetails?: Metadata;
   /** Explicitly simulate a provider reversing a terminal decision (spec §7). */
   reversal?: boolean;
+  /**
+   * Attempt a failed payment again on the same resource.
+   *
+   * Only meaningful for providers whose failures are not final; see
+   * `TransitionContext.retry`.
+   */
+  retry?: boolean;
   /** Extra payload merged into the emitted event. */
   eventData?: Metadata;
 }
@@ -282,7 +289,10 @@ export class PaymentEngine {
   ): Promise<Payment> {
     const { result, events } = await this.#storage.transaction(async (tx) => {
       const payment = await this.#requirePayment(tx, paymentId);
-      assertPaymentTransition(payment.status, to, { reversal: options.reversal });
+      assertPaymentTransition(payment.status, to, {
+        reversal: options.reversal,
+        retry: options.retry,
+      });
 
       const now = this.#clock.nowISO();
       const patch: Partial<Payment> = {
