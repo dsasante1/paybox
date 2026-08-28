@@ -14,6 +14,7 @@ import type {
   Transfer,
 } from '@paybox/shared';
 import {
+  gatewayCodes,
   gatewayResponse,
   toPaystackStatus,
   toPaystackSubscriptionStatus,
@@ -57,6 +58,28 @@ const FEE_RATE: Record<string, number> = {
   KES: 0.029,
   USD: 0.039,
 };
+
+/**
+ * Emulated transfer fee.
+ *
+ * Paystack holds "the transfer amount plus the transfer fee" against your
+ * balance and deducts both. Their real NGN schedule is tiered and changes, so
+ * this is a flat approximation per currency with the same caveat as
+ * `emulatedFee`: present and internally consistent, with no authority. Do not
+ * reconcile against it.
+ */
+const TRANSFER_FEE: Record<string, number> = {
+  NGN: 1_000,
+  GHS: 800,
+  ZAR: 300,
+  KES: 3_000,
+  USD: 100,
+};
+
+export function emulatedTransferFee(currency: string, enabled = true): number {
+  if (!enabled) return 0;
+  return TRANSFER_FEE[currency.toUpperCase()] ?? 1_000;
+}
 
 export function emulatedFee(amount: number, currency: string, enabled = true): number {
   if (!enabled) return 0;
@@ -224,6 +247,14 @@ export function serializeTransaction(payment: Payment, options: SerializeOptions
     amount: payment.amount,
     message: payment.failureMessage,
     gateway_response: gatewayResponse(payment.status, payment.failureCode),
+    // `response_code` is card-only at Paystack; other channels carry the
+    // string classification alone.
+    response_code:
+      payment.paymentMethod === 'card'
+        ? gatewayCodes(payment.status, payment.failureCode).responseCode
+        : null,
+    gateway_response_code: gatewayCodes(payment.status, payment.failureCode)
+      .gatewayResponseCode,
     paid_at: payment.paidAt,
     created_at: payment.createdAt,
     channel: paystackChannel(payment),

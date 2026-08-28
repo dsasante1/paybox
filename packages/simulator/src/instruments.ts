@@ -101,9 +101,36 @@ export function outcomeFromMetadata(
   return OUTCOME_NAMES.has(raw as SimulatedOutcome) ? (raw as SimulatedOutcome) : null;
 }
 
+/**
+ * A provider's own table of published test instruments.
+ *
+ * Card numbers are provider knowledge: Paystack's declining test card and
+ * Stripe's are entirely different numbers, and neither is guessable from the
+ * other. So the table is injected rather than imported, exactly like
+ * `ProviderStatusResolver` and `AuthorizationMinter` in the engine -- this
+ * module resolves outcomes without ever learning whose instruments they are
+ * (spec §30).
+ *
+ * Return `null` for an instrument the provider does not publish; the generic
+ * suffix convention then applies.
+ */
+export type InstrumentResolver = (
+  identifier: string,
+  method: PaymentMethod | null,
+) => InstrumentResolution | null;
+
 export interface ResolveOptions {
   /** Wins over the identifier. Drawn from `metadata.paybox_outcome`. */
   override?: SimulatedOutcome | null;
+  /**
+   * The provider's published test instruments, consulted **before** the
+   * generic suffix convention.
+   *
+   * Without this, a provider's documented *declined* card falls through to
+   * the unknown-instrument default and succeeds -- which is precisely the
+   * "passes locally, fails in production" trap this emulator exists to catch.
+   */
+  resolver?: InstrumentResolver | null;
 }
 
 /**
@@ -123,6 +150,11 @@ export function resolveInstrument(
     };
   }
   if (!identifier) return DEFAULT;
+
+  // The provider's own published instruments win: they are the numbers a
+  // developer will actually have copied out of the provider's documentation.
+  const published = options.resolver?.(identifier, method);
+  if (published) return published;
   const digits = identifier.replace(/\D/g, '');
   if (digits.length < 4) return DEFAULT;
   const suffix = digits.slice(-4);

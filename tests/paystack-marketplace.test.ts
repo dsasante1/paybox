@@ -17,6 +17,8 @@ let context: PayboxContext;
 
 /** Small enough that a single transfer can drain it deliberately. */
 const OPENING = '500000';
+/** Emulated NGN transfer fee — Paystack holds this alongside the amount. */
+const TRANSFER_FEE = 1_000;
 
 beforeEach(async () => {
   process.env.PAYBOX_DATABASE = ':memory:';
@@ -320,7 +322,7 @@ describe('transfers against the balance', () => {
     return res.json().data.recipient_code as string;
   }
 
-  it('reserves the amount when the transfer is queued', async () => {
+  it('reserves the amount plus the fee when the transfer is queued', async () => {
     const recipient = await createRecipient();
     const res = await app.inject({
       method: 'POST',
@@ -330,7 +332,25 @@ describe('transfers against the balance', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    expect(await balance()).toBe(Number(OPENING) - 100_000);
+    // Paystack holds "the transfer amount plus the transfer fee", so a check
+    // against the amount alone would pass transfers it would refuse.
+    expect(await balance()).toBe(Number(OPENING) - 100_000 - TRANSFER_FEE);
+  });
+
+  it('refuses a transfer that only the fee puts out of reach', async () => {
+    const recipient = await createRecipient();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/paystack/transfer',
+      headers: auth,
+      // Exactly the balance: affordable on amount alone, not once the fee is
+      // added. This is the case a naive check gets wrong.
+      payload: { source: 'balance', amount: Number(OPENING), recipient, currency: 'NGN' },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().message).toMatch(/plus a fee of/);
+    expect(await balance()).toBe(Number(OPENING));
   });
 
   it('refuses a transfer the balance cannot cover', async () => {
@@ -385,6 +405,7 @@ describe('transfers against the balance', () => {
       failureReason: 'Bank rejected the payout',
     });
 
+    // Releases exactly what was reserved: amount *and* fee.
     expect(await balance()).toBe(Number(OPENING));
   });
 
@@ -394,7 +415,13 @@ describe('transfers against the balance', () => {
       method: 'POST',
       url: '/paystack/transfer',
       headers: auth,
-      payload: { source: 'balance', amount: 500_000, recipient, currency: 'NGN' },
+      // Amount + fee lands exactly on the balance.
+      payload: {
+        source: 'balance',
+        amount: Number(OPENING) - TRANSFER_FEE,
+        recipient,
+        currency: 'NGN',
+      },
     });
     expect(await balance()).toBe(0);
 

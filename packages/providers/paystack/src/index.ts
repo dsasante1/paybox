@@ -19,6 +19,8 @@ export {
   serializeCustomer,
   serializeTransfer,
   numericTransactionId,
+  emulatedFee,
+  emulatedTransferFee,
   ok,
   fail,
 } from './serializers.js';
@@ -27,3 +29,7 @@ export {
   paystackAuthorizationMinter,
   serializeAuthorization,
 } from './authorization.js';
+export {
+  paystackInstrumentResolver,
+  PAYSTACK_PUBLISHED_INSTRUMENTS,
+} from './instruments.js';

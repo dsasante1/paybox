@@ -514,6 +514,13 @@ export class PaymentEngine {
     reason?: string | null;
     metadata?: Metadata;
     status?: TransferStatus;
+    /**
+     * Processing fee the provider also holds against the balance.
+     *
+     * Supplied by the adapter, never computed here: fee schedules are provider
+     * pricing and the engine must not learn them (spec §30).
+     */
+    fee?: number;
   }): Promise<Transfer> {
     validateAmount(input.amount);
     const now = this.#clock.nowISO();
@@ -532,7 +539,10 @@ export class PaymentEngine {
       recipientBankCode: input.recipientBankCode ?? null,
       reason: input.reason ?? null,
       failureReason: null,
-      metadata: input.metadata ?? {},
+      metadata: {
+        ...(input.metadata ?? {}),
+        ...(input.fee ? { fee: Math.max(0, Math.trunc(input.fee)) } : {}),
+      },
       createdAt: now,
       updatedAt: now,
     };
@@ -540,14 +550,29 @@ export class PaymentEngine {
     const { result, events } = await this.#storage.transaction(async (tx) => {
       // Check and reserve inside one transaction, so two transfers racing for
       // the same funds cannot both pass the check.
+      //
+      // The fee is part of both halves: Paystack checks for "the transfer
+      // amount plus the transfer fee" and deducts both, so checking the amount
+      // alone would let a transfer through that the provider would refuse.
+      const fee = Math.max(0, Math.trunc(input.fee ?? 0));
+      const required = transfer.amount + fee;
       if (this.#enforceBalance) {
         const net = await tx.ledger.net(transfer.provider, transfer.currency);
         const available = this.#openingBalance + net;
-        if (transfer.amount > available) {
+        if (required > available) {
           throw new PayboxError(
             'insufficient_funds',
-            `Transfer of ${transfer.amount} exceeds the available balance of ${available} ${transfer.currency}.`,
-            { details: { amount: transfer.amount, available, currency: transfer.currency } },
+            `Transfer of ${transfer.amount} plus a fee of ${fee} exceeds the ` +
+              `available balance of ${available} ${transfer.currency}.`,
+            {
+              details: {
+                amount: transfer.amount,
+                fee,
+                required,
+                available,
+                currency: transfer.currency,
+              },
+            },
           );
         }
       }
@@ -559,7 +584,7 @@ export class PaymentEngine {
       await this.#ledgerIn(tx, 'debit', {
         provider: created.provider,
         currency: created.currency,
-        amount: created.amount,
+        amount: required,
         reason: 'transfer',
         resourceId: created.id,
       });
@@ -600,12 +625,14 @@ export class PaymentEngine {
           : {}),
       });
 
-      // A payout that did not happen releases the funds it reserved.
+      // A payout that did not happen releases exactly what it reserved --
+      // amount plus fee, or the two would drift apart.
       if (to === 'failed' || to === 'reversed') {
+        const reservedFee = Math.max(0, Math.trunc(Number(updated.metadata.fee ?? 0)));
         await this.#ledgerIn(tx, 'credit', {
           provider: updated.provider,
           currency: updated.currency,
-          amount: updated.amount,
+          amount: updated.amount + reservedFee,
           reason: `transfer_${to}`,
           resourceId: updated.id,
         });

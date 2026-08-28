@@ -49,6 +49,7 @@ import {
   transferSchema,
 } from './schemas.js';
 import {
+  emulatedTransferFee,
   numericTransactionId,
   ok,
   serializeCustomer,
@@ -68,6 +69,7 @@ import { assertPaystackCredentials } from './auth.js';
 import { renderCheckoutPage, renderCheckoutResult } from './checkout.js';
 import { fromPaystackStatus, toPaystackStatus } from './status.js';
 import { paystackAuthorizationMinter } from './authorization.js';
+import { paystackInstrumentResolver } from './instruments.js';
 
 export interface PaystackPluginOptions {
   engine: PaymentEngine;
@@ -247,7 +249,9 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
       providerStatus: 'pending',
     });
 
-    const { outcome } = resolveInstrument(authorization.last4, authorization.channel);
+    const { outcome } = resolveInstrument(authorization.last4, authorization.channel, {
+      resolver: paystackInstrumentResolver,
+    });
     return simulator.apply(payment.id, outcome);
   }
 
@@ -260,6 +264,7 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
     if (!autoAdvance) return;
     const { outcome } = resolveInstrument(identifier, payment.paymentMethod, {
       override: outcomeFromMetadata(metadata),
+      resolver: paystackInstrumentResolver,
     });
     await storage.jobs.enqueue({
       id: ids.next('job'),
@@ -563,7 +568,8 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
     ussd: {
       parks: true,
       status: 'pay_offline',
-      displayText: 'Please dial the USSD code on your phone to complete this transaction.',
+      // Filled in per charge: Paystack embeds the dial string in the text.
+      displayText: '',
     },
     eft: {
       parks: true,
@@ -639,7 +645,7 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
       // A USSD charge carries only a bank code from a fixed enum -- there are
       // no last four digits to select an outcome from, which is exactly what
       // `metadata.paybox_outcome` exists for.
-      ussdCode = buildUssdCode(body.ussd.type);
+      ussdCode = buildUssdCode(body.ussd.type, body.reference ?? body.email);
       details = { bank_code: body.ussd.type, ussd_code: ussdCode, country: 'NG' };
     } else if (body.eft) {
       method = 'eft';
@@ -684,7 +690,9 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
       ok('Charge attempted', {
         reference: pending.reference,
         status: presentation.status,
-        display_text: presentation.displayText,
+        display_text: ussdCode
+          ? `Please dial ${ussdCode} on your mobile phone to complete the transaction`
+          : presentation.displayText,
         amount: pending.amount,
         currency: pending.currency,
         transaction: String(numericTransactionId(pending.providerTransactionId)),
@@ -1880,6 +1888,10 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
       recipientBankCode: recipient.bankCode,
       reason: body.reason ?? null,
       status: 'pending',
+      // Paystack holds the fee alongside the amount, so the emulator has to
+      // as well -- otherwise a transfer passes here that would be refused
+      // there for being a few naira short.
+      fee: emulatedTransferFee((body.currency ?? recipient.currency).toUpperCase(), includeFees),
     });
     return reply.send(ok('Transfer has been queued', serializeTransfer(transfer)));
   });
@@ -1919,13 +1931,21 @@ function normalizeDateRange(
 /**
  * The dial string a USSD charge asks the payer to enter.
  *
- * Modelled, not verified: Paystack's OpenAPI specification carries no
- * `ussd_code` field, so its exact shape cannot be checked against the
- * authoritative source. The three-digit prefix is the bank code the caller
- * supplied, which is the part that is documented.
+ * Paystack's own documentation shows `*737*33*4*18791#` -- the bank code, two
+ * short menu segments, then a per-session identifier. The segments are session
+ * state we do not model, so they are derived deterministically from the charge
+ * so that the same charge always yields the same string under a fixed seed.
+ *
+ * The shape is documented; the middle digits are ours. docs/paystack.md says
+ * so rather than implying the whole string is reproduced.
  */
-function buildUssdCode(bankCode: string): string {
-  return `*${bankCode}*000#`;
+function buildUssdCode(bankCode: string, seed: string): string {
+  let hash = 0;
+  for (let i = 0; i < seed.length; i++) {
+    hash = (hash * 31 + seed.charCodeAt(i)) % 100_000;
+  }
+  const session = String(hash).padStart(5, '0');
+  return `*${bankCode}*33*4*${session}#`;
 }
 
 /** Convenience for tests that want the plugin registered on a bare Fastify. */

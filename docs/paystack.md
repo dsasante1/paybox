@@ -131,21 +131,36 @@ the Luhn check, and are not issued by any network.
 **CVV is never read, never stored, and appears nowhere in the data model.**
 A card number is reduced to its BIN and last four before anything is persisted.
 
-### ⚠️ These are not Paystack's test cards
+### Paystack's own published test cards also work
 
-Paystack publishes its own test cards at `/docs/payments/test-payments/`, and
-they are **different numbers** — `4084 0840 8408 4081` (success),
-`4084 0800 0000 5408` (declined), `4084 0800 0067 0037` (insufficient funds),
-`5060 6666 6666 6666 666` (PIN + OTP), and others.
+The numbers above are paybox's synthetic set. Paystack's **published** test
+instruments are recognised too, so a number copied straight out of
+`/docs/payments/test-payments/` behaves the way that page says it will.
 
-paybox does **not** recognise them. An unknown instrument falls through to
-success, so pasting Paystack's *declined* test card into paybox produces a
-**successful** payment. That is the one failure mode this tool exists to
-prevent, so treat it as a real limitation and use the paybox numbers above.
+| Paystack instrument | Behaviour here |
+|---|---|
+| `4084 0840 8408 4081` | Succeeds; reusable authorization |
+| `5192 6027 2058 4796` | Succeeds (bank auth simulation) |
+| `5078 5078 5078 5078 12` | Parks awaiting a PIN |
+| `5060 6666 6666 6666 666` | Parks awaiting PIN `1234`, then OTP `123456` |
+| `5078 5078 5078 5078 04` | Parks awaiting PIN `0000`, phone, then OTP |
+| `4084 0800 0000 5408` | **Declined** |
+| `5078 5078 5078 5078 53` | Fails — token not generated |
+| `4084 0800 0067 0037` | Fails — insufficient funds |
+| `055 123 498 7` (MTN) | Succeeds |
+| `+254 710 000 000` (M-Pesa) | Succeeds |
+| `070 000 000 0` (Orange CIV) | Parks awaiting an OTP |
 
-Paystack also documents refund-outcome cards (`…1803` fails a refund, `…1902`
-sends it to "needs attention") and mobile-money numbers with their own OTP
-(`070 000 000 0`, OTP `1234`). None of those are modelled either.
+Matching is on the **full number**, so these never collide with the
+`4000 0000 0000 000X` suffix convention, and an unrecognised number still falls
+through to success as before.
+
+Two documented behaviours are **not** reproduced:
+
+- The refund-outcome cards (`…1803` fails a refund, `…1902` sends it to
+  "needs attention") charge successfully here, but the refund behaves normally.
+- Orange CIV is documented with OTP `1234`; paybox accepts `123456` on every
+  parked charge.
 
 ### Choosing an outcome where there is no instrument
 
@@ -306,15 +321,18 @@ the same reasoning as the event log. Movements:
 |---|---|
 | Payment succeeds | credit |
 | Refund settles | debit |
-| Transfer created | debit (reserved immediately) |
-| Transfer fails or is reversed | credit (reservation released) |
+| Transfer created | debit — **amount plus fee**, reserved immediately |
+| Transfer fails or is reversed | credit — releases exactly what was reserved |
 
 A transfer is **reserved when it is queued**, not when it settles. Waiting
 would let two queued payouts spend the same money; reserving inside the same
 transaction as the balance check is what stops that.
 
 **Transfers are refused when the balance cannot cover them** (HTTP 400,
-`insufficient_funds`), which is what a provider does. To make that usable, the
+`insufficient_funds`), which is what a provider does. Paystack checks for
+"the transfer amount **plus the transfer fee**" and deducts both, so paybox
+does too — a check against the amount alone would let through a transfer that
+Paystack would refuse for being a few units short. To make that usable, the
 emulator starts with an opening test float per currency:
 
 ```yaml
@@ -464,6 +482,8 @@ fidelity:
 | `customer.*` | Accurate for customers created through the API |
 | `fees` | **Emulated approximation.** A flat percentage per currency, not Paystack's real pricing, which varies by country, channel, card origin and negotiated rate. Do not use for reconciliation testing. |
 | `split`, `fees_split` | **Real** when the transaction carries a `split_code` |
+| `gateway_response_code` | **Real** for outcomes paybox simulates; `unknown` otherwise |
+| `response_code` | ISO 8583, **card channel only**; `null` elsewhere, as Paystack does |
 | `ip_address`, `receipt_number`, `fees_breakdown`, `plan`, `subaccount`, `pos_transaction_data`, `source`, `connect`, `order_id` | Always `null` / `{}` |
 
 ## Response envelopes: verified against prose, not against the spec
@@ -507,15 +527,15 @@ transaction"*). paybox emits a simplified `*{bank_code}*000#` and a generic
    always zero.
 8. `GET /bank` and `GET /country` return short fixed lists, not Paystack's full
    directories. `GET /dedicated_account` ignores the documented query filters.
-9. **Paystack's published test cards are not recognised** (above). Their
-   declined card succeeds here.
-10. `gateway_response_code` and `response_code` are not implemented. Paystack
-    returns an ISO 8583 code and a string classification (`approved`,
-    `do_not_honor`, `processing_error`, …) on every transaction; paybox
-    returns only the human-readable `gateway_response`.
-11. The balance check covers the transfer **amount only**. Paystack checks the
-    amount *plus the transfer fee*, and deducts both.
-12. The USSD dial string is simplified (above).
+9. The refund-outcome test cards charge correctly but do not change refund
+   behaviour, and Orange CIV's `1234` OTP is not modelled (above).
+10. `gateway_response_code` maps only the failures paybox can actually
+    simulate. Paystack's table is ~60 ISO 8583 codes; anything unmapped
+    resolves to `unknown`, which is what Paystack documents for unlisted codes.
+11. Transfer fees are an **emulated flat rate per currency**, not Paystack's
+    real tiered schedule. The balance check and deduction include them, so the
+    arithmetic is right; the rate is not. Do not reconcile against it.
+12. The USSD dial string's middle segments are ours (above).
 13. Transaction ids are derived deterministically from the reference rather than
    allocated by a counter, so they are stable but not monotonic over time. This
    is deliberate: hash-derived ids stay stable when operations are reordered,

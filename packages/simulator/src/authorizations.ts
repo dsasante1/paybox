@@ -1,5 +1,9 @@
 import type { Authorization, Metadata } from '@paybox/shared';
-import { resolveInstrument, type SimulatedOutcome } from './instruments.js';
+import {
+  resolveInstrument,
+  type InstrumentResolver,
+  type SimulatedOutcome,
+} from './instruments.js';
 
 /**
  * Turning a stored authorization back into a chargeable instrument.
@@ -31,6 +35,16 @@ export function authorizationChargeDetails(authorization: Authorization): Metada
  * insufficient-funds test card fails its renewals -- which is the whole
  * scenario a dunning flow needs to be tested against.
  */
-export function authorizationOutcome(authorization: Authorization): SimulatedOutcome {
-  return resolveInstrument(authorization.last4, authorization.channel).outcome;
+export function authorizationOutcome(
+  authorization: Authorization,
+  resolver?: InstrumentResolver | null,
+): SimulatedOutcome {
+  // A stored authorization keeps only the masked last four, so a provider's
+  // published full-number table cannot match it. That is fine: the outcome was
+  // already decided when the card was first charged, and the suffix convention
+  // reproduces it. The resolver is still offered for providers whose test
+  // instruments are distinguishable from four digits alone.
+  return resolveInstrument(authorization.last4, authorization.channel, {
+    ...(resolver ? { resolver } : {}),
+  }).outcome;
 }
