@@ -162,10 +162,12 @@ payment
   .command('list')
   .description('List payments')
   .option('-s, --status <status>', 'filter by canonical status')
+  .option('-p, --provider <provider>', 'filter by provider')
   .option('-n, --limit <n>', 'how many', '25')
-  .action(async (options: { status?: string; limit: string }) => {
+  .action(async (options: { status?: string; provider?: string; limit: string }) => {
     const query = new URLSearchParams({ limit: options.limit });
     if (options.status) query.set('status', options.status);
+    if (options.provider) query.set('provider', options.provider);
     const { items } = await client().get<{ items: Payment[] }>(`/api/payments?${query}`);
     output(items, () =>
       items.length === 0
@@ -224,6 +226,108 @@ payment
     });
   });
 
+/**
+ * Creating a payment differs per provider, so each contributes its own recipe.
+ *
+ * The CLI goes through the provider's real endpoint rather than the control
+ * plane, so the resulting payment is indistinguishable from one the
+ * developer's own application created -- which means it has to speak each
+ * provider's wire format, including Stripe's form encoding.
+ */
+interface CreateRecipe {
+  path: string;
+  contentType: string;
+  body: string;
+  /** Pull the handle and any follow-up link out of the provider's response. */
+  read(json: Record<string, unknown>): {
+    /** What to show the user: the provider's own handle for the payment. */
+    handle: string;
+    /** How to find the row afterwards. Providers differ; see below. */
+    lookup: { by: 'reference' | 'id'; value: string };
+    checkoutUrl?: string | undefined;
+    prompt?: string | undefined;
+    error?: string | undefined;
+  };
+}
+
+function paystackRecipe(options: Record<string, string>): CreateRecipe {
+  const useCharge = Boolean(options.method);
+  const body: Record<string, unknown> = {
+    email: options.email,
+    amount: Number(options.amount),
+    currency: options.currency,
+    ...(options.reference ? { reference: options.reference } : {}),
+    ...(options.method === 'mobile_money'
+      ? { mobile_money: { phone: '0550000000', provider: 'mtn' } }
+      : {}),
+    ...(options.method === 'card' ? { card: { number: '4000 0000 0000 0000' } } : {}),
+    ...(options.method === 'bank'
+      ? { bank: { code: '058', account_number: '0000000000' } }
+      : {}),
+  };
+  return {
+    path: useCharge ? '/paystack/charge' : '/paystack/transaction/initialize',
+    contentType: 'application/json',
+    body: JSON.stringify(body),
+    read: (json) => {
+      const data = (json.data ?? {}) as Record<string, unknown>;
+      const reference = String(data.reference ?? '');
+      return {
+        handle: reference,
+        // Paystack's reference is developer-facing and is what paybox stores.
+        lookup: { by: 'reference', value: reference },
+        ...(json.status === false ? { error: String(json.message ?? 'Request failed') } : {}),
+        ...(data.authorization_url ? { checkoutUrl: String(data.authorization_url) } : {}),
+        ...(data.display_text ? { prompt: String(data.display_text) } : {}),
+      };
+    },
+  };
+}
+
+function stripeRecipe(options: Record<string, string>): CreateRecipe {
+  // Stripe takes form encoding and nothing else, and a PaymentIntent with no
+  // payment method is the closest analogue to "give me a checkout link".
+  const fields = new URLSearchParams({
+    amount: String(Number(options.amount)),
+    currency: (options.currency ?? 'usd').toLowerCase(),
+  });
+  if (options.method && options.method !== 'card') {
+    throw new CliError(
+      `Stripe supports --method card only; received "${options.method}".`,
+    );
+  }
+  if (options.method === 'card') {
+    fields.set('confirm', 'true');
+    fields.set('payment_method_data[type]', 'card');
+    fields.set('payment_method_data[card][number]', '4242424242424242');
+  }
+  return {
+    path: '/stripe/v1/payment_intents',
+    contentType: 'application/x-www-form-urlencoded',
+    body: fields.toString(),
+    read: (json) => {
+      const error = json.error as { message?: string } | undefined;
+      if (error) {
+        return {
+          handle: '',
+          lookup: { by: 'id', value: '' },
+          error: error.message ?? 'Request failed',
+        };
+      }
+      // Stripe has no developer-facing reference: `pi_...` is the handle, and
+      // it maps to the payment's *id*, not the generated reference paybox
+      // assigns when the caller supplies none.
+      const id = String(json.id ?? '');
+      return { handle: id, lookup: { by: 'id', value: id.replace(/^pi_/, 'pay_') } };
+    },
+  };
+}
+
+const CREATE_RECIPES: Record<string, (options: Record<string, string>) => CreateRecipe> = {
+  paystack: paystackRecipe,
+  stripe: stripeRecipe,
+};
+
 payment
   .command('create')
   .description('Create a payment through the provider API, as your application would')
@@ -235,54 +339,60 @@ payment
   .option('--email <email>', 'customer email', 'test@paybox.local')
   .action(async (options: Record<string, string>) => {
     const api = client();
-    // Fetch the local test key rather than making the user paste it: the CLI
-    // and the emulator are the same trust domain, and these keys are fake.
-    const { keys } = await api.get<{ keys: { secretKey: string } }>('/api/providers');
-    const headers = {
-      authorization: `Bearer ${keys.secretKey}`,
-      'content-type': 'application/json',
-    };
+    const provider = options.provider ?? 'paystack';
+    const build = CREATE_RECIPES[provider];
+    if (!build) {
+      throw new CliError(
+        `paybox cannot create payments for "${provider}". Implemented: ${Object.keys(
+          CREATE_RECIPES,
+        ).join(', ')}.`,
+      );
+    }
 
-    // Goes through the provider's own endpoint, so the resulting payment is
-    // indistinguishable from one the developer's application created.
-    const useCharge = Boolean(options.method);
-    const path = useCharge
-      ? `/${options.provider}/charge`
-      : `/${options.provider}/transaction/initialize`;
-    const body: Record<string, unknown> = {
-      email: options.email,
-      amount: Number(options.amount),
-      currency: options.currency,
-      ...(options.reference ? { reference: options.reference } : {}),
-      ...(options.method === 'mobile_money'
-        ? { mobile_money: { phone: '0550000000', provider: 'mtn' } }
-        : {}),
-      ...(options.method === 'card' ? { card: { number: '4000 0000 0000 0000' } } : {}),
-      ...(options.method === 'bank' ? { bank: { code: '058', account_number: '0000000000' } } : {}),
-    };
+    // Fetch the provider's own local test key rather than making the user
+    // paste it: the CLI and the emulator are the same trust domain, and these
+    // keys are fake.
+    const { providers, keys } = await api.get<{
+      providers: { id: string; keys?: { secretKey: string } }[];
+      keys: { secretKey: string };
+    }>('/api/providers');
+    const secretKey =
+      providers.find((p) => p.id === provider)?.keys?.secretKey ?? keys.secretKey;
 
-    const response = await fetch(`${api.baseUrl}${path}`, {
+    const recipe = build(options);
+    const response = await fetch(`${api.baseUrl}${recipe.path}`, {
       method: 'POST',
-      headers,
-      body: JSON.stringify(body),
+      headers: {
+        authorization: `Bearer ${secretKey}`,
+        'content-type': recipe.contentType,
+      },
+      body: recipe.body,
     });
-    const result = (await response.json()) as { status: boolean; message: string; data?: Record<string, unknown> };
-    if (!result.status) throw new CliError(result.message);
 
-    const reference = String(result.data?.reference ?? '');
-    const { items } = await api.get<{ items: Payment[] }>(
-      `/api/payments?reference=${encodeURIComponent(reference)}&limit=1`,
-    );
-    const created = items[0];
+    const json = (await response.json()) as Record<string, unknown>;
+    const result = recipe.read(json);
+    if (result.error) throw new CliError(result.error);
 
-    output(result.data, () =>
+    // `/api/payments/:id` wraps the row alongside its timeline; the list
+    // endpoint returns rows directly. Unwrap so both paths yield a Payment.
+    const created =
+      result.lookup.by === 'id'
+        ? await api
+            .get<{ payment: Payment }>(`/api/payments/${result.lookup.value}`)
+            .then((detail) => detail.payment)
+            .catch(() => undefined)
+        : (
+            await api.get<{ items: Payment[] }>(
+              `/api/payments?reference=${encodeURIComponent(result.lookup.value)}&limit=1`,
+            )
+          ).items[0];
+
+    output(json, () =>
       [
-        `${pc.green('✓')} ${reference} → ${statusColour(created?.status ?? 'created')}`,
+        `${pc.green('✓')} ${result.handle} → ${statusColour(created?.status ?? 'created')}`,
         created ? `  ${pc.dim('id')}         ${created.id}` : '',
-        result.data?.authorization_url
-          ? `  ${pc.dim('checkout')}   ${String(result.data.authorization_url)}`
-          : '',
-        result.data?.display_text ? `  ${pc.dim('prompt')}     ${String(result.data.display_text)}` : '',
+        result.checkoutUrl ? `  ${pc.dim('checkout')}   ${result.checkoutUrl}` : '',
+        result.prompt ? `  ${pc.dim('prompt')}     ${result.prompt}` : '',
       ]
         .filter(Boolean)
         .join('\n'),
@@ -639,7 +749,7 @@ plan
     const { items } = await client().get<{ items: Plan[] }>('/api/plans');
     output(items, () =>
       items.length === 0
-        ? pc.dim('No plans. Create one with POST /paystack/plan.')
+        ? pc.dim('No plans. Create one through a provider API (POST /paystack/plan or /stripe/v1/prices).')
         : table(
             ['CODE', 'NAME', 'AMOUNT', 'INTERVAL', 'LIMIT'],
             items.map((p) => [

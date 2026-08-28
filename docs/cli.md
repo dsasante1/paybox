@@ -27,8 +27,10 @@ paybox provider                    # coverage per provider
 ```bash
 paybox payment create --amount 25000 --currency GHS --method mobile_money
 paybox payment create --amount 10000                  # returns a checkout link
+paybox payment create --provider stripe --amount 2000 --currency usd --method card
 paybox payment list
 paybox payment list --status pending
+paybox payment list --provider stripe
 paybox payment get order_1                            # id or reference
 
 paybox payment success order_1
@@ -50,6 +52,11 @@ Failure reasons: `declined`, `insufficient_funds`, `expired_card`,
 
 Every one drives the real state machine. `payment success` and a test card that
 happens to succeed take the same code path.
+
+`payment create` goes through the provider's own endpoint, so the result is
+indistinguishable from one your application created — which means it speaks
+each provider's wire format, including Stripe's form encoding. Stripe accepts
+`--method card` only; the other methods are Paystack channels.
 
 ## Stored authorizations
 

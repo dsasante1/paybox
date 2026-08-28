@@ -71,16 +71,29 @@ export const controlApiPlugin: FastifyPluginAsync<{ context: PayboxContext }> = 
     };
   });
 
+  /**
+   * Which providers exist, and how far each is actually implemented.
+   *
+   * Honesty about coverage is a product requirement (spec §31), not a
+   * disclaimer: never report a capability we have not implemented. The
+   * `implemented` set is the single place that judgement lives, so a new
+   * adapter cannot be announced here without being added deliberately.
+   */
+  const IMPLEMENTED: Record<string, { status: string; keys: Record<string, string> }> = {
+    paystack: { status: 'partial', keys: context.keys },
+    stripe: { status: 'partial', keys: context.stripeKeys },
+  };
+
   fastify.get('/providers', async () => ({
     providers: Object.entries(context.config.providers).map(([id, cfg]) => ({
       id,
       enabled: cfg.enabled,
       basePath: `/${id}`,
-      // Honesty about coverage is a product requirement (spec §31), not a
-      // disclaimer: never report a capability we have not implemented.
-      status: id === 'paystack' ? 'partial' : 'not_implemented',
+      status: IMPLEMENTED[id]?.status ?? 'not_implemented',
       docs: `/docs/${id}`,
+      ...(IMPLEMENTED[id] ? { keys: IMPLEMENTED[id]!.keys } : {}),
     })),
+    // Kept for the CLI, which reads a single secret to talk to Paystack.
     keys: context.keys,
   }));
 
