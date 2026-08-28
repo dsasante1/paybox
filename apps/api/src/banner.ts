@@ -13,7 +13,7 @@ export function printBanner(options: {
   sourcePath: string | null;
 }): void {
   const { context, warnings, sourcePath } = options;
-  const { config, baseUrl, keys } = context;
+  const { config, baseUrl, keys, stripeKeys } = context;
   const out = (line = '') => process.stdout.write(`${line}\n`);
 
   out();
@@ -26,17 +26,19 @@ export function printBanner(options: {
   if (sourcePath) out(`  Config      ${sourcePath}`);
   out();
   out('  Providers');
-  out(`    Paystack  ${baseUrl}/paystack   partial — see docs/paystack.md`);
-  for (const id of ['stripe', 'flutterwave', 'kora']) {
-    out(`    ${id.padEnd(9)} not implemented yet`);
+  out(`    Paystack   ${baseUrl}/paystack   partial — see docs/paystack.md`);
+  out(`    Stripe     ${baseUrl}/stripe     partial — see docs/stripe.md`);
+  for (const id of ['flutterwave', 'kora']) {
+    out(`    ${id.padEnd(10)} not implemented yet`);
   }
   out();
   out('  Test credentials (local only — these are not real keys)');
-  out(`    secret    ${keys.secretKey}`);
-  out(`    public    ${keys.publicKey}`);
+  out(`    Paystack   ${keys.secretKey}`);
+  out(`    Stripe     ${stripeKeys.secretKey}`);
   out();
   out('  Point your app at the emulator:');
   out(`    PAYSTACK_BASE_URL=${baseUrl}/paystack`);
+  out(`    STRIPE_API_BASE=${baseUrl}/stripe`);
   out();
 
   if (config.freezeClock) {
