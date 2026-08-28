@@ -26,6 +26,7 @@ import type {
   SplitEntry,
   Subaccount,
   Subscription,
+  SubscriptionItem,
   SubscriptionStatus,
   Transfer,
   TransferStatus,
@@ -50,6 +51,7 @@ import type {
   ProductRow,
   SplitRow,
   SubaccountRow,
+  SubscriptionItemRow,
   SubscriptionRow,
   TransferRecipientRow,
   CustomerRow,
@@ -484,6 +486,11 @@ export const toSubscription = (row: SubscriptionRow): Subscription => ({
   amount: row.amount,
   currency: row.currency,
   startDate: row.start_date,
+  // Rows written before the column existed fall back to the start date, which
+  // is what the current period was for a subscription in its first cycle.
+  currentPeriodStart: row.current_period_start ?? row.start_date,
+  trialStart: row.trial_start,
+  trialEnd: row.trial_end,
   nextPaymentDate: row.next_payment_date,
   invoiceLimit: row.invoice_limit,
   invoiceCount: row.invoice_count,
@@ -503,6 +510,9 @@ export const fromSubscription = (sub: Subscription): SubscriptionRow => ({
   authorization_id: sub.authorizationId,
   status: sub.status,
   provider_status: sub.providerStatus,
+  current_period_start: sub.currentPeriodStart,
+  trial_start: sub.trialStart,
+  trial_end: sub.trialEnd,
   quantity: sub.quantity,
   amount: sub.amount,
   currency: sub.currency,
@@ -524,6 +534,53 @@ export function subscriptionPatch(patch: Partial<Subscription>): Partial<Subscri
   if (patch.nextPaymentDate !== undefined) out.next_payment_date = patch.nextPaymentDate;
   if (patch.invoiceCount !== undefined) out.invoice_count = patch.invoiceCount;
   if (patch.cancelledAt !== undefined) out.cancelled_at = patch.cancelledAt;
+  if (patch.amount !== undefined) out.amount = patch.amount;
+  if (patch.quantity !== undefined) out.quantity = patch.quantity;
+  if (patch.planId !== undefined) out.plan_id = patch.planId;
+  if (patch.authorizationId !== undefined) out.authorization_id = patch.authorizationId;
+  if (patch.currentPeriodStart !== undefined) out.current_period_start = patch.currentPeriodStart;
+  if (patch.trialStart !== undefined) out.trial_start = patch.trialStart;
+  if (patch.trialEnd !== undefined) out.trial_end = patch.trialEnd;
+  if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
+  if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
+  return out;
+}
+
+/* --- subscription items (one price on a subscription) --- */
+
+export const toSubscriptionItem = (row: SubscriptionItemRow): SubscriptionItem => ({
+  id: row.id,
+  provider: row.provider as ProviderId,
+  providerItemId: row.provider_item_id,
+  subscriptionId: row.subscription_id,
+  planId: row.plan_id,
+  quantity: row.quantity,
+  position: row.position,
+  metadata: readJson(row.metadata),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+export const fromSubscriptionItem = (item: SubscriptionItem): SubscriptionItemRow => ({
+  id: item.id,
+  provider: item.provider,
+  provider_item_id: item.providerItemId,
+  subscription_id: item.subscriptionId,
+  plan_id: item.planId,
+  quantity: item.quantity,
+  position: item.position,
+  metadata: writeJson(item.metadata),
+  created_at: item.createdAt,
+  updated_at: item.updatedAt,
+});
+
+export function subscriptionItemPatch(
+  patch: Partial<SubscriptionItem>,
+): Partial<SubscriptionItemRow> {
+  const out: Partial<SubscriptionItemRow> = {};
+  if (patch.planId !== undefined) out.plan_id = patch.planId;
+  if (patch.quantity !== undefined) out.quantity = patch.quantity;
+  if (patch.position !== undefined) out.position = patch.position;
   if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
   if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
   return out;

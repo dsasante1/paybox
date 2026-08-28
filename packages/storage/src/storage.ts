@@ -6,6 +6,7 @@ import type {
   DedicatedAccountRepository,
   InstrumentSetupRepository,
   InvoiceItemRepository,
+  SubscriptionItemRepository,
   DisputeRepository,
   InvoiceRepository,
   LedgerRepository,
@@ -34,7 +35,7 @@ import type {
 } from '@paybox/core';
 import { NodeSqliteDialect } from './node-sqlite-dialect.js';
 import { MIGRATIONS } from './migrations.js';
-import type { InvoiceItem } from '@paybox/shared';
+import type { InvoiceItem, SubscriptionItem } from '@paybox/shared';
 import type { Database } from './schema.js';
 import * as map from './mappers.js';
 
@@ -95,6 +96,7 @@ class SqliteStorage implements Storage {
       // authorizations; drop them in dependency order.
       'invoice_items',
       'invoices',
+      'subscription_items',
       'subscriptions',
       'plans',
       'products',
@@ -890,6 +892,85 @@ class SqliteStorage implements Storage {
     },
   };
 
+  readonly subscriptionItems: SubscriptionItemRepository = {
+    insert: async (item) => {
+      await this.#db
+        .insertInto('subscription_items')
+        .values(map.fromSubscriptionItem(item))
+        .execute();
+      return item;
+    },
+    byId: async (id) => {
+      const row = await this.#db
+        .selectFrom('subscription_items')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toSubscriptionItem(row) : null;
+    },
+    byProviderItemId: async (provider, id) => {
+      const row = await this.#db
+        .selectFrom('subscription_items')
+        .selectAll()
+        .where('provider', '=', provider)
+        .where('provider_item_id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toSubscriptionItem(row) : null;
+    },
+    listBySubscription: async (subscriptionId) => {
+      const rows = await this.#db
+        .selectFrom('subscription_items')
+        .selectAll()
+        .where('subscription_id', '=', subscriptionId)
+        .orderBy('position', 'asc')
+        .execute();
+      return rows.map(map.toSubscriptionItem);
+    },
+    listBySubscriptions: async (ids) => {
+      const grouped = new Map<string, SubscriptionItem[]>();
+      if (ids.length === 0) return grouped;
+      const rows = await this.#db
+        .selectFrom('subscription_items')
+        .selectAll()
+        .where('subscription_id', 'in', [...ids])
+        .orderBy('position', 'asc')
+        .execute();
+      for (const row of rows) {
+        const item = map.toSubscriptionItem(row);
+        const bucket = grouped.get(item.subscriptionId);
+        if (bucket) bucket.push(item);
+        else grouped.set(item.subscriptionId, [item]);
+      }
+      return grouped;
+    },
+    update: async (id, patch) => {
+      const columns = map.subscriptionItemPatch(patch);
+      if (Object.keys(columns).length > 0) {
+        await this.#db
+          .updateTable('subscription_items')
+          .set(columns)
+          .where('id', '=', id)
+          .execute();
+      }
+      const row = await this.#db
+        .selectFrom('subscription_items')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toSubscriptionItem(row) : notFound('subscription item', id);
+    },
+    delete: async (id) => {
+      await this.#db.deleteFrom('subscription_items').where('id', '=', id).execute();
+    },
+    nextPosition: async () => {
+      const row = await this.#db
+        .selectFrom('subscription_items')
+        .select(({ fn }) => fn.max<number>('position').as('highest'))
+        .executeTakeFirst();
+      return Number(row?.highest ?? 0) + 1;
+    },
+  };
+
   readonly invoices: InvoiceRepository = {
     insert: async (invoice) => {
       await this.#db.insertInto('invoices').values(map.fromInvoice(invoice)).execute();
@@ -1028,7 +1109,19 @@ class SqliteStorage implements Storage {
         .selectAll()
         .where('customer_id', '=', customerId)
         .where('invoice_id', 'is', null);
-      if (subscriptionId) query = query.where('subscription_id', '=', subscriptionId);
+      // A subscription's invoice sweeps up that subscription's pending items
+      // *and* the customer's unattached ones -- a one-off charge added for a
+      // customer belongs on their next bill, whichever bill that is. Another
+      // subscription's prorations do not, or a customer with two
+      // subscriptions would see one billed on the other's invoice.
+      if (subscriptionId) {
+        query = query.where((eb) =>
+          eb.or([
+            eb('subscription_id', '=', subscriptionId),
+            eb('subscription_id', 'is', null),
+          ]),
+        );
+      }
       const rows = await query.orderBy('position', 'asc').execute();
       return rows.map(map.toInvoiceItem);
     },

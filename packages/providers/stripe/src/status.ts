@@ -177,6 +177,7 @@ export function toStripeSetupStatus(status: SetupStatus): string {
  * Stripe's enum is `active | canceled | incomplete | incomplete_expired |
  * past_due | paused | trialing | unpaid`. Two mappings deserve a note:
  *
+ *   trialing      -> trialing   Exists, will bill, has not yet.
  *   attention     -> past_due   A renewal failed and the merchant must act.
  *   non_renewing  -> active     Stripe expresses "stops at period end" as a
  *                               *flag* (`cancel_at_period_end`), not a status,
@@ -187,6 +188,8 @@ export function toStripeSetupStatus(status: SetupStatus): string {
  */
 export function toStripeSubscriptionStatus(status: SubscriptionStatus): string {
   switch (status) {
+    case 'trialing':
+      return 'trialing';
     case 'attention':
       return 'past_due';
     case 'non_renewing':

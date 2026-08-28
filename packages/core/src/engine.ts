@@ -29,6 +29,7 @@ import {
   type Split,
   type Subaccount,
   type Subscription,
+  type SubscriptionItem,
   type SubscriptionStatus,
   type Transfer,
   type TransferStatus,
@@ -178,6 +179,14 @@ export interface InvoiceItemDraft {
   proration?: boolean;
   metadata?: Metadata;
 }
+
+/**
+ * What to do about the part-period difference when a subscription changes.
+ *
+ * Stripe's own vocabulary, because these are the three genuinely different
+ * answers and inventing a fourth would not help anyone.
+ */
+export type ProrationBehavior = 'create_prorations' | 'none' | 'always_invoice';
 
 function sumItems(items: readonly InvoiceItemDraft[]): number {
   return items.reduce(
@@ -1463,19 +1472,73 @@ export class PaymentEngine {
    * concrete instrument. Creating a subscription that could never be debited
    * would only fail later, at the first renewal, far from the cause.
    */
+  /**
+   * Start a subscription.
+   *
+   * `items` is the general form: several prices billed on one cycle, which is
+   * what a base plan plus per-seat pricing plus an add-on actually is.
+   * `planId` remains the *first* item's plan and sets the cadence, because
+   * every price on one subscription must share an interval.
+   *
+   * A trial is expressed as a status, not as "active with a later date": the
+   * whole free-trial pattern turns on a merchant's access logic being able to
+   * tell "trying" from "paying".
+   */
   async createSubscription(input: {
     provider: ProviderId;
     customerId: string;
-    planId: string;
+    /** Single-price form. Ignored when `items` is supplied. */
+    planId?: string;
+    items?: { planId: string; quantity?: number; metadata?: Metadata }[];
     authorizationId: string;
     startDate?: string | null;
     quantity?: number;
     invoiceLimit?: number;
+    /** Absolute end of the trial. Takes precedence over `trialPeriodDays`. */
+    trialEnd?: string | null;
+    trialPeriodDays?: number | null;
     providerSubscriptionCode?: string;
     metadata?: Metadata;
   }): Promise<Subscription> {
-    const plan = await this.#storage.plans.byId(input.planId);
-    if (!plan) throw new PayboxError('not_found', `No plan with id ${input.planId}.`);
+    const drafts =
+      input.items && input.items.length > 0
+        ? input.items
+        : input.planId
+          ? [{ planId: input.planId, quantity: input.quantity ?? 1 }]
+          : [];
+    if (drafts.length === 0) {
+      throw new PayboxError('validation_failed', 'A subscription needs at least one price.');
+    }
+
+    const plans: Plan[] = [];
+    for (const draft of drafts) {
+      const plan = await this.#storage.plans.byId(draft.planId);
+      if (!plan) throw new PayboxError('not_found', `No plan with id ${draft.planId}.`);
+      plans.push(plan);
+    }
+
+    const first = plans[0]!;
+    for (const [index, plan] of plans.entries()) {
+      // Providers require one billing cycle per subscription. Accepting a
+      // mismatch would produce a subscription whose renewal date is a lie
+      // about half its prices.
+      if (plan.interval !== first.interval || plan.intervalCount !== first.intervalCount) {
+        throw new PayboxError(
+          'validation_failed',
+          `All prices on a subscription must share a billing interval. ` +
+            `"${plan.name}" is ${plan.interval}/${plan.intervalCount} but ` +
+            `"${first.name}" is ${first.interval}/${first.intervalCount}.`,
+          { details: { index, interval: plan.interval, expected: first.interval } },
+        );
+      }
+      if (plan.currency !== first.currency) {
+        throw new PayboxError(
+          'validation_failed',
+          `All prices on a subscription must share a currency. "${plan.name}" is ` +
+            `${plan.currency} but "${first.name}" is ${first.currency}.`,
+        );
+      }
+    }
 
     const authorization = await this.#storage.authorizations.byId(input.authorizationId);
     if (!authorization) {
@@ -1484,22 +1547,36 @@ export class PaymentEngine {
     this.assertChargeable(authorization);
 
     const now = this.#clock.nowISO();
-    const quantity = input.quantity ?? 1;
+    const startDate = input.startDate ?? now;
+    const quantities = drafts.map((draft) => draft.quantity ?? 1);
+    const amount = plans.reduce(
+      (total, plan, index) => total + plan.amount * (quantities[index] ?? 1),
+      0,
+    );
+
+    const trialEnd = this.#resolveTrialEnd(input.trialEnd, input.trialPeriodDays, startDate);
+    const trialing = trialEnd !== null && Date.parse(trialEnd) > Date.parse(startDate);
+    // Billing begins when the trial ends; without one, immediately.
+    const firstPayment = trialing ? trialEnd : startDate;
+
     const subscription: Subscription = {
       id: this.#ids.next('sub'),
       provider: input.provider,
       providerSubscriptionCode: input.providerSubscriptionCode ?? this.#ids.token(12),
       customerId: input.customerId,
-      planId: plan.id,
+      planId: first.id,
       authorizationId: authorization.id,
-      status: 'active',
+      status: trialing ? 'trialing' : 'active',
       providerStatus: this.#providerStatus(input.provider, 'successful'),
-      quantity,
-      amount: plan.amount * quantity,
-      currency: plan.currency,
-      startDate: input.startDate ?? now,
-      nextPaymentDate: input.startDate ?? now,
-      invoiceLimit: input.invoiceLimit ?? plan.invoiceLimit,
+      quantity: quantities[0] ?? 1,
+      amount,
+      currency: first.currency,
+      startDate,
+      currentPeriodStart: startDate,
+      trialStart: trialing ? startDate : null,
+      trialEnd: trialing ? trialEnd : null,
+      nextPaymentDate: firstPayment,
+      invoiceLimit: input.invoiceLimit ?? first.invoiceLimit,
       invoiceCount: 0,
       emailToken: this.#ids.token(20),
       cancelledAt: null,
@@ -1510,6 +1587,22 @@ export class PaymentEngine {
 
     const { result, events } = await this.#storage.transaction(async (tx) => {
       const created = await tx.subscriptions.insert(subscription);
+      let position = await tx.subscriptionItems.nextPosition();
+      for (const [index, plan] of plans.entries()) {
+        await tx.subscriptionItems.insert({
+          id: this.#ids.next('sui'),
+          provider: created.provider,
+          providerItemId: this.#ids.token(14),
+          subscriptionId: created.id,
+          planId: plan.id,
+          quantity: quantities[index] ?? 1,
+          position: position++,
+          metadata: drafts[index]?.metadata ?? {},
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+
       const event = await this.#appendEvent(tx, {
         type: 'subscription.created',
         provider: created.provider,
@@ -1524,6 +1617,233 @@ export class PaymentEngine {
 
     await this.#bus.emitAll(events);
     return result;
+  }
+
+  /** Absolute trial end from either spelling, or null for no trial. */
+  #resolveTrialEnd(
+    trialEnd: string | null | undefined,
+    trialPeriodDays: number | null | undefined,
+    from: string,
+  ): string | null {
+    if (trialEnd) return trialEnd;
+    if (trialPeriodDays && trialPeriodDays > 0) {
+      return new Date(Date.parse(from) + trialPeriodDays * 24 * 60 * 60_000).toISOString();
+    }
+    return null;
+  }
+
+  async getSubscriptionItems(subscriptionId: string): Promise<SubscriptionItem[]> {
+    return this.#storage.subscriptionItems.listBySubscription(subscriptionId);
+  }
+
+  /**
+   * Change what a subscription bills for, settling the part-period difference.
+   *
+   * Proration is two lines, not one: a **credit** for the time already paid
+   * for on the old shape and a **charge** for the remainder on the new. Both
+   * are raised as pending invoice items, so they land on the next invoice --
+   * which is where a merchant sees them, and why an upgrade does not produce
+   * an immediate surprise bill unless one is asked for.
+   *
+   * `behavior`:
+   *   create_prorations  raise the lines, bill them next cycle (the default)
+   *   none               change the price, charge nothing for the difference
+   *   always_invoice     raise the lines and bill them now
+   */
+  async updateSubscriptionItems(input: {
+    subscriptionId: string;
+    /** The full desired set. Omitted items are removed. */
+    items: { itemId?: string; planId: string; quantity?: number }[];
+    behavior?: ProrationBehavior;
+  }): Promise<{ subscription: Subscription; prorations: InvoiceItem[] }> {
+    const behavior = input.behavior ?? 'create_prorations';
+
+    const subscription = await this.#storage.subscriptions.byId(input.subscriptionId);
+    if (!subscription) {
+      throw new PayboxError('not_found', `No subscription with id ${input.subscriptionId}.`);
+    }
+    if (subscription.status === 'cancelled' || subscription.status === 'completed') {
+      throw new PayboxError(
+        'invalid_state_transition',
+        `Cannot change the prices on a subscription that is ${subscription.status}.`,
+      );
+    }
+
+    const existing = await this.#storage.subscriptionItems.listBySubscription(subscription.id);
+    const plansById = new Map<string, Plan>();
+    const planFor = async (planId: string): Promise<Plan> => {
+      const cached = plansById.get(planId);
+      if (cached) return cached;
+      const plan = await this.#storage.plans.byId(planId);
+      if (!plan) throw new PayboxError('not_found', `No plan with id ${planId}.`);
+      plansById.set(planId, plan);
+      return plan;
+    };
+    for (const item of existing) await planFor(item.planId);
+    for (const desired of input.items) await planFor(desired.planId);
+
+    // The share of the period still to run. A change on the first day
+    // prorates almost the whole period; one on the last day, almost none.
+    const remaining = this.#remainingFraction(subscription);
+    const now = this.#clock.nowISO();
+    const periodEnd = subscription.nextPaymentDate ?? now;
+
+    const keep = new Set<string>();
+    const prorationDrafts: InvoiceItemDraft[] = [];
+    let position = await this.#storage.subscriptionItems.nextPosition();
+
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      for (const desired of input.items) {
+        const plan = await planFor(desired.planId);
+        const quantity = desired.quantity ?? 1;
+        const match = desired.itemId
+          ? existing.find((item) => item.id === desired.itemId)
+          : existing.find((item) => item.planId === desired.planId);
+
+        if (!match) {
+          await tx.subscriptionItems.insert({
+            id: this.#ids.next('sui'),
+            provider: subscription.provider,
+            providerItemId: this.#ids.token(14),
+            subscriptionId: subscription.id,
+            planId: plan.id,
+            quantity,
+            position: position++,
+            metadata: {},
+            createdAt: now,
+            updatedAt: now,
+          });
+          prorationDrafts.push(
+            this.#prorationDraft(subscription, plan, quantity, remaining, now, periodEnd, 1),
+          );
+          continue;
+        }
+
+        keep.add(match.id);
+        const oldPlan = await planFor(match.planId);
+        const unchanged = match.planId === plan.id && match.quantity === quantity;
+        if (unchanged) continue;
+
+        await tx.subscriptionItems.update(match.id, {
+          planId: plan.id,
+          quantity,
+          updatedAt: now,
+        });
+        // Credit what was paid for and will not be used, then charge for what
+        // replaces it. Two lines rather than one net figure, because that is
+        // what an invoice has to show for the number to be checkable.
+        prorationDrafts.push(
+          this.#prorationDraft(
+            subscription, oldPlan, match.quantity, remaining, now, periodEnd, -1,
+          ),
+          this.#prorationDraft(subscription, plan, quantity, remaining, now, periodEnd, 1),
+        );
+      }
+
+      for (const item of existing) {
+        if (keep.has(item.id)) continue;
+        const plan = await planFor(item.planId);
+        await tx.subscriptionItems.delete(item.id);
+        prorationDrafts.push(
+          this.#prorationDraft(
+            subscription, plan, item.quantity, remaining, now, periodEnd, -1,
+          ),
+        );
+      }
+
+      const remainingItems = await tx.subscriptionItems.listBySubscription(subscription.id);
+      if (remainingItems.length === 0) {
+        throw new PayboxError(
+          'validation_failed',
+          'A subscription must keep at least one price. Cancel it instead.',
+        );
+      }
+
+      let amount = 0;
+      for (const item of remainingItems) {
+        amount += (await planFor(item.planId)).amount * item.quantity;
+      }
+      const head = remainingItems[0]!;
+
+      const updated = await tx.subscriptions.update(subscription.id, {
+        planId: head.planId,
+        quantity: head.quantity,
+        amount,
+        updatedAt: now,
+      });
+
+      const event = await this.#appendEvent(tx, {
+        type: 'subscription.updated',
+        provider: updated.provider,
+        resourceId: updated.id,
+        resourceType: 'subscription',
+        data: subscriptionEventData(updated),
+        previousStatus: subscription.status,
+        currentStatus: updated.status,
+      });
+      return { result: updated, events: [event] };
+    });
+
+    await this.#bus.emitAll(events);
+
+    const prorations: InvoiceItem[] = [];
+    if (behavior !== 'none') {
+      for (const draft of prorationDrafts) {
+        // Zero-value lines are noise on an invoice; a change on the last
+        // instant of a period genuinely owes nothing.
+        if (draft.amount === 0) continue;
+        prorations.push(await this.addInvoiceItem(draft));
+      }
+    }
+
+    return { subscription: result, prorations };
+  }
+
+  /** One proration line: `sign` is +1 for a charge, -1 for a credit. */
+  #prorationDraft(
+    subscription: Subscription,
+    plan: Plan,
+    quantity: number,
+    remaining: number,
+    now: string,
+    periodEnd: string,
+    sign: 1 | -1,
+  ): InvoiceItemDraft {
+    const full = plan.amount * quantity;
+    const amount = sign * Math.round(full * remaining);
+    return {
+      provider: subscription.provider,
+      customerId: subscription.customerId,
+      subscriptionId: subscription.id,
+      planId: plan.id,
+      description:
+        sign === 1
+          ? `Remaining time on ${plan.name}`
+          : `Unused time on ${plan.name}`,
+      amount,
+      currency: subscription.currency,
+      quantity,
+      unitAmount: plan.amount,
+      periodStart: now,
+      periodEnd,
+      proration: true,
+    };
+  }
+
+  /**
+   * How much of the current billing period is still to run, as 0..1.
+   *
+   * Clamped at both ends: a clock that has passed the renewal date without the
+   * job having run yet must not produce a negative proration, and a period of
+   * zero length must not divide by zero.
+   */
+  #remainingFraction(subscription: Subscription): number {
+    const start = Date.parse(subscription.currentPeriodStart);
+    const end = Date.parse(subscription.nextPaymentDate ?? subscription.currentPeriodStart);
+    const span = end - start;
+    if (!Number.isFinite(span) || span <= 0) return 0;
+    const left = end - this.#clock.now();
+    return Math.min(1, Math.max(0, left / span));
   }
 
   async transitionSubscription(
@@ -1667,6 +1987,26 @@ export class PaymentEngine {
         await tx.invoiceItems.insert(this.#buildItem(draft, created, now, position++));
       }
 
+      // An invoice raised straight into `pending` -- a subscription renewal --
+      // never passes through `finalizeInvoice`, so it has to sweep here or a
+      // mid-cycle proration would sit pending forever and never be billed.
+      if (status !== 'draft') {
+        for (const pending of await tx.invoiceItems.listPending(
+          customerId,
+          created.subscriptionId,
+        )) {
+          await tx.invoiceItems.update(pending.id, {
+            invoiceId: created.id,
+            position: position++,
+            updatedAt: now,
+          });
+        }
+        const total = await tx.invoiceItems.totalFor(created.id);
+        if (total !== created.amount) {
+          await tx.invoices.update(created.id, { amount: Math.max(0, total), updatedAt: now });
+        }
+      }
+
       // Count the invoice as raised here, in the same transaction, so the
       // invoice_limit check can never double-count a retried job. Drafts do
       // not count: nothing has been billed yet.
@@ -1677,16 +2017,17 @@ export class PaymentEngine {
         });
       }
 
+      const settled = (await tx.invoices.byId(created.id)) ?? created;
       const event = await this.#appendEvent(tx, {
         type: 'invoice.created',
-        provider: created.provider,
-        resourceId: created.id,
+        provider: settled.provider,
+        resourceId: settled.id,
         resourceType: 'invoice',
-        data: invoiceEventData(created),
+        data: invoiceEventData(settled),
         previousStatus: null,
-        currentStatus: created.status,
+        currentStatus: settled.status,
       });
-      return { result: created, events: [event] };
+      return { result: settled, events: [event] };
     });
 
     await this.#bus.emitAll(events);
@@ -1905,6 +2246,35 @@ export class PaymentEngine {
    */
   #invoiceNumber(): string {
     return this.#ids.token(8).toUpperCase().replace(/(.{4})(.{4})/, '$1-$2');
+  }
+
+  /**
+   * Note that a trial is about to end.
+   *
+   * An informational event, not a transition: nothing about the subscription
+   * changes, and the notice is the entire point. Appended to the log like
+   * every other event so it can be replayed and audited.
+   */
+  async announceTrialEnding(subscriptionId: string): Promise<Subscription> {
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const subscription = await tx.subscriptions.byId(subscriptionId);
+      if (!subscription) {
+        throw new PayboxError('not_found', `No subscription with id ${subscriptionId}.`);
+      }
+      const event = await this.#appendEvent(tx, {
+        type: 'subscription.trial_ending',
+        provider: subscription.provider,
+        resourceId: subscription.id,
+        resourceType: 'subscription',
+        data: subscriptionEventData(subscription),
+        previousStatus: subscription.status,
+        currentStatus: subscription.status,
+      });
+      return { result: subscription, events: [event] };
+    });
+
+    await this.#bus.emitAll(events);
+    return result;
   }
 
   async getSubscription(id: string): Promise<Subscription | null> {
@@ -2458,6 +2828,7 @@ function subscriptionEventData(subscription: Subscription): Metadata {
     currency: subscription.currency,
     status: subscription.status,
     next_payment_date: subscription.nextPaymentDate,
+    trial_end: subscription.trialEnd,
   };
 }
 

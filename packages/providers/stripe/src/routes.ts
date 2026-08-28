@@ -15,7 +15,7 @@ import {
   type PaymentSimulator,
   type SubscriptionRunner,
 } from '@paybox/simulator';
-import { expandFormBody } from './form.js';
+import { expandFormBody, formBoolean } from './form.js';
 import { applyExpansions, assertExpandDepth, expandPaths } from './expand.js';
 import { assertStripeCredentials } from './auth.js';
 import { toStripeError } from './errors.js';
@@ -52,6 +52,9 @@ import {
   setupIntentUpdateSchema,
   subscriptionCancelSchema,
   subscriptionCreateSchema,
+  subscriptionItemCreateSchema,
+  subscriptionItemDeleteSchema,
+  subscriptionItemUpdateSchema,
   subscriptionUpdateSchema,
 } from './schemas.js';
 import {
@@ -70,6 +73,7 @@ import {
   serializePrice,
   serializeProduct,
   serializeSubscription,
+  serializeSubscriptionItem,
   serializeCustomer,
   serializePaymentIntent,
   serializePaymentMethod,
@@ -981,12 +985,99 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
   ) {
     const plan = await storage.plans.byId(subscription.planId);
     const invoices = await storage.invoices.listBySubscription(subscription.id);
+    const items = await storage.subscriptionItems.listBySubscription(subscription.id);
+
+    // One lookup per distinct plan and product, not one per item.
+    const plans = new Map<string, NonNullable<typeof plan>>();
+    const products = new Map<string, NonNullable<Awaited<ReturnType<typeof loadProduct>>>>();
+    for (const planId of new Set(items.map((item) => item.planId))) {
+      const found = await storage.plans.byId(planId);
+      if (!found) continue;
+      plans.set(found.id, found);
+      if (found.productId && !products.has(found.productId)) {
+        const product = await storage.products.byId(found.productId);
+        if (product) products.set(product.id, product);
+      }
+    }
+
     return serializeSubscription(subscription, {
       plan,
       product: plan?.productId ? await storage.products.byId(plan.productId) : null,
       customer: await storage.customers.byId(subscription.customerId),
       latestInvoice: invoices.at(-1) ?? null,
+      items,
+      plans,
+      products,
     });
+  }
+
+  /**
+   * `proration_behavior: always_invoice` -- bill the part-period difference
+   * now rather than waiting for the next cycle.
+   *
+   * Raises an invoice, finalises it (which sweeps in the pending proration
+   * lines) and pays it through the ordinary payment path, so an immediate
+   * upgrade charge is an ordinary charge with ordinary events.
+   */
+  async function billProrationsNow(subscriptionId: string, customerId: string): Promise<void> {
+    const now = clock.nowISO();
+    const draft = await engine.createInvoice({
+      provider: PROVIDER,
+      customerId,
+      subscriptionId,
+      currency: (await storage.subscriptions.byId(subscriptionId))?.currency ?? 'USD',
+      periodStart: now,
+      periodEnd: now,
+      dueAt: now,
+      status: 'draft',
+      billingReason: 'subscription_update',
+    });
+    const open = await engine.finalizeInvoice(draft.id);
+
+    // A downgrade can net to a credit, which owes nothing now. Voiding rather
+    // than charging zero keeps the merchant's invoice list honest.
+    if (open.amount === 0) {
+      await engine.transitionInvoice(open.id, 'void');
+      return;
+    }
+
+    const authorization = (await storage.authorizations.listByCustomer(customerId)).find(
+      (candidate) => candidate.reusable && candidate.active,
+    );
+    if (!authorization) return;
+
+    const payment = await engine.createPayment({
+      provider: PROVIDER,
+      amount: open.amount,
+      currency: open.currency,
+      customerId,
+      paymentMethod: authorization.channel,
+      paymentMethodDetails: authorizationDetails(authorization),
+      metadata: { invoice_code: open.providerInvoiceCode, subscription_id: subscriptionId },
+      status: 'pending',
+    });
+    const { outcome } = resolveInstrument(authorization.last4, authorization.channel, {
+      resolver: stripeInstrumentResolver,
+    });
+    const settled = await simulator.apply(payment.id, outcome);
+    await engine.transitionInvoice(
+      open.id,
+      settled.status === 'successful' ? 'success' : 'failed',
+      { paymentId: settled.id },
+    );
+  }
+
+  /** Stripe sends trial ends as unix seconds, or the literal string `now`. */
+  function trialEndFrom(value: number | string | undefined): string | null {
+    if (value === undefined) return null;
+    // `trial_end: now` ends a trial immediately, which is how a merchant
+    // converts someone who chose to start paying early.
+    if (value === 'now') return clock.nowISO();
+    const seconds = Number(value);
+    if (!Number.isFinite(seconds)) {
+      throw new PayboxError('validation_failed', `Invalid trial_end: ${String(value)}.`);
+    }
+    return new Date(seconds * 1000).toISOString();
   }
 
   fastify.post('/v1/subscriptions', async (request, reply) => {
@@ -994,15 +1085,15 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
     const body = subscriptionCreateSchema.parse(request.body);
     const customer = await loadCustomer(body.customer);
 
-    if (body.items.length > 1) {
-      throw new PayboxError(
-        'unsupported_operation',
-        'paybox models one price per subscription; multi-item subscriptions are not ' +
-          'implemented.',
-      );
+    const items = [];
+    for (const entry of body.items) {
+      const plan = await loadPrice(entry.price);
+      items.push({
+        planId: plan.id,
+        quantity: entry.quantity != null ? Number(entry.quantity) : 1,
+        metadata: entry.metadata ?? {},
+      });
     }
-    const item = body.items[0]!;
-    const plan = await loadPrice(item.price);
 
     const authorization = body.default_payment_method
       ? await loadAuthorization(body.default_payment_method)
@@ -1014,12 +1105,16 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
       );
     }
 
+    const trialEnd = trialEndFrom(body.trial_end);
+    const trialDays = body.trial_period_days != null ? Number(body.trial_period_days) : null;
+
     const subscription = await engine.createSubscription({
       provider: PROVIDER,
       customerId: customer.id,
-      planId: plan.id,
+      items,
       authorizationId: authorization.id,
-      ...(item.quantity != null ? { quantity: Number(item.quantity) } : {}),
+      ...(trialEnd ? { trialEnd } : {}),
+      ...(trialDays ? { trialPeriodDays: trialDays } : {}),
       metadata: body.metadata ?? {},
     });
     await subscriptions.start(subscription);
@@ -1052,6 +1147,54 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
     authenticate(request);
     const body = subscriptionUpdateSchema.parse(request.body ?? {});
     const subscription = await loadSubscription(request.params.id);
+
+    // Changing what is billed. `items` is the full desired set, as at Stripe:
+    // an item left out is removed, and the part-period difference is settled
+    // according to `proration_behavior`.
+    if (body.items && body.items.length > 0) {
+      const existing = await storage.subscriptionItems.listBySubscription(subscription.id);
+      const desired = [];
+      for (const entry of body.items) {
+        const match = entry.id
+          ? existing.find((item) => stripeId('si', item.id) === entry.id)
+          : undefined;
+        if (entry.id && !match) {
+          throw new PayboxError('not_found', `No such subscription item: '${entry.id}'.`);
+        }
+        const planId = entry.price ? (await loadPrice(entry.price)).id : match?.planId;
+        if (!planId) {
+          throw new PayboxError('validation_failed', 'Each item needs a `price` or an `id`.');
+        }
+        desired.push({
+          ...(match ? { itemId: match.id } : {}),
+          planId,
+          quantity: entry.quantity != null ? Number(entry.quantity) : (match?.quantity ?? 1),
+        });
+      }
+
+      const { prorations } = await engine.updateSubscriptionItems({
+        subscriptionId: subscription.id,
+        items: desired,
+        ...(body.proration_behavior ? { behavior: body.proration_behavior } : {}),
+      });
+
+      if (body.proration_behavior === 'always_invoice' && prorations.length > 0) {
+        await billProrationsNow(subscription.id, subscription.customerId);
+      }
+    }
+
+    // `trial_end: now` converts a trial immediately.
+    if (body.trial_end !== undefined && subscription.status === 'trialing') {
+      const trialEnd = trialEndFrom(body.trial_end);
+      if (trialEnd) {
+        await storage.subscriptions.update(subscription.id, {
+          trialEnd,
+          nextPaymentDate: trialEnd,
+          updatedAt: clock.nowISO(),
+        });
+        await subscriptions.start(await loadSubscription(request.params.id));
+      }
+    }
 
     if (body.cancel_at_period_end === true && subscription.status === 'active') {
       await engine.transitionSubscription(subscription.id, 'non_renewing', {
@@ -1106,6 +1249,166 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
     if (invoice && invoice.provider === PROVIDER) return invoice;
     throw new PayboxError('not_found', `No such invoice: '${handle}'.`);
   }
+
+  /* ---------------------------------------------------------------- *
+   * Subscription items
+   *
+   * The per-item routes are the same operation as `POST /v1/subscriptions/:id`
+   * with an `items` array -- expressed one item at a time, which is how most
+   * SDK code actually changes a plan. Both funnel through
+   * `updateSubscriptionItems`, so proration cannot behave differently
+   * depending on which door was used.
+   * ---------------------------------------------------------------- */
+
+  async function loadSubscriptionItem(handle: string) {
+    const canonical = handle.replace(/^si_/, 'sui_');
+    const item =
+      (await storage.subscriptionItems.byId(canonical)) ??
+      (await storage.subscriptionItems.byId(handle));
+    if (item && item.provider === PROVIDER) return item;
+    throw new PayboxError('not_found', `No such subscription item: '${handle}'.`);
+  }
+
+  async function decorateSubscriptionItem(
+    item: Awaited<ReturnType<typeof loadSubscriptionItem>>,
+  ) {
+    const plan = await storage.plans.byId(item.planId);
+    return serializeSubscriptionItem(item, {
+      plan,
+      product: plan?.productId ? await storage.products.byId(plan.productId) : null,
+    });
+  }
+
+  /** The current set, expressed the way `updateSubscriptionItems` wants it. */
+  async function currentItems(subscriptionId: string) {
+    const items = await storage.subscriptionItems.listBySubscription(subscriptionId);
+    return items.map((item) => ({
+      itemId: item.id,
+      planId: item.planId,
+      quantity: item.quantity,
+    }));
+  }
+
+  async function applyItemChange(
+    subscription: Awaited<ReturnType<typeof loadSubscription>>,
+    items: { itemId?: string; planId: string; quantity?: number }[],
+    behavior: 'create_prorations' | 'none' | 'always_invoice' | undefined,
+  ) {
+    const { prorations } = await engine.updateSubscriptionItems({
+      subscriptionId: subscription.id,
+      items,
+      ...(behavior ? { behavior } : {}),
+    });
+    if (behavior === 'always_invoice' && prorations.length > 0) {
+      await billProrationsNow(subscription.id, subscription.customerId);
+    }
+  }
+
+  fastify.post('/v1/subscription_items', async (request, reply) => {
+    authenticate(request);
+    const body = subscriptionItemCreateSchema.parse(request.body);
+    const subscription = await loadSubscription(body.subscription);
+    const plan = await loadPrice(body.price);
+    const quantity = body.quantity != null ? Number(body.quantity) : 1;
+
+    const before = new Set(
+      (await storage.subscriptionItems.listBySubscription(subscription.id)).map((i) => i.id),
+    );
+    await applyItemChange(
+      subscription,
+      [...(await currentItems(subscription.id)), { planId: plan.id, quantity }],
+      body.proration_behavior,
+    );
+
+    const after = await storage.subscriptionItems.listBySubscription(subscription.id);
+    const created = after.find((item) => !before.has(item.id)) ?? after.at(-1)!;
+    return reply.send(await decorateSubscriptionItem(created));
+  });
+
+  fastify.post<{ Params: { item: string } }>(
+    '/v1/subscription_items/:item',
+    async (request, reply) => {
+      authenticate(request);
+      const body = subscriptionItemUpdateSchema.parse(request.body ?? {});
+      const item = await loadSubscriptionItem(request.params.item);
+      const subscription = await loadSubscription(stripeId('sub', item.subscriptionId));
+      const plan = body.price ? await loadPrice(body.price) : null;
+
+      const items = (await currentItems(subscription.id)).map((entry) =>
+        entry.itemId === item.id
+          ? {
+              ...entry,
+              planId: plan?.id ?? entry.planId,
+              quantity: body.quantity != null ? Number(body.quantity) : entry.quantity,
+            }
+          : entry,
+      );
+      await applyItemChange(subscription, items, body.proration_behavior);
+
+      return reply.send(await decorateSubscriptionItem(await loadSubscriptionItem(item.id)));
+    },
+  );
+
+  fastify.delete<{ Params: { item: string } }>(
+    '/v1/subscription_items/:item',
+    async (request, reply) => {
+      authenticate(request);
+      const body = subscriptionItemDeleteSchema.parse(request.body ?? {});
+      const item = await loadSubscriptionItem(request.params.item);
+      const subscription = await loadSubscription(stripeId('sub', item.subscriptionId));
+
+      const remaining = (await currentItems(subscription.id)).filter(
+        (entry) => entry.itemId !== item.id,
+      );
+      if (remaining.length === 0) {
+        throw new PayboxError(
+          'validation_failed',
+          'You cannot delete the last subscription item. Cancel the subscription instead.',
+        );
+      }
+      await applyItemChange(subscription, remaining, body.proration_behavior);
+
+      return reply.send({
+        id: stripeId('si', item.id),
+        object: 'subscription_item',
+        deleted: true,
+      });
+    },
+  );
+
+  fastify.get<{ Params: { item: string } }>(
+    '/v1/subscription_items/:item',
+    async (request, reply) => {
+      authenticate(request);
+      return reply.send(
+        await decorateSubscriptionItem(await loadSubscriptionItem(request.params.item)),
+      );
+    },
+  );
+
+  fastify.get<{ Querystring: Record<string, string> }>(
+    '/v1/subscription_items',
+    async (request, reply) => {
+      authenticate(request);
+      const query = listQuerySchema.parse(request.query);
+      const handle = (request.query as { subscription?: string }).subscription;
+      if (!handle) {
+        throw new PayboxError('validation_failed', 'The `subscription` parameter is required.');
+      }
+      const subscription = await loadSubscription(handle);
+      const items = await storage.subscriptionItems.listBySubscription(subscription.id);
+      const data = await Promise.all(
+        items.slice(0, query.limit).map((item) => decorateSubscriptionItem(item)),
+      );
+      return reply.send(
+        list(
+          data,
+          `/v1/subscription_items?subscription=${stripeId('sub', subscription.id)}`,
+          items.length > query.limit,
+        ),
+      );
+    },
+  );
 
   /* ---------------------------------------------------------------- *
    * Invoice lifecycle
@@ -1416,6 +1719,9 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
       authenticate(request);
       const query = listQuerySchema.parse(request.query);
       const customer = query.customer ? await loadCustomer(query.customer) : null;
+      // Stripe's `pending` narrows to items not yet on an invoice, which is
+      // how you inspect what the next bill will pick up.
+      const pending = formBoolean((request.query as { pending?: string }).pending) === true;
       const { page, hasMore } = await paginate(
         query,
         (limit, offset) =>
@@ -1424,6 +1730,7 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
             limit,
             offset,
             ...(customer ? { customerId: customer.id } : {}),
+            ...(pending ? { pending: true } : {}),
           }),
         (item) => stripeId('ii', item.id),
       );

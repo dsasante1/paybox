@@ -11,6 +11,7 @@ import type {
   Product,
   Refund,
   Subscription,
+  SubscriptionItem,
 } from '@paybox/shared';
 import {
   cancellationReason,
@@ -612,6 +613,27 @@ export interface SerializeSubscriptionOptions {
   product?: Product | null;
   customer?: Customer | null;
   latestInvoice?: Invoice | null;
+  /** Every price on the subscription, in order. */
+  items?: SubscriptionItem[];
+  /** Plans for those items, keyed by canonical plan id. */
+  plans?: Map<string, Plan>;
+  products?: Map<string, Product>;
+}
+
+/** One price on a subscription. */
+export function serializeSubscriptionItem(
+  item: SubscriptionItem,
+  options: { plan?: Plan | null; product?: Product | null } = {},
+) {
+  return {
+    id: stripeId('si', item.id),
+    object: 'subscription_item' as const,
+    created: unix(item.createdAt),
+    metadata: item.metadata,
+    price: options.plan ? serializePrice(options.plan, options.product) : null,
+    quantity: item.quantity,
+    subscription: stripeId('sub', item.subscriptionId),
+  };
 }
 
 export function serializeSubscription(
@@ -620,17 +642,32 @@ export function serializeSubscription(
 ) {
   const id = stripeId('sub', subscription.id);
   const periodEnd = subscription.nextPaymentDate ?? subscription.updatedAt;
-  const item = options.plan
-    ? {
-        id: `si_${id.slice(4)}`,
-        object: 'subscription_item' as const,
-        created: unix(subscription.createdAt),
-        metadata: {},
-        price: serializePrice(options.plan, options.product),
-        quantity: subscription.quantity,
-        subscription: id,
-      }
-    : null;
+  const stored = options.items ?? [];
+
+  const items =
+    stored.length > 0
+      ? stored.map((item) => {
+          const plan = options.plans?.get(item.planId) ?? options.plan;
+          return serializeSubscriptionItem(item, {
+            plan,
+            product: plan?.productId ? options.products?.get(plan.productId) : options.product,
+          });
+        })
+      : options.plan
+        ? [
+            // Subscriptions written before items existed still serialise, from
+            // the plan on the row itself.
+            {
+              id: `si_${id.slice(4)}`,
+              object: 'subscription_item' as const,
+              created: unix(subscription.createdAt),
+              metadata: {} as Metadata,
+              price: serializePrice(options.plan, options.product),
+              quantity: subscription.quantity,
+              subscription: id,
+            },
+          ]
+        : [];
 
   return {
     id,
@@ -644,7 +681,9 @@ export function serializeSubscription(
     created: unix(subscription.createdAt),
     currency: subscription.currency.toLowerCase(),
     current_period_end: unix(periodEnd),
-    current_period_start: unix(subscription.startDate),
+    // The period that is running *now*, which is not the subscription's start
+    // date on any cycle after the first.
+    current_period_start: unix(subscription.currentPeriodStart),
     customer: stripeId('cus', subscription.customerId),
     days_until_due: null,
     default_payment_method: stripeId('pm', subscription.authorizationId),
@@ -656,7 +695,7 @@ export function serializeSubscription(
         : null,
     items: {
       object: 'list' as const,
-      data: item ? [item] : [],
+      data: items,
       has_more: false,
       url: `/v1/subscription_items?subscription=${id}`,
     },
@@ -668,12 +707,11 @@ export function serializeSubscription(
     pause_collection: null,
     start_date: unix(subscription.startDate),
     status: toStripeSubscriptionStatus(subscription.status),
-    trial_end: null,
-    trial_start: null,
+    trial_end: subscription.trialEnd ? unix(subscription.trialEnd) : null,
+    trial_start: subscription.trialStart ? unix(subscription.trialStart) : null,
   };
 }
 
-/** One line on an invoice, or a pending item not yet on one. */
 export function serializeInvoiceItem(item: InvoiceItem) {
   return {
     id: stripeId('ii', item.id),

@@ -59,8 +59,10 @@ The **Charge** is different: charges are immutable attempt records, and
 | `GET /stripe/checkout/{id}` | **Emulator-only** | The hosted page; see below. |
 | `POST /v1/products`, `GET /v1/products`, `GET /v1/products/{id}` | **Partially compatible** | No update or delete. |
 | `POST /v1/prices`, `GET /v1/prices`, `GET /v1/prices/{id}` | **Partially compatible** | Recurring prices only. |
-| `POST /v1/subscriptions`, `GET /v1/subscriptions`, `GET /v1/subscriptions/{id}` | **Partially compatible** | One price per subscription. |
-| `POST /v1/subscriptions/{id}` | **Partially compatible** | `cancel_at_period_end` only. |
+| `POST /v1/subscriptions`, `GET /v1/subscriptions`, `GET /v1/subscriptions/{id}` | **Partially compatible** | Multi-item and trials; see below. |
+| `POST /v1/subscriptions/{id}` | **Partially compatible** | `items`, `proration_behavior`, `trial_end`, `cancel_at_period_end`. |
+| `POST /v1/subscription_items`, `GET`/`POST`/`DELETE /v1/subscription_items/{id}` | **Compatible** | |
+| `GET /v1/subscription_items` | **Partially compatible** | `subscription` is required, as at Stripe. |
 | `DELETE /v1/subscriptions/{id}` | **Compatible** | Cancels immediately. |
 | `GET /v1/invoices`, `GET /v1/invoices/{id}` | **Compatible** | |
 | `POST /v1/invoices` | **Partially compatible** | Draft; `collection_method` accepted, not acted on. |
@@ -333,7 +335,32 @@ expected to react.
    Gaps: no `latest_attempt` (paybox has no SetupAttempt object), no `mandate`,
    and `verify_microdeposits` is absent because no bank-debit method is
    implemented.
-16. `expand[]` is honoured on every route, in the query string and in a POST
+16. **A subscription can carry several prices on one cycle**, and every price
+   on it must share an interval and currency -- a mismatch is refused rather
+   than producing a subscription whose renewal date is a lie about half its
+   prices. `subscription.quantity` and `planId` remain the *first* item's, which
+   is what sets the cadence.
+17. **Trials are a status, not a date.** A trialing subscription reports
+   `trialing` and bills nothing until `trial_end`, which is also its first
+   billing date -- so the trial and its first charge can never disagree about
+   when the free period stopped. `customer.subscription.trial_will_end` fires
+   three days ahead, as Stripe documents, and is skipped entirely for a trial
+   shorter than that rather than fired with a date in the past.
+   `trial_end: now` converts immediately.
+18. **Proration is two lines, not one net figure**: a credit for the unused
+   time on the old shape and a charge for the remainder on the new, each
+   `proration: true`, so the arithmetic on the invoice is checkable. All three
+   of Stripe's behaviours work — `create_prorations` (the default) raises
+   pending items that land on the next invoice, `none` changes the price and
+   waives the difference, `always_invoice` bills it now. Two differences: a
+   downgrade that nets to a credit is **voided** rather than charged as zero
+   (paybox has no customer credit balance to carry it into), and there is no
+   `pending_update` / `payment_behavior` flow, so a change always applies
+   immediately.
+19. **`current_period_start` moves with each renewal.** It previously reported
+   the subscription's `start_date`, which was only right during the first
+   cycle. Proration is measured against this window.
+20. `expand[]` is honoured on every route, in the query string and in a POST
    body, on single objects and on `data.` paths in a list. Naming a nested path
    expands the levels above it, as Stripe does, and more than four levels is
    refused. Two differences from Stripe: an id that does not resolve leaves the

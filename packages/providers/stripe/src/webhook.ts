@@ -72,8 +72,12 @@ const EVENT_MAP: Record<string, readonly string[]> = {
   'authorization.attached': ['payment_method.attached'],
   'authorization.detached': ['payment_method.detached'],
   'subscription.created': ['customer.subscription.created'],
+  'subscription.updated': ['customer.subscription.updated'],
   'subscription.non_renewing': ['customer.subscription.updated'],
   'subscription.attention': ['customer.subscription.updated'],
+  // A trial converting to paid is an update, not a creation.
+  'subscription.active': ['customer.subscription.updated'],
+  'subscription.trial_ending': ['customer.subscription.trial_will_end'],
   'subscription.cancelled': ['customer.subscription.deleted'],
   'subscription.completed': ['customer.subscription.deleted'],
   'invoice.created': ['invoice.created'],
@@ -207,11 +211,31 @@ export class StripeWebhookFormatter implements WebhookFormatter {
       if (!subscription) return null;
       const plan = await storage.plans.byId(subscription.planId);
       const invoices = await storage.invoices.listBySubscription(subscription.id);
+      const items = await storage.subscriptionItems.listBySubscription(subscription.id);
+
+      const plans = new Map<string, NonNullable<typeof plan>>();
+      const products = new Map<
+        string,
+        NonNullable<Awaited<ReturnType<typeof storage.products.byId>>>
+      >();
+      for (const planId of new Set(items.map((item) => item.planId))) {
+        const found = await storage.plans.byId(planId);
+        if (!found) continue;
+        plans.set(found.id, found);
+        if (found.productId && !products.has(found.productId)) {
+          const product = await storage.products.byId(found.productId);
+          if (product) products.set(product.id, product);
+        }
+      }
+
       return serializeSubscription(subscription, {
         plan,
         product: plan?.productId ? await storage.products.byId(plan.productId) : null,
         customer: await storage.customers.byId(subscription.customerId),
         latestInvoice: invoices.at(-1) ?? null,
+        items,
+        plans,
+        products,
       });
     }
 

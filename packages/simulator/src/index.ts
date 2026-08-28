@@ -20,6 +20,7 @@ export {
 export {
   SubscriptionRunner,
   SUBSCRIPTION_CHARGE_JOB,
+  SUBSCRIPTION_TRIAL_ENDING_JOB,
   SUBSCRIPTION_INVOICE_JOB,
   type SubscriptionRunnerDeps,
 } from './subscriptions.js';

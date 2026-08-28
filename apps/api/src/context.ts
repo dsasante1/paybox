@@ -17,6 +17,7 @@ import {
   ScenarioRunner,
   SCENARIO_STEP_JOB,
   SUBSCRIPTION_CHARGE_JOB,
+  SUBSCRIPTION_TRIAL_ENDING_JOB,
   SUBSCRIPTION_INVOICE_JOB,
   SubscriptionRunner,
   type SimulatedOutcome,
@@ -220,6 +221,7 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
   scheduler.register(SCENARIO_STEP_JOB, scenarios.handleJob);
   scheduler.register(SUBSCRIPTION_INVOICE_JOB, subscriptions.handleInvoiceJob);
   scheduler.register(SUBSCRIPTION_CHARGE_JOB, subscriptions.handleChargeJob);
+  scheduler.register(SUBSCRIPTION_TRIAL_ENDING_JOB, subscriptions.handleTrialEndingJob);
   scheduler.register(PAYMENT_SIMULATE_JOB, async (job) => {
     const paymentId = String(job.payload.paymentId ?? '');
     const outcome = job.payload.outcome as SimulatedOutcome | undefined;

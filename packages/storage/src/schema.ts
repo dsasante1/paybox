@@ -241,11 +241,27 @@ export interface SubscriptionRow {
   amount: number;
   currency: string;
   start_date: string;
+  current_period_start: string | null;
+  trial_start: string | null;
+  trial_end: string | null;
   next_payment_date: string | null;
   invoice_limit: number;
   invoice_count: number;
   email_token: string;
   cancelled_at: string | null;
+  metadata: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SubscriptionItemRow {
+  id: string;
+  provider: string;
+  provider_item_id: string;
+  subscription_id: string;
+  plan_id: string;
+  quantity: number;
+  position: number;
   metadata: string;
   created_at: string;
   updated_at: string;
@@ -419,6 +435,7 @@ export interface Database {
   products: ProductRow;
   plans: PlanRow;
   subscriptions: SubscriptionRow;
+  subscription_items: SubscriptionItemRow;
   invoices: InvoiceRow;
   invoice_items: InvoiceItemRow;
   subaccounts: SubaccountRow;

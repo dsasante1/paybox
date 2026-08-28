@@ -100,6 +100,10 @@ export function gatewayResponse(status: PaymentStatus, failureCode: string | nul
  * Schema `SubscriptionCreateResponse.data.status` in the pinned OpenAPI spec.
  */
 const SUBSCRIPTION_TO_PAYSTACK: Record<SubscriptionStatus, string> = {
+  // Paystack has no trial concept, so its adapter never produces one -- but
+  // the map must be total, and `active` is what Paystack would report for a
+  // subscription that exists and has not billed yet.
+  trialing: 'active',
   active: 'active',
   non_renewing: 'non-renewing',
   attention: 'attention',

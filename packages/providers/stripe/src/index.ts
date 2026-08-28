@@ -51,6 +51,7 @@ export {
   serializeProduct,
   serializePrice,
   serializeSubscription,
+  serializeSubscriptionItem,
   serializeInvoice,
   serializeInvoiceItem,
   serializeLineItems,

@@ -68,8 +68,15 @@ export type TransferStatus = (typeof TRANSFER_STATUSES)[number];
  * hyphen and the adapter maps to it, the same way it maps `successful` to
  * `success`. `attention` is where a subscription lands when a renewal fails --
  * it is still alive, but the merchant has to do something about it.
+ *
+ * `trialing` is a subscription that exists and will bill, but has not yet.
+ * Modelling it as a status rather than as "active with a future date" is what
+ * lets a merchant's dunning and access logic tell "paying" from "trying" --
+ * which is the distinction the whole free-trial pattern turns on. Paystack has
+ * no trial concept, so its adapter never produces one.
  */
 export const SUBSCRIPTION_STATUSES = [
+  'trialing',
   'active',
   'non_renewing',
   'attention',

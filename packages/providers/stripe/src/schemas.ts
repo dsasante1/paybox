@@ -360,24 +360,58 @@ export const priceCreateSchema = z.object({
   metadata,
 });
 
+/** What to do about the part-period difference when a subscription changes. */
+const prorationBehavior = z
+  .enum(['create_prorations', 'none', 'always_invoice'])
+  .optional();
+
+const subscriptionItem = z.object({
+  /** Present when updating an existing item rather than adding one. */
+  id: z.string().optional(),
+  price: z.string().min(1),
+  quantity: z.union([z.number(), z.string()]).optional(),
+  metadata,
+});
+
 export const subscriptionCreateSchema = z.object({
   customer: z.string().min(1),
-  items: z
-    .array(
-      z.object({
-        price: z.string().min(1),
-        quantity: z.union([z.number(), z.string()]).optional(),
-      }),
-    )
-    .min(1),
+  items: z.array(subscriptionItem).min(1),
   default_payment_method: z.string().optional(),
+  /** Days of free trial from now. Stripe's convenience form of `trial_end`. */
+  trial_period_days: z.union([z.number(), z.string()]).optional(),
+  /** Absolute trial end as unix seconds, or the literal string `now`. */
+  trial_end: z.union([z.number(), z.string()]).optional(),
   metadata,
 });
 
 export const subscriptionUpdateSchema = z.object({
   cancel_at_period_end: formBool,
   default_payment_method: z.string().optional(),
+  /** The full desired set of prices. Items left out are removed. */
+  items: z.array(subscriptionItem.partial({ price: true })).optional(),
+  proration_behavior: prorationBehavior,
+  trial_end: z.union([z.number(), z.string()]).optional(),
   metadata,
+});
+
+/** The dedicated subscription-item routes. */
+export const subscriptionItemCreateSchema = z.object({
+  subscription: z.string().min(1),
+  price: z.string().min(1),
+  quantity: z.union([z.number(), z.string()]).optional(),
+  proration_behavior: prorationBehavior,
+  metadata,
+});
+
+export const subscriptionItemUpdateSchema = z.object({
+  price: z.string().optional(),
+  quantity: z.union([z.number(), z.string()]).optional(),
+  proration_behavior: prorationBehavior,
+  metadata,
+});
+
+export const subscriptionItemDeleteSchema = z.object({
+  proration_behavior: prorationBehavior,
 });
 
 export const subscriptionCancelSchema = z.object({

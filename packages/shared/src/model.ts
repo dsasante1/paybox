@@ -291,15 +291,35 @@ export interface Subscription {
   provider: ProviderId;
   providerSubscriptionCode: string;
   customerId: string;
+  /**
+   * The plan that sets the billing cadence.
+   *
+   * A multi-item subscription has several prices but one cycle -- providers
+   * require every price on a subscription to share an interval -- so this is
+   * the first item's plan and the others are in [[SubscriptionItem]].
+   */
   planId: string;
   /** The stored instrument each renewal debits. */
   authorizationId: string;
   status: SubscriptionStatus;
   providerStatus: string;
+  /** The first item's quantity, kept for single-item subscriptions. */
   quantity: number;
+  /** Sum over the items: each plan's amount times its quantity. */
   amount: number;
   currency: string;
   startDate: string;
+  /**
+   * When the *current* billing period began.
+   *
+   * Distinct from `startDate`, which is when the subscription began. Deriving
+   * one from the other made `current_period_start` wrong on every renewal
+   * after the first, and proration is computed against this window.
+   */
+  currentPeriodStart: string;
+  /** Set while the subscription exists but has not billed yet. */
+  trialStart: string | null;
+  trialEnd: string | null;
   /** Null once the subscription stops renewing. */
   nextPaymentDate: string | null;
   invoiceLimit: number;
@@ -308,6 +328,28 @@ export interface Subscription {
   /** Paystack's token for the customer-facing management link. */
   emailToken: string;
   cancelledAt: string | null;
+  metadata: Metadata;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * One price on a subscription.
+ *
+ * A subscription with a base plan, a per-seat price and a metered add-on is
+ * three of these against one billing cycle -- which is why an amount lives
+ * here rather than only on the subscription, and why changing one mid-cycle is
+ * what proration exists to settle.
+ */
+export interface SubscriptionItem {
+  id: string;
+  provider: ProviderId;
+  providerItemId: string;
+  subscriptionId: string;
+  planId: string;
+  quantity: number;
+  /** Insertion order; the frozen clock gives every item one timestamp. */
+  position: number;
   metadata: Metadata;
   createdAt: string;
   updatedAt: string;

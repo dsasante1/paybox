@@ -624,4 +624,62 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_invoice_items_subscription ON invoice_items (subscription_id);
     `,
   },
+  {
+    id: '0012_subscription_items_and_trials',
+    sql: `
+      -- A subscription can carry several prices, and can begin with a trial.
+      CREATE TABLE subscription_items (
+        id               TEXT PRIMARY KEY,
+        provider         TEXT NOT NULL,
+        provider_item_id TEXT NOT NULL,
+        subscription_id  TEXT NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+        plan_id          TEXT NOT NULL REFERENCES plans(id) ON DELETE RESTRICT,
+        quantity         INTEGER NOT NULL DEFAULT 1 CHECK (quantity > 0),
+        -- Insertion order, for the same reason invoice_items carries one: the
+        -- frozen clock gives every item on a subscription one timestamp.
+        position         INTEGER NOT NULL DEFAULT 0,
+        metadata         TEXT NOT NULL DEFAULT '{}',
+        created_at       TEXT NOT NULL,
+        updated_at       TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX idx_subscription_items_provider_id
+        ON subscription_items (provider, provider_item_id);
+      CREATE INDEX idx_subscription_items_subscription
+        ON subscription_items (subscription_id);
+
+      -- Trial window. Null on both means the subscription bills from day one.
+      ALTER TABLE subscriptions ADD COLUMN trial_start TEXT;
+      ALTER TABLE subscriptions ADD COLUMN trial_end TEXT;
+
+      -- When the *current* period began.
+      --
+      -- start_date is when the subscription began, which is a different thing
+      -- from the third month's period start -- reporting the former as the
+      -- latter made current_period_start wrong on every renewal after the
+      -- first.
+      ALTER TABLE subscriptions ADD COLUMN current_period_start TEXT;
+      UPDATE subscriptions SET current_period_start = start_date;
+
+      -- Backfill one item per existing subscription, so a row written before
+      -- this migration reads the same as one written after it. The id is
+      -- derived from the subscription's rather than generated, which keeps the
+      -- backfill deterministic and unique without a random source.
+      INSERT INTO subscription_items (
+        id, provider, provider_item_id, subscription_id, plan_id, quantity,
+        position, metadata, created_at, updated_at
+      )
+      SELECT
+        'sui_' || substr(id, 5),
+        provider,
+        'si_' || substr(id, 5),
+        id,
+        plan_id,
+        quantity,
+        0,
+        '{}',
+        created_at,
+        updated_at
+      FROM subscriptions;
+    `,
+  },
 ];

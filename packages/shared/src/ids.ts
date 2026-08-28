@@ -20,6 +20,7 @@ export const ID_PREFIXES = [
   'pln', // plan
   'prd', // product
   'sub', // subscription
+  'sui', // subscription item
   'inv', // invoice
   'ivi', // invoice line item
   'sac', // subaccount

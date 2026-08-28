@@ -94,6 +94,9 @@ const TRANSFER_TRANSITIONS: Readonly<Record<TransferStatus, readonly TransferSta
 const SUBSCRIPTION_TRANSITIONS: Readonly<
   Record<SubscriptionStatus, readonly SubscriptionStatus[]>
 > = {
+  // A trial ends by billing (active), or by the customer leaving before it
+  // does. It cannot go to `attention`: nothing has been charged to fail.
+  trialing: ['active', 'non_renewing', 'cancelled', 'completed'],
   active: ['non_renewing', 'attention', 'completed', 'cancelled'],
   non_renewing: ['completed', 'cancelled', 'active'],
   attention: ['active', 'non_renewing', 'completed', 'cancelled'],
@@ -203,9 +206,15 @@ export function assertInvoiceTransition(from: InvoiceStatus, to: InvoiceStatus):
   );
 }
 
-/** A subscription only renews while it is in one of these states. */
+/**
+ * A subscription only renews while it is in one of these states.
+ *
+ * `trialing` counts: the trial's end *is* its next billing date, and a trial
+ * that stopped being scheduled would silently never convert -- which is the
+ * one thing a free-trial integration exists to test.
+ */
 export function isRenewable(status: SubscriptionStatus): boolean {
-  return status === 'active' || status === 'attention';
+  return status === 'active' || status === 'attention' || status === 'trialing';
 }
 
 /**

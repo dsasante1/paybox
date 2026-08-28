@@ -20,6 +20,13 @@ import { authorizationChargeDetails, authorizationOutcome } from './authorizatio
 export const SUBSCRIPTION_INVOICE_JOB = 'subscription.invoice';
 /** Debit the instrument for an invoice that is now due. */
 export const SUBSCRIPTION_CHARGE_JOB = 'subscription.charge';
+/**
+ * Warn that a trial is about to end.
+ *
+ * Its own job because the notice genuinely arrives days before anything is
+ * billed, and a merchant's "your trial ends soon" email is built around it.
+ */
+export const SUBSCRIPTION_TRIAL_ENDING_JOB = 'subscription.trial_ending';
 
 /**
  * How far ahead of the debit an invoice is raised, per provider.
@@ -36,6 +43,15 @@ export const SUBSCRIPTION_CHARGE_JOB = 'subscription.charge';
 export type InvoiceLeadTimes = Partial<Record<ProviderId, number>>;
 
 const DEFAULT_INVOICE_LEAD_MS = 3 * 24 * 60 * 60_000;
+
+/**
+ * How far ahead of a trial's end the warning fires.
+ *
+ * Three days, which is what Stripe documents for
+ * `customer.subscription.trial_will_end`. A trial shorter than that gets no
+ * warning rather than one dated in the past.
+ */
+const TRIAL_WARNING_LEAD_MS = 3 * 24 * 60 * 60_000;
 
 export interface SubscriptionRunnerDeps {
   storage: Storage;
@@ -82,8 +98,32 @@ export class SubscriptionRunner {
   /** Schedule the first billing cycle for a freshly created subscription. */
   async start(subscription: Subscription): Promise<void> {
     if (!subscription.nextPaymentDate) return;
+    await this.#scheduleTrialWarning(subscription);
     await this.#scheduleCycle(subscription.id, subscription.nextPaymentDate, subscription.provider);
   }
+
+  /** Fire the "your trial ends soon" notice, if there is room for one. */
+  async #scheduleTrialWarning(subscription: Subscription): Promise<void> {
+    if (!subscription.trialEnd) return;
+    const warnAt = Date.parse(subscription.trialEnd) - TRIAL_WARNING_LEAD_MS;
+    // A trial shorter than the lead gets no warning rather than one dated in
+    // the past, which would fire immediately and mean nothing.
+    if (warnAt <= this.#clock.now()) return;
+    await this.#enqueue(
+      SUBSCRIPTION_TRIAL_ENDING_JOB,
+      { subscriptionId: subscription.id },
+      new Date(warnAt).toISOString(),
+      `subscription:${subscription.id}`,
+    );
+  }
+
+  handleTrialEndingJob = async (job: Job): Promise<void> => {
+    const subscriptionId = String(job.payload.subscriptionId ?? '');
+    if (!subscriptionId) return;
+    const subscription = await this.#storage.subscriptions.byId(subscriptionId);
+    if (!subscription || subscription.status !== 'trialing') return;
+    await this.#engine.announceTrialEnding(subscription.id);
+  };
 
   /**
    * Raise the invoice for the upcoming debit.
@@ -114,6 +154,15 @@ export class SubscriptionRunner {
 
     let subscription = await this.#storage.subscriptions.byId(subscriptionId);
     if (!subscription || !isRenewable(subscription.status)) return;
+
+    // The trial's end *is* its first billing date. Converting here rather than
+    // on a timer of its own is what stops a trial and its first charge ever
+    // disagreeing about when the free period stopped.
+    if (subscription.status === 'trialing') {
+      subscription = await this.#engine.transitionSubscription(subscription.id, 'active', {
+        nextPaymentDate: subscription.nextPaymentDate,
+      });
+    }
 
     const plan = await this.#storage.plans.byId(subscription.planId);
     if (!plan) return;
@@ -174,27 +223,36 @@ export class SubscriptionRunner {
       throw new PayboxError('not_found', `No plan with id ${subscription.planId}.`);
     }
     const periodEnd = addInterval(dueAt, plan.interval, plan.intervalCount);
+
+    // One line per price on the subscription. A real line rather than one
+    // synthesised at serialisation time, so a renewal invoice and a hand-built
+    // one read identically -- and so a three-price subscription bills as three
+    // lines rather than one opaque total.
+    const items = await this.#storage.subscriptionItems.listBySubscription(subscription.id);
+    const lines = [];
+    for (const item of items) {
+      const itemPlan = item.planId === plan.id ? plan : await this.#storage.plans.byId(item.planId);
+      if (!itemPlan) continue;
+      lines.push({
+        planId: itemPlan.id,
+        description: itemPlan.name,
+        unitAmount: itemPlan.amount,
+        quantity: item.quantity,
+        currency: subscription.currency,
+        periodStart: dueAt,
+        periodEnd,
+        subscriptionId: subscription.id,
+        customerId: subscription.customerId,
+        provider: subscription.provider,
+      });
+    }
+
     return this.#engine.createInvoice({
       subscriptionId: subscription.id,
       periodStart: dueAt,
       periodEnd,
       dueAt,
-      // A real line rather than one synthesised at serialisation time, so a
-      // renewal invoice and a hand-built one read identically.
-      items: [
-        {
-          planId: plan.id,
-          description: plan.name,
-          unitAmount: plan.amount,
-          quantity: subscription.quantity,
-          currency: subscription.currency,
-          periodStart: dueAt,
-          periodEnd,
-          subscriptionId: subscription.id,
-          customerId: subscription.customerId,
-          provider: subscription.provider,
-        },
-      ],
+      ...(lines.length > 0 ? { items: lines } : { amount: subscription.amount }),
     });
   }
 
@@ -243,6 +301,11 @@ export class SubscriptionRunner {
     const next = addInterval(dueAt, interval, intervalCount);
     await this.#storage.subscriptions.update(current.id, {
       nextPaymentDate: next,
+      // The period that just started runs from this cycle's due date. Leaving
+      // it at the subscription's original start date made
+      // `current_period_start` wrong on every renewal after the first, and
+      // proration is measured against this window.
+      currentPeriodStart: dueAt,
       updatedAt: this.#clock.nowISO(),
     });
     await this.#scheduleCycle(current.id, next, current.provider);

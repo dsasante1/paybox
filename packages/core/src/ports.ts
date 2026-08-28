@@ -22,6 +22,7 @@ import type {
   Split,
   Subaccount,
   Subscription,
+  SubscriptionItem,
   SubscriptionStatus,
   Transfer,
   TransferStatus,
@@ -288,6 +289,19 @@ export interface SubscriptionRepository {
   ): Promise<Page<Subscription>>;
 }
 
+export interface SubscriptionItemRepository {
+  insert(item: SubscriptionItem): Promise<SubscriptionItem>;
+  byId(id: string): Promise<SubscriptionItem | null>;
+  byProviderItemId(provider: ProviderId, id: string): Promise<SubscriptionItem | null>;
+  /** In insertion order, so a subscription's prices read as they were added. */
+  listBySubscription(subscriptionId: string): Promise<SubscriptionItem[]>;
+  /** Batch form of `listBySubscription`, keyed by subscription id. */
+  listBySubscriptions(ids: readonly string[]): Promise<Map<string, SubscriptionItem[]>>;
+  update(id: string, patch: Partial<SubscriptionItem>): Promise<SubscriptionItem>;
+  delete(id: string): Promise<void>;
+  nextPosition(): Promise<number>;
+}
+
 export interface InvoiceRepository {
   insert(invoice: Invoice): Promise<Invoice>;
   byId(id: string): Promise<Invoice | null>;
@@ -452,6 +466,7 @@ export interface Storage {
   readonly products: ProductRepository;
   readonly plans: PlanRepository;
   readonly subscriptions: SubscriptionRepository;
+  readonly subscriptionItems: SubscriptionItemRepository;
   readonly invoices: InvoiceRepository;
   readonly invoiceItems: InvoiceItemRepository;
   readonly subaccounts: SubaccountRepository;
