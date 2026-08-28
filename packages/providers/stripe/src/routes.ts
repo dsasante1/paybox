@@ -15,6 +15,7 @@ import {
   type SubscriptionRunner,
 } from '@paybox/simulator';
 import { expandFormBody } from './form.js';
+import { applyExpansions, assertExpandDepth, expandPaths } from './expand.js';
 import { assertStripeCredentials } from './auth.js';
 import { toStripeError } from './errors.js';
 import { stripeInstrumentResolver } from './instruments.js';
@@ -272,6 +273,81 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
       country: 'US',
     };
   }
+
+  /* ---------------------------------------------------------------- *
+   * expand[]
+   * ---------------------------------------------------------------- */
+
+  /**
+   * Resolve one Stripe id to the object it names.
+   *
+   * Prefix-dispatched, because that is genuinely how Stripe ids work: the
+   * prefix is the type. A handle that does not resolve returns null and the
+   * caller leaves the string alone -- see `ExpandLoader`.
+   */
+  async function loadExpandable(handle: string): Promise<unknown | null> {
+    try {
+      if (handle.startsWith('cus_')) return serializeCustomer(await loadCustomer(handle));
+      if (handle.startsWith('pi_')) return await decorate(await loadPayment(handle));
+      if (handle.startsWith('ch_')) return await decorateCharge(await loadPayment(handle));
+      if (handle.startsWith('pm_')) return serializePaymentMethod(await loadAuthorization(handle));
+      if (handle.startsWith('prod_')) return serializeProduct(await loadProduct(handle));
+      if (handle.startsWith('price_')) {
+        const plan = await loadPrice(handle);
+        return serializePrice(plan, plan.productId ? await storage.products.byId(plan.productId) : null);
+      }
+      if (handle.startsWith('sub_')) return await decorateSubscription(await loadSubscription(handle));
+      if (handle.startsWith('in_')) return await decorateInvoice(await loadInvoice(handle));
+      if (handle.startsWith('re_')) {
+        const canonical = handle.replace(/^re_/, 'ref_');
+        const refund = (await storage.refunds.byId(canonical)) ?? (await storage.refunds.byId(handle));
+        if (!refund) return null;
+        return serializeRefund(refund, await storage.payments.byId(refund.paymentId));
+      }
+      return null;
+    } catch {
+      // An unresolvable id is not an error: expansion asks for more detail,
+      // and failing to supply it must never turn a 200 into a 404.
+      return null;
+    }
+  }
+
+  const requestedExpansions = (request: FastifyRequest): string[] => [
+    ...expandPaths(request.body),
+    ...expandPaths(request.query),
+  ];
+
+  /**
+   * Reject an over-deep `expand[]` before the handler does any work.
+   *
+   * The check has to happen here rather than at serialisation time: an error
+   * thrown from `preSerialization` runs after the handler has already produced
+   * a payload, and Fastify answers it from its default serialiser rather than
+   * this plugin's -- which would hand a Stripe client a Fastify-shaped error.
+   * Validating a bad request up front is what a real API does anyway.
+   */
+  fastify.addHook('preValidation', async (request) => {
+    assertExpandDepth(requestedExpansions(request));
+  });
+
+  /**
+   * Apply `expand[]` to every JSON response this plugin produces.
+   *
+   * A `preSerialization` hook rather than a call in each of forty handlers:
+   * the payload is still a plain object at this point, so one walk covers the
+   * whole surface and no route can forget to honour the parameter. Hooks added
+   * inside a plugin apply to that plugin's routes only, which is exactly the
+   * encapsulation this adapter is registered for.
+   */
+  fastify.addHook('preSerialization', async (request, reply, payload) => {
+    if (payload === null || typeof payload !== 'object') return payload;
+    // An error envelope has no ids worth expanding, and walking it would only
+    // risk turning a clean 400 into something else.
+    if (reply.statusCode >= 400) return payload;
+    const paths = requestedExpansions(request);
+    if (paths.length === 0) return payload;
+    return applyExpansions(payload, paths, loadExpandable);
+  });
 
   /* ---------------------------------------------------------------- *
    * PaymentIntents

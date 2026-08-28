@@ -283,4 +283,11 @@ expected to react.
    That is what Stripe returns before one exists.
 13. A customer created without an email gets a synthetic local address, because
    paybox keys customers on email and Stripe does not require one.
-14. `expand[]` is parsed and ignored. Nothing is expanded.
+14. `expand[]` is honoured on every route, in the query string and in a POST
+   body, on single objects and on `data.` paths in a list. Naming a nested path
+   expands the levels above it, as Stripe does, and more than four levels is
+   refused. Two differences from Stripe: an id that does not resolve leaves the
+   string in place rather than erroring, and a path naming a field paybox does
+   not model is a no-op rather than "This property cannot be expanded" -- these
+   objects are a documented subset, and erroring on the difference would break
+   integrations without teaching anything.
