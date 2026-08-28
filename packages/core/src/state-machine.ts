@@ -49,9 +49,22 @@ const PAYMENT_TRANSITIONS: Readonly<Record<PaymentStatus, readonly PaymentStatus
   refunded: [],
 };
 
+/**
+ * Refund lifecycle.
+ *
+ *   pending ──> processing ──┬─> successful
+ *      │            │        └─> failed
+ *      │            └─> needs_attention ──> processing | successful | failed
+ *      └─> needs_attention
+ *
+ * `needs_attention` is recoverable: supplying bank details puts the refund
+ * back on the processing path. Modelling it as terminal would make the
+ * recovery flow -- the one a merchant actually has to build -- untestable.
+ */
 const REFUND_TRANSITIONS: Readonly<Record<RefundStatus, readonly RefundStatus[]>> = {
-  pending: ['processing', 'successful', 'failed'],
-  processing: ['successful', 'failed'],
+  pending: ['processing', 'needs_attention', 'successful', 'failed'],
+  processing: ['needs_attention', 'successful', 'failed'],
+  needs_attention: ['processing', 'successful', 'failed'],
   successful: [],
   failed: [],
 };

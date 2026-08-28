@@ -31,7 +31,24 @@ export const TERMINAL_STATUSES: ReadonlySet<PaymentStatus> = new Set([
   'refunded',
 ]);
 
-export const REFUND_STATUSES = ['pending', 'processing', 'successful', 'failed'] as const;
+/**
+ * Refund lifecycle.
+ *
+ * `needs_attention` is Paystack's `needs-attention`: the processor could not
+ * find an account to credit and the merchant must supply bank details before
+ * the refund can proceed. It is a real, recoverable state with its own webhook
+ * and its own retry endpoint -- not an error.
+ *
+ * Canonical spelling is snake_case; the adapter hyphenates. `successful` maps
+ * to Paystack's `processed`.
+ */
+export const REFUND_STATUSES = [
+  'pending',
+  'processing',
+  'needs_attention',
+  'successful',
+  'failed',
+] as const;
 export type RefundStatus = (typeof REFUND_STATUSES)[number];
 
 export const TRANSFER_STATUSES = [

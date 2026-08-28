@@ -68,7 +68,7 @@ const FEE_RATE: Record<string, number> = {
  * `emulatedFee`: present and internally consistent, with no authority. Do not
  * reconcile against it.
  */
-const TRANSFER_FEE: Record<string, number> = {
+const DEFAULT_TRANSFER_FEE: Record<string, number> = {
   NGN: 1_000,
   GHS: 800,
   ZAR: 300,
@@ -76,9 +76,14 @@ const TRANSFER_FEE: Record<string, number> = {
   USD: 100,
 };
 
-export function emulatedTransferFee(currency: string, enabled = true): number {
+export function emulatedTransferFee(
+  currency: string,
+  enabled = true,
+  schedule: Record<string, number> = DEFAULT_TRANSFER_FEE,
+): number {
   if (!enabled) return 0;
-  return TRANSFER_FEE[currency.toUpperCase()] ?? 1_000;
+  const code = currency.toUpperCase();
+  return schedule[code] ?? DEFAULT_TRANSFER_FEE[code] ?? 1_000;
 }
 
 export function emulatedFee(amount: number, currency: string, enabled = true): number {
@@ -308,8 +313,21 @@ export function serializeRefund(refund: Refund, payment: Payment | null) {
     merchant_note: refund.reason,
     created_at: refund.createdAt,
     updated_at: refund.updatedAt,
-    status: refund.status === 'successful' ? 'processed' : refund.status,
+    status: toPaystackRefundStatus(refund.status),
+    refund_account_details: refund.accountDetails,
   };
+}
+
+/**
+ * Canonical refund status -> Paystack's.
+ *
+ * Two differ: `successful` is `processed` there, and `needs_attention` is
+ * hyphenated. The rest are already the same word.
+ */
+function toPaystackRefundStatus(status: Refund['status']): string {
+  if (status === 'successful') return 'processed';
+  if (status === 'needs_attention') return 'needs-attention';
+  return status;
 }
 
 export function serializeCustomer(customer: Customer) {

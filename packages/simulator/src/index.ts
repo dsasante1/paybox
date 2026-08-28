@@ -2,6 +2,7 @@ export * from './instruments.js';
 export {
   PaymentSimulator,
   PAYMENT_SIMULATE_JOB,
+  REFUND_SETTLE_JOB,
   type SimulationOptions,
 } from './simulator.js';
 export {

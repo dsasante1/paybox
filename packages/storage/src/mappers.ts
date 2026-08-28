@@ -151,6 +151,7 @@ export const toRefund = (row: RefundRow): Refund => ({
   status: row.status as RefundStatus,
   providerStatus: row.provider_status,
   reason: row.reason,
+  accountDetails: row.account_details ? readJson(row.account_details) : null,
   metadata: readJson(row.metadata),
   createdAt: row.created_at,
   updatedAt: row.updated_at,
@@ -166,6 +167,7 @@ export const fromRefund = (refund: Refund): RefundRow => ({
   status: refund.status,
   provider_status: refund.providerStatus,
   reason: refund.reason,
+  account_details: refund.accountDetails ? writeJson(refund.accountDetails) : null,
   metadata: writeJson(refund.metadata),
   created_at: refund.createdAt,
   updated_at: refund.updatedAt,
@@ -176,6 +178,9 @@ export function refundPatch(patch: Partial<Refund>): Partial<RefundRow> {
   if (patch.status !== undefined) out.status = patch.status;
   if (patch.providerStatus !== undefined) out.provider_status = patch.providerStatus;
   if (patch.reason !== undefined) out.reason = patch.reason;
+  if (patch.accountDetails !== undefined) {
+    out.account_details = patch.accountDetails ? writeJson(patch.accountDetails) : null;
+  }
   if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
   if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
   return out;

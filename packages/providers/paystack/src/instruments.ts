@@ -22,7 +22,25 @@ interface PublishedInstrument extends InstrumentResolution {
   /** Digits only, as written in Paystack's documentation. */
   digits: string;
   label: string;
+  /**
+   * The OTP this instrument expects, where Paystack documents a specific one.
+   *
+   * Defaults to `123456` -- the value they publish for their card flows --
+   * when absent.
+   */
+  otp?: string;
+  /** How a refund against this instrument settles. */
+  refund?: RefundOutcome;
 }
+
+/**
+ * What a refund against a given instrument does.
+ *
+ * Paystack publishes cards whose *charge* succeeds but whose *refund* takes a
+ * particular path, so that a merchant can rehearse the recovery flow. Mapped
+ * to the canonical refund statuses.
+ */
+export type RefundOutcome = 'successful' | 'failed' | 'needs_attention';
 
 const CARDS: readonly PublishedInstrument[] = [
   {
@@ -84,13 +102,15 @@ const CARDS: readonly PublishedInstrument[] = [
     digits: '4084080000671803',
     label: 'Charges, then fails on refund',
     outcome: 'success',
-    description: 'Paystack test card: charge succeeds (its refund failure is not modelled)',
+    description: 'Paystack test card: charge succeeds, refund fails',
+    refund: 'failed',
   },
   {
     digits: '4084080000671902',
     label: 'Charges, then refund needs attention',
     outcome: 'success',
-    description: 'Paystack test card: charge succeeds (its refund outcome is not modelled)',
+    description: 'Paystack test card: charge succeeds, refund needs bank details',
+    refund: 'needs_attention',
   },
 ];
 
@@ -108,12 +128,12 @@ const MOBILE_MONEY: readonly PublishedInstrument[] = [
     description: 'Paystack test mobile money: M-Pesa',
   },
   {
-    // Paystack pairs this one with OTP 1234, where its card flow uses 123456.
-    // paybox accepts 123456 everywhere; docs/paystack.md notes the difference.
     digits: '0700000000',
     label: 'Orange (CIV) — OTP',
     outcome: 'authentication_required',
-    description: 'Paystack test mobile money: Orange CIV, requires an OTP',
+    description: 'Paystack test mobile money: Orange CIV, requires OTP 1234',
+    // Paystack pairs this number with 1234, where their card flows use 123456.
+    otp: '1234',
   },
 ];
 
@@ -146,3 +166,37 @@ export const paystackInstrumentResolver: InstrumentResolver = (
   const local = BY_DIGITS.get(withoutCountryCode);
   return local ? { outcome: local.outcome, description: local.description } : null;
 };
+
+
+/** The default OTP, used by every instrument that does not publish its own. */
+export const DEFAULT_TEST_OTP = '123456';
+
+/**
+ * The OTP a parked charge expects.
+ *
+ * Looked up from whatever identifier the payment retained. Mobile money keeps
+ * the full number, so its instrument is findable; a card keeps only its last
+ * four by design, so it falls back to the default -- which is what Paystack
+ * documents for every one of their card flows anyway.
+ */
+export function expectedOtp(identifier: string | null | undefined): string {
+  if (!identifier) return DEFAULT_TEST_OTP;
+  const digits = identifier.replace(/\D/g, '');
+  const local = digits.replace(/^(?:00)?(?:233|234|254|225)/, '0');
+  const match = BY_DIGITS.get(digits) ?? BY_DIGITS.get(local);
+  return match?.otp ?? DEFAULT_TEST_OTP;
+}
+
+/**
+ * How a refund against this payment's instrument settles.
+ *
+ * Matched on the last four, because that is all a settled payment retains --
+ * and Paystack's two refund-outcome cards have distinct suffixes, so four
+ * digits are enough to tell them apart.
+ */
+export function paystackRefundOutcome(last4: string | null | undefined): RefundOutcome {
+  if (!last4) return 'successful';
+  const suffix = last4.replace(/\D/g, '').slice(-4);
+  const match = [...CARDS, ...MOBILE_MONEY].find((i) => i.digits.slice(-4) === suffix);
+  return match?.refund ?? 'successful';
+}

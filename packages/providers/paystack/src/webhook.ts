@@ -36,6 +36,7 @@ const EVENT_MAP: Record<string, string> = {
   // that fails is a thing integrations have to handle.
   'refund.created': 'refund.pending',
   'refund.processing': 'refund.processing',
+  'refund.needs_attention': 'refund.needs-attention',
   'refund.successful': 'refund.processed',
   'refund.failed': 'refund.failed',
   'transfer.successful': 'transfer.success',

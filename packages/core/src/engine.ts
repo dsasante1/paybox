@@ -399,6 +399,7 @@ export class PaymentEngine {
         status,
         providerStatus: status,
         reason: input.reason ?? null,
+        accountDetails: null,
         metadata: input.metadata ?? {},
         createdAt: now,
         updatedAt: now,
@@ -429,7 +430,7 @@ export class PaymentEngine {
   async transitionRefund(
     refundId: string,
     to: RefundStatus,
-    options: { reason?: string | null } = {},
+    options: { reason?: string | null; accountDetails?: Metadata | null } = {},
   ): Promise<Refund> {
     const { result, events } = await this.#storage.transaction(async (tx) => {
       const refund = await tx.refunds.byId(refundId);
@@ -444,6 +445,9 @@ export class PaymentEngine {
         providerStatus: to,
         updatedAt: now,
         ...(options.reason !== undefined ? { reason: options.reason } : {}),
+        ...(options.accountDetails !== undefined
+          ? { accountDetails: options.accountDetails }
+          : {}),
       });
 
       const emitted: PayboxEvent[] = [

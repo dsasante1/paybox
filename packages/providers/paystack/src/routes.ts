@@ -12,6 +12,7 @@ import type { PaymentEngine, Storage } from '@paybox/core';
 import type { SubscriptionRunner } from '@paybox/simulator';
 import {
   PAYMENT_SIMULATE_JOB,
+  REFUND_SETTLE_JOB,
   maskInstrument,
   outcomeFromMetadata,
   resolveInstrument,
@@ -34,6 +35,7 @@ import {
   planCreateSchema,
   planUpdateSchema,
   recipientSchema,
+  refundRetrySchema,
   refundSchema,
   submitBirthdaySchema,
   submitOtpSchema,
@@ -50,6 +52,7 @@ import {
 } from './schemas.js';
 import {
   emulatedTransferFee,
+  fail,
   numericTransactionId,
   ok,
   serializeCustomer,
@@ -69,7 +72,11 @@ import { assertPaystackCredentials } from './auth.js';
 import { renderCheckoutPage, renderCheckoutResult } from './checkout.js';
 import { fromPaystackStatus, toPaystackStatus } from './status.js';
 import { paystackAuthorizationMinter } from './authorization.js';
-import { paystackInstrumentResolver } from './instruments.js';
+import {
+  expectedOtp,
+  paystackInstrumentResolver,
+  paystackRefundOutcome,
+} from './instruments.js';
 
 export interface PaystackPluginOptions {
   engine: PaymentEngine;
@@ -85,6 +92,8 @@ export interface PaystackPluginOptions {
   basePath: string;
   allowAnyKey?: boolean;
   includeFees?: boolean;
+  /** Transfer fee per currency, in minor units. See PayboxConfig.balance. */
+  transferFee?: Record<string, number>;
   /**
    * When true, a charge whose test instrument implies an outcome plays that
    * outcome out automatically after a short delay, the way a real mobile-money
@@ -710,8 +719,21 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
    * test instrument leaves it in.
    * ---------------------------------------------------------------- */
 
-  /** The OTP the emulator accepts. Any other value fails the charge. */
-  const VALID_OTP = '123456';
+  /**
+   * The OTP a given charge accepts.
+   *
+   * Most instruments use `123456`, which is what Paystack publishes for their
+   * card flows. Their Orange CIV mobile-money number uses `1234` instead, so
+   * the expected value is looked up from whatever identifier the payment
+   * retained rather than being a single constant.
+   */
+  function otpFor(payment: Payment): string {
+    const details = payment.paymentMethodDetails;
+    const identifier =
+      typeof details.phone === 'string' ? details.phone : (details.last4 as string | undefined);
+    return expectedOtp(identifier);
+  }
+
   const VALID_PIN = '1234';
 
   async function requirePendingCharge(reference: string): Promise<Payment> {
@@ -787,7 +809,7 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
     // they are different `gateway_response` strings and different failure
     // codes, and conflating them would misreport why the charge died.
     const settled =
-      body.otp === VALID_OTP
+      body.otp === otpFor(payment)
         ? await simulator.apply(payment.id, 'success')
         : await simulator.apply(payment.id, 'authentication_failed');
     return reply.send(
@@ -895,11 +917,88 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
       amount: body.amount,
       reason: body.customer_note ?? body.merchant_note ?? null,
     });
-    // Paystack queues refunds rather than settling them inline, so we do too.
+
+    // Paystack queues refunds rather than settling them inline, so we do too --
+    // and then actually settle them, driven by the instrument behind the
+    // payment. Two of Paystack's published cards exist precisely to send a
+    // refund down the failed and needs-attention paths.
+    await scheduleRefundOutcome(refund.id, payment);
+
     return reply
       .status(200)
       .send(ok('Refund has been queued for processing', serializeRefund(refund, payment)));
   });
+
+  /** Play a queued refund out over virtual time, as the processor would. */
+  async function scheduleRefundOutcome(refundId: string, payment: Payment): Promise<void> {
+    if (!autoAdvance) return;
+    const last4 = payment.paymentMethodDetails.last4;
+    const outcome = paystackRefundOutcome(typeof last4 === 'string' ? last4 : null);
+    await storage.jobs.enqueue({
+      id: ids.next('job'),
+      kind: REFUND_SETTLE_JOB,
+      payload: { refundId, outcome },
+      status: 'ready',
+      runAt: new Date(clock.now() + autoAdvanceDelayMs).toISOString(),
+      attempt: 0,
+      maxAttempts: 1,
+      leaseExpiresAt: null,
+      lastError: null,
+      groupKey: `refund:${refundId}`,
+      createdAt: clock.nowISO(),
+      updatedAt: clock.nowISO(),
+    });
+  }
+
+  async function requireRefund(handle: string) {
+    const refund =
+      (await storage.refunds.byId(handle)) ??
+      (await storage.refunds.byProviderRefundId(PROVIDER, handle));
+    if (refund) return refund;
+
+    const numeric = Number(handle);
+    if (Number.isFinite(numeric)) {
+      const { items } = await storage.refunds.list({ limit: 500 });
+      const match = items.find((r) => numericTransactionId(r.providerRefundId) === numeric);
+      if (match) return match;
+    }
+    throw new PayboxError('not_found', `Refund ${handle} not found.`);
+  }
+
+  /**
+   * Recover a refund that stalled for want of bank details.
+   *
+   * Paystack returns **422** when the refund is not in `needs-attention`, and
+   * says so explicitly: "Use this endpoint only when you receive a
+   * refund.needs-attention webhook event." Reproducing that refusal is the
+   * point -- calling it speculatively is a bug this should surface.
+   */
+  fastify.post<{ Params: { id: string } }>(
+    '/refund/retry_with_customer_details/:id',
+    async (request, reply) => {
+      authenticate(request);
+      const body = refundRetrySchema.parse(request.body);
+      const refund = await requireRefund(request.params.id);
+
+      if (refund.status !== 'needs_attention') {
+        return reply.status(422).send(
+          fail(
+            `Refund ${request.params.id} is ${refund.providerStatus}, not needs-attention. ` +
+              'Use this endpoint only after a refund.needs-attention event.',
+            { code: 'invalid_state_transition' },
+          ),
+        );
+      }
+
+      // Bank details supplied: the refund goes back on the processing path.
+      const retried = await engine.transitionRefund(refund.id, 'processing', {
+        accountDetails: { ...body.refund_account_details },
+      });
+      const settled = await engine.transitionRefund(retried.id, 'successful');
+      const payment = await storage.payments.byId(settled.paymentId);
+      return reply.send(ok('Refund retry successful', serializeRefund(settled, payment)));
+    },
+  );
 
   fastify.get<{ Params: { id: string } }>('/refund/:id', async (request, reply) => {
     authenticate(request);
@@ -1891,7 +1990,11 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
       // Paystack holds the fee alongside the amount, so the emulator has to
       // as well -- otherwise a transfer passes here that would be refused
       // there for being a few naira short.
-      fee: emulatedTransferFee((body.currency ?? recipient.currency).toUpperCase(), includeFees),
+      fee: emulatedTransferFee(
+        (body.currency ?? recipient.currency).toUpperCase(),
+        includeFees,
+        options.transferFee,
+      ),
     });
     return reply.send(ok('Transfer has been queued', serializeTransfer(transfer)));
   });

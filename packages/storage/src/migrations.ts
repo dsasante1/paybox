@@ -449,4 +449,12 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_disputes_status ON disputes (status);
     `,
   },
+  {
+    id: '0008_refund_account_details',
+    sql: `
+      -- Bank details supplied to recover a needs-attention refund. Synthetic
+      -- only; nothing here is ever transmitted anywhere.
+      ALTER TABLE refunds ADD COLUMN account_details TEXT;
+    `,
+  },
 ];

@@ -298,6 +298,15 @@ export const refundSchema = z.object({
   merchant_note: z.string().optional(),
 });
 
+/** Schema `RefundRetry` / `RefundRetryAccountDetails` from the pinned spec. */
+export const refundRetrySchema = z.object({
+  refund_account_details: z.object({
+    currency: z.string().length(3),
+    account_number: z.string().min(4),
+    bank_id: z.string().min(1),
+  }),
+});
+
 export const customerSchema = z.object({
   email: z.string().email(),
   first_name: z.string().optional(),

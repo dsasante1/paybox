@@ -12,6 +12,7 @@ import { openStorage } from '@paybox/storage';
 import { createIdFactory, createRandom, type IdFactory, type Random } from '@paybox/shared';
 import {
   PAYMENT_SIMULATE_JOB,
+  REFUND_SETTLE_JOB,
   PaymentSimulator,
   ScenarioRunner,
   SCENARIO_STEP_JOB,
@@ -194,6 +195,33 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
    * A scheduled job rather than a timer, so "nobody answered in time" is one
    * `paybox time advance` away.
    */
+  /**
+   * Settle a queued refund, the way a refund processor eventually would.
+   *
+   * Walks pending -> processing -> outcome rather than jumping, so the
+   * intermediate `refund.processing` webhook actually fires. A refund that
+   * lands in `needs_attention` stops there and waits for bank details.
+   */
+  scheduler.register(REFUND_SETTLE_JOB, async (job) => {
+    const refundId = String(job.payload.refundId ?? '');
+    const outcome = String(job.payload.outcome ?? 'successful') as
+      | 'successful'
+      | 'failed'
+      | 'needs_attention';
+    if (!refundId) return;
+
+    const refund = await storage.refunds.byId(refundId);
+    // Someone may have settled it by hand from the CLI in the meantime.
+    if (!refund || refund.status !== 'pending') return;
+
+    await engine.transitionRefund(refundId, 'processing');
+    if (outcome === 'needs_attention') {
+      await engine.transitionRefund(refundId, 'needs_attention');
+      return;
+    }
+    await engine.transitionRefund(refundId, outcome);
+  });
+
   scheduler.register('dispute.remind', async (job) => {
     const disputeId = String(job.payload.disputeId ?? '');
     const dispute = await engine.getDispute(disputeId);

@@ -86,6 +86,7 @@ export async function buildApp(context: PayboxContext): Promise<FastifyInstance>
           engine: context.engine,
           simulator: context.simulator,
           subscriptions: context.subscriptions,
+          transferFee: context.config.balance.transferFee,
           storage: context.storage,
           clock: context.clock,
           ids: context.ids,

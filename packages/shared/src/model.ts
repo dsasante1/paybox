@@ -61,6 +61,13 @@ export interface Refund {
   status: RefundStatus;
   providerStatus: string;
   reason: string | null;
+  /**
+   * Bank details supplied to recover a `needs_attention` refund.
+   *
+   * Synthetic, like every account number in the emulator: nothing is ever
+   * transmitted anywhere and no money can move through it (spec §29).
+   */
+  accountDetails: Metadata | null;
   metadata: Metadata;
   createdAt: string;
   updatedAt: string;

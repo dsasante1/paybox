@@ -429,3 +429,60 @@ describe('transfers against the balance', () => {
     expect(await balance()).toBe(80_000);
   });
 });
+
+describe('the transfer fee is configurable', () => {
+  it('uses the rate from config rather than a hardcoded one', async () => {
+    // A separate app so the override is in effect from boot.
+    process.env.PAYBOX_DATABASE = ':memory:';
+    process.env.PAYBOX_OPENING_BALANCE = '500000';
+    const { config } = loadConfig();
+    const scoped = await buildContext({
+      config: { ...config, balance: { ...config.balance, transferFee: { NGN: 25_000 } } },
+      transport: new RecordingTransport(),
+      logSink: () => {},
+    });
+    const scopedApp = await buildApp(scoped);
+    await scopedApp.ready();
+
+    try {
+      const recipient = await scopedApp.inject({
+        method: 'POST',
+        url: '/paystack/transferrecipient',
+        headers: auth,
+        payload: {
+          type: 'nuban',
+          name: 'Tolu Robert',
+          account_number: '0123456789',
+          bank_code: '058',
+          currency: 'NGN',
+        },
+      });
+
+      await scopedApp.inject({
+        method: 'POST',
+        url: '/paystack/transfer',
+        headers: auth,
+        payload: {
+          source: 'balance',
+          amount: 100_000,
+          recipient: recipient.json().data.recipient_code,
+          currency: 'NGN',
+        },
+      });
+
+      const res = await scopedApp.inject({
+        method: 'GET',
+        url: '/paystack/balance',
+        headers: auth,
+      });
+      const ngn = (res.json().data as Array<{ currency: string; balance: number }>).find(
+        (b) => b.currency === 'NGN',
+      );
+      // 500000 - 100000 - the configured 25000, not the default 1000.
+      expect(ngn?.balance).toBe(375_000);
+    } finally {
+      await scopedApp.close();
+      await scoped.shutdown();
+    }
+  });
+});

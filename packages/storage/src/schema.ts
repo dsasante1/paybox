@@ -37,6 +37,7 @@ export interface RefundRow {
   status: string;
   provider_status: string;
   reason: string | null;
+  account_details: string | null;
   metadata: string;
   created_at: string;
   updated_at: string;

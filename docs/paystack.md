@@ -53,6 +53,7 @@ change, and nothing here is generated from a live schema at build time.
 | `POST /customer/authorization/deactivate` | **Compatible** | Irreversible, as at Paystack. |
 | `POST /refund` | **Compatible** | Full and partial. Enforces the remaining balance. |
 | `GET /refund/:id` | **Compatible** | |
+| `POST /refund/retry_with_customer_details/:id` | **Compatible** | 422 unless the refund is `needs-attention`. |
 | `POST /customer` | **Compatible** | |
 | `GET /customer/:code` | **Compatible** | Accepts `CUS_...` or a paybox id. |
 | `GET /customer` | **Compatible** | `perPage`, `page`, `search`. |
@@ -155,12 +156,9 @@ Matching is on the **full number**, so these never collide with the
 `4000 0000 0000 000X` suffix convention, and an unrecognised number still falls
 through to success as before.
 
-Two documented behaviours are **not** reproduced:
-
-- The refund-outcome cards (`…1803` fails a refund, `…1902` sends it to
-  "needs attention") charge successfully here, but the refund behaves normally.
-- Orange CIV is documented with OTP `1234`; paybox accepts `123456` on every
-  parked charge.
+The refund-outcome cards work too: `…1803` charges successfully and then its
+refund **fails**, and `…1902` sends the refund to **needs-attention**. Orange
+CIV uses its documented OTP `1234`, while the card flows use `123456`.
 
 ### Choosing an outcome where there is no instrument
 
@@ -339,6 +337,8 @@ emulator starts with an opening test float per currency:
 balance:
   enforce: true
   opening: 10000000   # PAYBOX_OPENING_BALANCE
+  transferFee:        # flat per currency; set your own negotiated rate
+    NGN: 1000
 ```
 
 The float is **not a ledger row**, so `paybox reset` cannot wipe it and the
@@ -389,6 +389,40 @@ new dispute, not a revived one.
 integration's upload step need not be branched around, but **the emulator
 stores no files** and nothing is ever uploaded there.
 
+## The refund lifecycle
+
+Refunds are asynchronous, and paybox settles them rather than leaving them
+`pending` forever: a queued refund walks `pending → processing → outcome` over
+virtual time, firing each webhook on the way.
+
+| Refund status | Paystack | Transaction becomes |
+|---|---|---|
+| `pending` | `pending` | unchanged (reversal pending) |
+| `processing` | `processing` | unchanged (reversal pending) |
+| `needs_attention` | `needs-attention` | unchanged (reversal pending) |
+| `failed` | `failed` | **stays `success`** — the money is back with you |
+| `successful` | `processed` | `reversed` |
+
+Which outcome a refund takes comes from the instrument behind the payment, so
+Paystack's two published refund-outcome cards behave as documented.
+
+### needs-attention
+
+The processor could not find an account to credit. The refund **stops** and
+stays stopped however far time advances — it needs bank details:
+
+```
+POST /refund/retry_with_customer_details/{id}
+{ "refund_account_details": { "currency": "NGN",
+                              "account_number": "1234567890",
+                              "bank_id": "9" } }
+```
+
+Calling it on a refund that is *not* in `needs-attention` returns **422**, as
+Paystack does — their docs say to use it "only when you receive a
+`refund.needs-attention` webhook event", and calling it speculatively is a bug
+worth surfacing.
+
 ## Status mapping
 
 The emulator stores a canonical status and answers with Paystack's.
@@ -419,6 +453,7 @@ Envelope: `{ "event": "<name>", "data": { ... } }`
 | `payment.successful` | `charge.success` |
 | `refund.created` | `refund.pending` |
 | `refund.processing` | `refund.processing` |
+| `refund.needs_attention` | `refund.needs-attention` |
 | `refund.successful` | `refund.processed` |
 | `refund.failed` | `refund.failed` |
 | `transfer.successful` | `transfer.success` |
@@ -527,14 +562,16 @@ transaction"*). paybox emits a simplified `*{bank_code}*000#` and a generic
    always zero.
 8. `GET /bank` and `GET /country` return short fixed lists, not Paystack's full
    directories. `GET /dedicated_account` ignores the documented query filters.
-9. The refund-outcome test cards charge correctly but do not change refund
-   behaviour, and Orange CIV's `1234` OTP is not modelled (above).
-10. `gateway_response_code` maps only the failures paybox can actually
-    simulate. Paystack's table is ~60 ISO 8583 codes; anything unmapped
-    resolves to `unknown`, which is what Paystack documents for unlisted codes.
-11. Transfer fees are an **emulated flat rate per currency**, not Paystack's
-    real tiered schedule. The balance check and deduction include them, so the
-    arithmetic is right; the rate is not. Do not reconcile against it.
+9. `gateway_response_code` maps only the failures paybox can actually
+   simulate. Paystack's table is ~60 ISO 8583 codes; anything unmapped
+   resolves to `unknown`, which is what Paystack documents for unlisted codes.
+10. Transfer fees are a **flat rate per currency**, not Paystack's real tiered
+    schedule — which lives on their commercial pricing page rather than in the
+    API documentation this file verifies against, and varies by country.
+    Modelling it from there would be inventing provider behaviour from a
+    non-API source. The check and the deduction include the fee, so the
+    arithmetic is right; the rate is a placeholder. Set your own under
+    `balance.transferFee` if you know your negotiated rate.
 12. The USSD dial string's middle segments are ours (above).
 13. Transaction ids are derived deterministically from the reference rather than
    allocated by a counter, so they are stable but not monotonic over time. This
