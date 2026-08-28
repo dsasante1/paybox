@@ -8,6 +8,7 @@ import type {
 import { stripeSignatureHeaders } from './signature.js';
 import {
   serializeCharge,
+  serializeCheckoutSession,
   serializeCustomer,
   serializeEvent,
   serializePaymentIntent,
@@ -39,10 +40,16 @@ const EVENT_MAP: Record<string, readonly string[]> = {
   'payment.processing': ['payment_intent.processing'],
   'payment.requires_action': ['payment_intent.requires_action'],
   'payment.authorized': ['payment_intent.amount_capturable_updated'],
-  'payment.successful': ['payment_intent.succeeded', 'charge.succeeded'],
+  // A settled session also completes; the checkout entry is dropped for
+  // payments that are not sessions, in #buildData.
+  'payment.successful': [
+    'payment_intent.succeeded',
+    'charge.succeeded',
+    'checkout.session.completed',
+  ],
   'payment.failed': ['payment_intent.payment_failed', 'charge.failed'],
   'payment.cancelled': ['payment_intent.canceled'],
-  'payment.expired': ['payment_intent.canceled'],
+  'payment.expired': ['payment_intent.canceled', 'checkout.session.expired'],
   'refund.created': ['refund.created'],
   'refund.successful': ['charge.refunded', 'refund.updated'],
   'refund.failed': ['refund.failed'],
@@ -50,7 +57,10 @@ const EVENT_MAP: Record<string, readonly string[]> = {
 };
 
 /** Which Stripe object each event carries in `data.object`. */
-function subjectFor(eventType: string): 'intent' | 'charge' | 'refund' | 'customer' {
+function subjectFor(
+  eventType: string,
+): 'intent' | 'charge' | 'refund' | 'customer' | 'session' {
+  if (eventType.startsWith('checkout.session.')) return 'session';
   if (eventType.startsWith('charge.refunded')) return 'charge';
   if (eventType.startsWith('charge.')) return 'charge';
   if (eventType.startsWith('refund.')) return 'refund';
@@ -114,6 +124,18 @@ export class StripeWebhookFormatter implements WebhookFormatter {
       const customer = payment.customerId
         ? await storage.customers.byId(payment.customerId)
         : null;
+
+      // Only a payment created through Checkout has a session to report on.
+      // Returning null drops just this entry from the fan-out.
+      if (subject === 'session') {
+        if (!payment.metadata.mode) return null;
+        return serializeCheckoutSession(payment, {
+          customer,
+          baseUrl,
+          basePath: this.#basePath,
+        });
+      }
+
       return subject === 'charge'
         ? serializeCharge(payment, { customer })
         : serializePaymentIntent(payment, {
