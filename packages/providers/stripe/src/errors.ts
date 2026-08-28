@@ -130,6 +130,14 @@ export function toStripeError(error: unknown): StripeErrorResponse {
           message: error.message,
           ...(shape.code ? { code: shape.code } : {}),
           ...(shape.declineCode ? { decline_code: shape.declineCode } : {}),
+          // Stripe puts the charge that failed on the error itself, so an
+          // integration can look up the attempt without parsing the message.
+          ...(typeof error.details.stripeCharge === 'string'
+            ? { charge: error.details.stripeCharge }
+            : {}),
+          ...(typeof error.details.stripePaymentIntent === 'string'
+            ? { payment_intent: error.details.stripePaymentIntent }
+            : {}),
           // The canonical code, so an emulator-specific rejection is
           // distinguishable from a genuine Stripe-shaped one.
           paybox_code: error.code,

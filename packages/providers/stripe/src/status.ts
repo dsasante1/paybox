@@ -89,7 +89,16 @@ export function fromStripeStatus(status: string): PaymentStatus | null {
 export type StripeChargeStatus = 'succeeded' | 'pending' | 'failed';
 
 export function toStripeChargeStatus(status: PaymentStatus): StripeChargeStatus {
-  if (status === 'successful' || status === 'refunded' || status === 'partially_refunded') {
+  if (
+    status === 'successful' ||
+    status === 'refunded' ||
+    status === 'partially_refunded' ||
+    // An authorized-but-uncaptured charge is `succeeded` at Stripe, with
+    // `captured: false` carrying the distinction and `paid` documented as
+    // "true if the charge succeeded, or was successfully authorized for later
+    // capture". The status is not where the two are told apart.
+    status === 'authorized'
+  ) {
     return 'succeeded';
   }
   if (status === 'failed' || status === 'cancelled' || status === 'expired') return 'failed';

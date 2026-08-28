@@ -105,6 +105,45 @@ export const refundCreateSchema = z.object({
   metadata,
 });
 
+/**
+ * The legacy Charges API.
+ *
+ * Deprecated at Stripe in favour of PaymentIntents but still in wide use, and
+ * still in the specification (`PostCharges`). Synchronous: the response says
+ * whether the money moved, so a decline is a 402 rather than a 200 carrying a
+ * retryable object.
+ */
+export const chargeCreateSchema = z.object({
+  amount,
+  currency: z.string().min(3).max(3),
+  customer: z.string().optional(),
+  /** A stored instrument. paybox accepts its own `pm_` ids; see docs/stripe.md. */
+  source: z.string().optional(),
+  /** Inline card details, which this endpoint (unlike PaymentIntents) takes. */
+  card: cardData.optional(),
+  description: z.string().optional(),
+  receipt_email: z.string().optional(),
+  statement_descriptor: z.string().optional(),
+  transfer_group: z.string().optional(),
+  /** Defaults to true. False authorizes now and captures later. */
+  capture: formBool,
+  metadata,
+});
+
+export const chargeUpdateSchema = z.object({
+  customer: z.string().optional(),
+  description: z.string().optional(),
+  receipt_email: z.string().optional(),
+  transfer_group: z.string().optional(),
+  metadata,
+});
+
+export const chargeCaptureSchema = z.object({
+  amount: optionalAmount,
+  receipt_email: z.string().optional(),
+  statement_descriptor: z.string().optional(),
+});
+
 export const customerCreateSchema = z.object({
   email: z.string().email().optional(),
   name: z.string().optional(),

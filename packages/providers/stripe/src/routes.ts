@@ -3,6 +3,7 @@ import {
   PayboxError,
   isSupportedCurrency,
   type Clock,
+  type ErrorCode,
   type IdFactory,
   type Payment,
   type PaymentMethod,
@@ -22,6 +23,9 @@ import { stripeInstrumentResolver } from './instruments.js';
 import { stripeAuthorizationMinter } from './authorization.js';
 import { fromStripeRecurring, fromStripeStatus } from './status.js';
 import {
+  chargeCaptureSchema,
+  chargeCreateSchema,
+  chargeUpdateSchema,
   checkoutPaySchema,
   checkoutSessionCreateSchema,
   customerCreateSchema,
@@ -255,6 +259,25 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
     });
   }
 
+  /** Masked card detail carried by a stored instrument. */
+  function authorizationDetails(authorization: {
+    bin: string | null;
+    last4: string | null;
+    expMonth: string | null;
+    expYear: string | null;
+    brand: string | null;
+    countryCode: string | null;
+  }): Record<string, unknown> {
+    return {
+      bin: authorization.bin,
+      last4: authorization.last4,
+      exp_month: authorization.expMonth,
+      exp_year: authorization.expYear,
+      brand: authorization.brand,
+      country: authorization.countryCode,
+    };
+  }
+
   /** Masked card detail from inline `payment_method_data`, or a stored method. */
   function cardDetailsFrom(card: {
     number: string;
@@ -438,14 +461,7 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
         const authorization = await loadAuthorization(body.payment_method);
         engine.assertChargeable(authorization);
         number = authorization.last4;
-        details = {
-          bin: authorization.bin,
-          last4: authorization.last4,
-          exp_month: authorization.expMonth,
-          exp_year: authorization.expYear,
-          brand: authorization.brand,
-          country: authorization.countryCode,
-        };
+        details = authorizationDetails(authorization);
       }
 
       if (details) {
@@ -1136,6 +1152,165 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
     const customer = payment.customerId ? await storage.customers.byId(payment.customerId) : null;
     return serializeCharge(payment, { customer });
   }
+
+  /**
+   * `POST /v1/charges` -- the legacy direct charge (`PostCharges`).
+   *
+   * Deprecated at Stripe but still widely deployed, and it behaves differently
+   * enough from PaymentIntents to be worth modelling rather than aliasing:
+   *
+   *   - It is **synchronous**. The response says whether the money moved, so a
+   *     decline is HTTP 402 with a `card_error`, not a 200 carrying an object
+   *     you are meant to retry.
+   *   - It cannot do SCA. A card that needs a step-up fails with
+   *     `authentication_required` instead of parking at `requires_action` --
+   *     which is the whole reason Stripe moved everyone to PaymentIntents, and
+   *     exactly the wall a developer on this API needs to hit locally.
+   *
+   * The underlying row is the same canonical payment a PaymentIntent creates,
+   * so `pi_` and `ch_` still address one resource (docs/stripe.md).
+   */
+  fastify.post('/v1/charges', async (request, reply) => {
+    authenticate(request);
+    const body = chargeCreateSchema.parse(request.body);
+    const currency = body.currency.toUpperCase();
+    if (!isSupportedCurrency(currency)) {
+      throw new PayboxError(
+        'unsupported_currency',
+        `The currency ${body.currency} is not supported.`,
+      );
+    }
+
+    const customer = body.customer ? await loadCustomer(body.customer) : null;
+
+    // Where the instrument comes from, in Stripe's own order of precedence:
+    // an explicit source, then inline card details, then the customer's
+    // stored default.
+    let number: string | null = null;
+    let details: Record<string, unknown> | null = null;
+
+    if (body.source) {
+      const authorization = await loadAuthorization(body.source);
+      engine.assertChargeable(authorization);
+      number = authorization.last4;
+      details = authorizationDetails(authorization);
+    } else if (body.card) {
+      number = body.card.number;
+      details = cardDetailsFrom(body.card);
+    } else if (customer) {
+      const stored = (await storage.authorizations.listByCustomer(customer.id)).find(
+        (candidate) => candidate.reusable && candidate.active,
+      );
+      if (!stored) {
+        throw new PayboxError(
+          'validation_failed',
+          `Customer ${body.customer} has no attached payment source.`,
+        );
+      }
+      number = stored.last4;
+      details = authorizationDetails(stored);
+    } else {
+      throw new PayboxError(
+        'validation_failed',
+        'Must provide source or customer.',
+      );
+    }
+
+    const payment = await engine.createPayment({
+      provider: PROVIDER,
+      amount: body.amount,
+      currency,
+      customerId: customer?.id ?? null,
+      paymentMethod: 'card',
+      paymentMethodDetails: details,
+      metadata: {
+        ...(body.metadata ?? {}),
+        ...(body.description ? { description: body.description } : {}),
+        ...(body.receipt_email ? { receipt_email: body.receipt_email } : {}),
+        ...(body.transfer_group ? { transfer_group: body.transfer_group } : {}),
+        ...(body.capture === false ? { capture_method: 'manual' } : {}),
+      },
+      status: 'pending',
+    });
+
+    const { outcome } = resolveInstrument(number, 'card', {
+      resolver: stripeInstrumentResolver,
+    });
+
+    // `capture: false` authorizes and stops, which is the legacy spelling of a
+    // manual-capture intent.
+    let settled: Payment;
+    if (body.capture === false && outcome === 'success') {
+      await engine.transitionPayment(payment.id, 'processing');
+      settled = await engine.transitionPayment(payment.id, 'authorized');
+    } else {
+      settled = await simulator.apply(payment.id, outcome);
+    }
+
+    if (settled.status === 'requires_action') {
+      // The Charges API has no way to present a step-up, so Stripe fails the
+      // charge outright rather than leaving it in limbo.
+      const failed = await simulator.apply(settled.id, 'authentication_failed');
+      throw new PayboxError(
+        'authentication_required',
+        'This card requires authentication, which the Charges API cannot perform. ' +
+          'Use the PaymentIntents API.',
+        { details: { stripeCharge: stripeId('ch', failed.id), stripePaymentIntent: stripeId('pi', failed.id) } },
+      );
+    }
+
+    if (settled.status === 'failed') {
+      throw new PayboxError(
+        (settled.failureCode ?? 'card_declined') as ErrorCode,
+        settled.failureMessage ?? 'Your card was declined.',
+        {
+          details: {
+            stripeCharge: stripeId('ch', settled.id),
+            stripePaymentIntent: stripeId('pi', settled.id),
+          },
+        },
+      );
+    }
+
+    return reply.send(await decorateCharge(settled));
+  });
+
+  fastify.post<{ Params: { charge: string } }>(
+    '/v1/charges/:charge/capture',
+    async (request, reply) => {
+      authenticate(request);
+      chargeCaptureSchema.parse(request.body ?? {});
+      const payment = await loadPayment(request.params.charge);
+      if (payment.status !== 'authorized') {
+        throw new PayboxError(
+          'invalid_state_transition',
+          `Charge ${request.params.charge} has already been captured.`,
+        );
+      }
+      // Partial capture would have to shrink the charge amount, and paybox
+      // stores one amount per payment; docs/stripe.md records the omission
+      // rather than silently capturing the full amount as if it were partial.
+      return reply.send(await decorateCharge(await simulator.capture(payment.id)));
+    },
+  );
+
+  fastify.post<{ Params: { charge: string } }>('/v1/charges/:charge', async (request, reply) => {
+    authenticate(request);
+    const body = chargeUpdateSchema.parse(request.body ?? {});
+    const payment = await loadPayment(request.params.charge);
+    const updated = await storage.payments.update(payment.id, {
+      metadata: {
+        ...payment.metadata,
+        ...(body.metadata ?? {}),
+        ...(body.description ? { description: body.description } : {}),
+        ...(body.receipt_email ? { receipt_email: body.receipt_email } : {}),
+        ...(body.transfer_group ? { transfer_group: body.transfer_group } : {}),
+      },
+      ...(body.customer ? { customerId: (await loadCustomer(body.customer)).id } : {}),
+      updatedAt: clock.nowISO(),
+    });
+    return reply.send(await decorateCharge(updated));
+  });
 
   fastify.get<{ Params: { charge: string } }>('/v1/charges/:charge', async (request, reply) => {
     authenticate(request);

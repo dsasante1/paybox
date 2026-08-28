@@ -273,8 +273,17 @@ expected to react.
    cursor beyond that window is ignored rather than honoured.
 8. `POST /v1/payment_intents/{id}` updates metadata, description and
    `receipt_email` only. Amount and currency are deliberately not updatable.
-9. Charges are read-only. There is no `POST /v1/charges`; the legacy direct
-   charge API is not implemented.
+9. The legacy Charges API is implemented: `POST /v1/charges`,
+   `POST /v1/charges/{id}` and `POST /v1/charges/{id}/capture`. It is
+   deliberately **synchronous**, as Stripe's is -- a decline is a 402
+   `card_error` carrying `charge` and `payment_intent`, not a 200 with a
+   retryable object -- and a card needing SCA fails with
+   `authentication_required`, because this API has no way to present a step-up.
+   Three gaps: `source` accepts paybox's own `pm_` ids (there is no Tokens API,
+   so `tok_`, `src_` and `card_` are not resolvable), partial capture is not
+   supported (`amount` on capture is accepted and ignored; paybox stores one
+   amount per payment), and `application_fee_amount`, `destination` and
+   `transfer_data` are Connect fields that are not modelled.
 10. Refunds settle **immediately**. Stripe's asynchronous refund path applies to
    bank-backed methods, which this slice does not implement.
 11. `client_secret` is derived from the intent id and is **not** a credential.
