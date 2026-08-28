@@ -63,6 +63,20 @@ export interface CreatePaymentInput {
   expiresInMs?: number | null;
 }
 
+export interface CreateRefundInput {
+  paymentId: string;
+  amount?: number;
+  reason?: string | null;
+  metadata?: Metadata;
+  /** Refunds are asynchronous at every provider we emulate. */
+  status?: RefundStatus;
+}
+
+export interface TransitionRefundOptions {
+  reason?: string | null;
+  accountDetails?: Metadata | null;
+}
+
 export interface TransitionOptions {
   providerStatus?: string;
   failureCode?: string | null;
@@ -364,143 +378,156 @@ export class PaymentEngine {
    * Refunds (spec §18)
    * ---------------------------------------------------------------- */
 
-  async createRefund(input: {
-    paymentId: string;
-    amount?: number;
-    reason?: string | null;
-    metadata?: Metadata;
-    /** Refunds are asynchronous at every provider we emulate. */
-    status?: RefundStatus;
-  }): Promise<Refund> {
-    const { result, events } = await this.#storage.transaction(async (tx) => {
-      const payment = await this.#requirePayment(tx, input.paymentId);
-
-      if (payment.status !== 'successful' && payment.status !== 'partially_refunded') {
-        throw new PayboxError(
-          'invalid_state_transition',
-          `Only a successful payment can be refunded; this one is ${payment.status}.`,
-          { details: { paymentId: payment.id, status: payment.status } },
-        );
-      }
-
-      const alreadyRefunded = await tx.refunds.totalRefunded(payment.id);
-      const amount = input.amount ?? payment.amount - alreadyRefunded;
-      assertRefundable(payment.amount, alreadyRefunded, amount);
-
-      const now = this.#clock.nowISO();
-      const status = input.status ?? 'pending';
-      const refund: Refund = {
-        id: this.#ids.next('ref'),
-        paymentId: payment.id,
-        provider: payment.provider,
-        providerRefundId: this.#ids.token(12),
-        amount,
-        currency: payment.currency,
-        status,
-        providerStatus: status,
-        reason: input.reason ?? null,
-        accountDetails: null,
-        metadata: input.metadata ?? {},
-        createdAt: now,
-        updatedAt: now,
-      };
-
-      const created = await tx.refunds.insert(refund);
-      const event = await this.#appendEvent(tx, {
-        type: 'refund.created',
-        provider: created.provider,
-        resourceId: created.id,
-        resourceType: 'refund',
-        data: refundEventData(created, payment),
-        previousStatus: null,
-        currentStatus: created.status,
-      });
-      return { result: created, events: [event] };
-    });
-
+  async createRefund(input: CreateRefundInput): Promise<Refund> {
+    const { result, events } = await this.#storage.transaction((tx) =>
+      this.#createRefundIn(tx, input),
+    );
     await this.#bus.emitAll(events);
     return result;
   }
 
   /**
-   * Settle a refund. When it succeeds we also move the parent payment to
-   * `partially_refunded` or `refunded`, which is the only place those two
-   * statuses are ever set.
+   * The body of `createRefund`, bound to an open transaction.
+   *
+   * Split out so that operations which must be atomic *with* a refund --
+   * resolving a dispute in the customer's favour, for one -- can compose it
+   * instead of nesting a second transaction. `Storage.transaction` is
+   * reentrant only for the same instance; the engine holds the root storage,
+   * so calling the public method from inside a transaction would take the
+   * write lock twice and deadlock.
    */
+  async #createRefundIn(
+    tx: Storage,
+    input: CreateRefundInput,
+  ): Promise<{ result: Refund; events: PayboxEvent[] }> {
+    const payment = await this.#requirePayment(tx, input.paymentId);
+
+    if (payment.status !== 'successful' && payment.status !== 'partially_refunded') {
+      throw new PayboxError(
+        'invalid_state_transition',
+        `Only a successful payment can be refunded; this one is ${payment.status}.`,
+        { details: { paymentId: payment.id, status: payment.status } },
+      );
+    }
+
+    const alreadyRefunded = await tx.refunds.totalRefunded(payment.id);
+    const amount = input.amount ?? payment.amount - alreadyRefunded;
+    assertRefundable(payment.amount, alreadyRefunded, amount);
+
+    const now = this.#clock.nowISO();
+    const status = input.status ?? 'pending';
+    const refund: Refund = {
+      id: this.#ids.next('ref'),
+      paymentId: payment.id,
+      provider: payment.provider,
+      providerRefundId: this.#ids.token(12),
+      amount,
+      currency: payment.currency,
+      status,
+      providerStatus: status,
+      reason: input.reason ?? null,
+      accountDetails: null,
+      metadata: input.metadata ?? {},
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const created = await tx.refunds.insert(refund);
+    const event = await this.#appendEvent(tx, {
+      type: 'refund.created',
+      provider: created.provider,
+      resourceId: created.id,
+      resourceType: 'refund',
+      data: refundEventData(created, payment),
+      previousStatus: null,
+      currentStatus: created.status,
+    });
+    return { result: created, events: [event] };
+  }
+
   async transitionRefund(
     refundId: string,
     to: RefundStatus,
-    options: { reason?: string | null; accountDetails?: Metadata | null } = {},
+    options: TransitionRefundOptions = {},
   ): Promise<Refund> {
-    const { result, events } = await this.#storage.transaction(async (tx) => {
-      const refund = await tx.refunds.byId(refundId);
-      if (!refund) {
-        throw new PayboxError('not_found', `No refund with id ${refundId}.`);
-      }
-      assertRefundTransition(refund.status, to);
-
-      const now = this.#clock.nowISO();
-      const updated = await tx.refunds.update(refundId, {
-        status: to,
-        providerStatus: to,
-        updatedAt: now,
-        ...(options.reason !== undefined ? { reason: options.reason } : {}),
-        ...(options.accountDetails !== undefined
-          ? { accountDetails: options.accountDetails }
-          : {}),
-      });
-
-      const emitted: PayboxEvent[] = [
-        await this.#appendEvent(tx, {
-          type: `refund.${to}`,
-          provider: updated.provider,
-          resourceId: updated.id,
-          resourceType: 'refund',
-          data: { id: updated.id, payment_id: updated.paymentId, amount: updated.amount },
-          previousStatus: refund.status,
-          currentStatus: to,
-        }),
-      ];
-
-      if (to === 'successful') {
-        const payment = await this.#requirePayment(tx, updated.paymentId);
-        const totalRefunded = await tx.refunds.totalRefunded(payment.id);
-        const nextStatus = refundedStatus(payment.amount, totalRefunded);
-        assertPaymentTransition(payment.status, nextStatus);
-
-        const updatedPayment = await tx.payments.update(payment.id, {
-          status: nextStatus,
-          providerStatus: this.#providerStatus(payment.provider, nextStatus),
-          amountRefunded: totalRefunded,
-          updatedAt: now,
-        });
-
-        // Refunded money leaves the balance.
-        await this.#ledgerIn(tx, 'debit', {
-          provider: updated.provider,
-          currency: updated.currency,
-          amount: updated.amount,
-          reason: 'refund',
-          resourceId: updated.id,
-        });
-        emitted.push(
-          await this.#appendEvent(tx, {
-            type: `payment.${nextStatus}`,
-            provider: updatedPayment.provider,
-            resourceId: updatedPayment.id,
-            resourceType: 'payment',
-            data: { ...paymentEventData(updatedPayment), refund_id: updated.id },
-            previousStatus: payment.status,
-            currentStatus: nextStatus,
-          }),
-        );
-      }
-
-      return { result: updated, events: emitted };
-    });
-
+    const { result, events } = await this.#storage.transaction((tx) =>
+      this.#transitionRefundIn(tx, refundId, to, options),
+    );
     await this.#bus.emitAll(events);
     return result;
+  }
+
+  /** The body of `transitionRefund`, bound to an open transaction. */
+  async #transitionRefundIn(
+    tx: Storage,
+    refundId: string,
+    to: RefundStatus,
+    options: TransitionRefundOptions = {},
+  ): Promise<{ result: Refund; events: PayboxEvent[] }> {
+    const refund = await tx.refunds.byId(refundId);
+    if (!refund) {
+      throw new PayboxError('not_found', `No refund with id ${refundId}.`);
+    }
+    assertRefundTransition(refund.status, to);
+
+    const now = this.#clock.nowISO();
+    const updated = await tx.refunds.update(refundId, {
+      status: to,
+      providerStatus: to,
+      updatedAt: now,
+      ...(options.reason !== undefined ? { reason: options.reason } : {}),
+      ...(options.accountDetails !== undefined
+        ? { accountDetails: options.accountDetails }
+        : {}),
+    });
+
+    const emitted: PayboxEvent[] = [
+      await this.#appendEvent(tx, {
+        type: `refund.${to}`,
+        provider: updated.provider,
+        resourceId: updated.id,
+        resourceType: 'refund',
+        data: { id: updated.id, payment_id: updated.paymentId, amount: updated.amount },
+        previousStatus: refund.status,
+        currentStatus: to,
+      }),
+    ];
+
+    if (to === 'successful') {
+      const payment = await this.#requirePayment(tx, updated.paymentId);
+      const totalRefunded = await tx.refunds.totalRefunded(payment.id);
+      const nextStatus = refundedStatus(payment.amount, totalRefunded);
+      assertPaymentTransition(payment.status, nextStatus);
+
+      const updatedPayment = await tx.payments.update(payment.id, {
+        status: nextStatus,
+        providerStatus: this.#providerStatus(payment.provider, nextStatus),
+        amountRefunded: totalRefunded,
+        updatedAt: now,
+      });
+
+      // Refunded money leaves the balance.
+      await this.#ledgerIn(tx, 'debit', {
+        provider: updated.provider,
+        currency: updated.currency,
+        amount: updated.amount,
+        reason: 'refund',
+        resourceId: updated.id,
+      });
+      emitted.push(
+        await this.#appendEvent(tx, {
+          type: `payment.${nextStatus}`,
+          provider: updatedPayment.provider,
+          resourceId: updatedPayment.id,
+          resourceType: 'payment',
+          data: { ...paymentEventData(updatedPayment), refund_id: updated.id },
+          previousStatus: payment.status,
+          currentStatus: nextStatus,
+        }),
+      );
+    }
+
+    return { result: updated, events: emitted };
   }
 
   /* ---------------------------------------------------------------- *
@@ -1541,35 +1568,46 @@ export class PaymentEngine {
     disputeId: string,
     input: { resolution: DisputeResolution; message: string; refundAmount?: number },
   ): Promise<Dispute> {
-    const dispute = await this.#storage.disputes.byId(disputeId);
-    if (!dispute) throw new PayboxError('not_found', `No dispute with id ${disputeId}.`);
-    if (dispute.status === 'resolved') {
-      throw new PayboxError(
-        'invalid_state_transition',
-        'This dispute has already been resolved.',
-        { details: { disputeId } },
-      );
-    }
-
-    if (input.resolution === 'merchant-accepted') {
-      const amount = input.refundAmount ?? dispute.refundAmount;
-      if (amount > 0) {
-        const refund = await this.createRefund({
-          paymentId: dispute.paymentId,
-          amount,
-          reason: input.message,
-          metadata: { dispute_id: dispute.id },
-        });
-        await this.transitionRefund(refund.id, 'successful');
-      }
-    }
-
-    const now = this.#clock.nowISO();
+    // One transaction for the whole resolution. `Storage.transaction` is
+    // reentrant, so the refund calls below join this transaction rather than
+    // committing on their own -- without that, a resolution that failed partway
+    // left money moved against a dispute that was never resolved, and two
+    // concurrent resolutions could each settle a partial refund before one of
+    // them lost the race.
     const { result, events } = await this.#storage.transaction(async (tx) => {
-      const current = await tx.disputes.byId(disputeId);
-      if (!current) throw new PayboxError('not_found', `No dispute with id ${disputeId}.`);
-      assertDisputeTransition(current.status, 'resolved');
+      const dispute = await tx.disputes.byId(disputeId);
+      if (!dispute) throw new PayboxError('not_found', `No dispute with id ${disputeId}.`);
+      // Read and checked inside the transaction: the guard and the write have
+      // to see the same state, or two concurrent resolutions can each settle a
+      // refund before one of them loses the race.
+      if (dispute.status === 'resolved') {
+        throw new PayboxError(
+          'invalid_state_transition',
+          'This dispute has already been resolved.',
+          { details: { disputeId } },
+        );
+      }
+      assertDisputeTransition(dispute.status, 'resolved');
 
+      const emitted: PayboxEvent[] = [];
+
+      if (input.resolution === 'merchant-accepted') {
+        const amount = input.refundAmount ?? dispute.refundAmount;
+        if (amount > 0) {
+          // Composed on this transaction, not nested in a fresh one.
+          const created = await this.#createRefundIn(tx, {
+            paymentId: dispute.paymentId,
+            amount,
+            reason: input.message,
+            metadata: { dispute_id: dispute.id },
+          });
+          emitted.push(...created.events);
+          const settled = await this.#transitionRefundIn(tx, created.result.id, 'successful');
+          emitted.push(...settled.events);
+        }
+      }
+
+      const now = this.#clock.nowISO();
       const updated = await tx.disputes.update(disputeId, {
         status: 'resolved',
         providerStatus: 'resolved',
@@ -1579,16 +1617,19 @@ export class PaymentEngine {
         resolvedAt: now,
         updatedAt: now,
       });
-      const event = await this.#appendEvent(tx, {
-        type: 'dispute.resolved',
-        provider: updated.provider,
-        resourceId: updated.id,
-        resourceType: 'dispute',
-        data: disputeEventData(updated),
-        previousStatus: current.status,
-        currentStatus: 'resolved',
-      });
-      return { result: updated, events: [event] };
+      emitted.push(
+        await this.#appendEvent(tx, {
+          type: 'dispute.resolved',
+          provider: updated.provider,
+          resourceId: updated.id,
+          resourceType: 'dispute',
+          data: disputeEventData(updated),
+          previousStatus: dispute.status,
+          currentStatus: 'resolved',
+        }),
+      );
+
+      return { result: updated, events: emitted };
     });
 
     // A resolved dispute has no deadline left to remind anyone about.

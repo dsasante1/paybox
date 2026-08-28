@@ -137,11 +137,20 @@ export interface ListOptions {
 export interface PaymentFilter extends ListOptions {
   provider?: ProviderId;
   status?: PaymentStatus;
+  /** Match any of these. Ignored when `status` is set. */
+  statuses?: readonly PaymentStatus[];
   reference?: string;
   customerId?: string;
   /** Inclusive ISO bounds on `createdAt`. */
   from?: string;
   to?: string;
+}
+
+/** One currency's share of an aggregate. */
+export interface CurrencyTotal {
+  currency: string;
+  amount: number;
+  count: number;
 }
 
 export interface Page<T> {
@@ -157,6 +166,14 @@ export interface PaymentRepository {
   update(id: string, patch: Partial<Payment>): Promise<Payment>;
   list(filter?: PaymentFilter): Promise<Page<Payment>>;
   countByStatus(): Promise<Record<string, number>>;
+  /**
+   * Sum amounts per currency across **every** matching row.
+   *
+   * Aggregated in SQL rather than by adding up a page: a totals endpoint that
+   * sums only the first page reports a number that is silently wrong, and
+   * quietly disagrees with the count beside it.
+   */
+  sumByCurrency(filter?: Omit<PaymentFilter, 'limit' | 'offset'>): Promise<CurrencyTotal[]>;
 }
 
 export interface RefundRepository {
@@ -199,12 +216,16 @@ export interface CustomerRepository {
   byEmail(provider: ProviderId, email: string): Promise<Customer | null>;
   update(id: string, patch: Partial<Customer>): Promise<Customer>;
   list(filter?: CustomerFilter): Promise<Page<Customer>>;
+  /** Batch fetch, so listing N payments does not cost N customer queries. */
+  byIds(ids: readonly string[]): Promise<Map<string, Customer>>;
 }
 
 export interface AuthorizationRepository {
   insert(authorization: Authorization): Promise<Authorization>;
   byId(id: string): Promise<Authorization | null>;
   byCode(provider: ProviderId, code: string): Promise<Authorization | null>;
+  /** Batch form of `byCode`, keyed by provider authorization code. */
+  byCodes(provider: ProviderId, codes: readonly string[]): Promise<Map<string, Authorization>>;
   /** Deduping lookup: one instrument charged twice yields one authorization. */
   bySignature(provider: ProviderId, signature: string): Promise<Authorization | null>;
   /** Most recent first -- a subscription with no explicit authorization uses
@@ -269,6 +290,8 @@ export interface SplitRepository {
   insert(split: Split): Promise<Split>;
   byId(id: string): Promise<Split | null>;
   byCode(provider: ProviderId, code: string): Promise<Split | null>;
+  /** Batch form of `byCode`, keyed by provider split code. */
+  byCodes(provider: ProviderId, codes: readonly string[]): Promise<Map<string, Split>>;
   update(id: string, patch: Partial<Omit<Split, 'entries'>>): Promise<Split>;
   addSubaccount(splitId: string, subaccountId: string, share: number): Promise<Split>;
   removeSubaccount(splitId: string, subaccountId: string): Promise<Split>;
@@ -311,6 +334,8 @@ export interface EventRepository {
   append(event: PayboxEvent): Promise<PayboxEvent>;
   byId(id: string): Promise<PayboxEvent | null>;
   listByResource(resourceId: string): Promise<PayboxEvent[]>;
+  /** Batch form of `listByResource`, keyed by resource id and ordered. */
+  listByResources(resourceIds: readonly string[]): Promise<Map<string, PayboxEvent[]>>;
   list(filter?: EventFilter): Promise<Page<PayboxEvent>>;
   /** Next per-resource sequence number. Must be called inside a transaction. */
   nextSequence(resourceId: string): Promise<number>;

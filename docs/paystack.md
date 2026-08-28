@@ -35,8 +35,8 @@ change, and nothing here is generated from a live schema at build time.
 | `GET /transaction/:id` | **Partially compatible** | Accepts the numeric id, the reference, or a paybox id. |
 | `GET /transaction` | **Compatible** | `perPage`, `page`, `status`, `from`, `to`. |
 | `GET /transaction/timeline/{id}` | **Compatible** | Built from the real event log. |
-| `GET /transaction/totals` | **Partially compatible** | Volume only; no pending-transfer totals. |
-| `GET /transaction/export` | **Partially compatible** | Rows returned inline; see below. |
+| `GET /transaction/totals` | **Partially compatible** | Volume only; no pending-transfer totals. Aggregated in SQL across every row. |
+| `GET /transaction/export` | **Partially compatible** | Rows returned inline; see below. Paged to exhaustion. |
 | `POST /charge` | **Partially compatible** | `mobile_money`, `card`, `bank`, `ussd`, `eft`. No QR. |
 | `POST /dedicated_account` | **Compatible** | One account per customer. |
 | `POST /dedicated_account/assign` | **Compatible** | Creates the customer, then assigns. |
@@ -443,6 +443,11 @@ POST /refund/retry_with_customer_details/{id}
                               "bank_id": "9" } }
 ```
 
+The account currency must match the refund's, which Paystack also requires, and
+the retry re-resolves the outcome from the instrument — so a card documented as
+failing its refund fails the retry too, rather than the retry always
+succeeding.
+
 Calling it on a refund that is *not* in `needs-attention` returns **422**, as
 Paystack does — their docs say to use it "only when you receive a
 `refund.needs-attention` webhook event", and calling it speculatively is a bug
@@ -581,8 +586,9 @@ transaction"*). paybox emits a simplified `*{bank_code}*000#` and a generic
    requested amount.
 5. Dispute attachments are not stored; `upload_url` returns a URL that accepts
    nothing.
-6. `GET /transaction/export` returns rows inline under `data.rows`; the `path`
-   it reports is **not fetchable**, because the emulator writes no files.
+6. `GET /transaction/export` returns rows inline under `data.rows` with a
+   `total` beside them; the `path` it reports is **not fetchable**, because the
+   emulator writes no files. Paged reads stop at 100,000 rows.
 7. `GET /transaction/totals` reports volume only; pending-transfer totals are
    always zero.
 8. `GET /bank` and `GET /country` return short fixed lists, not Paystack's full

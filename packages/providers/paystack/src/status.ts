@@ -1,4 +1,10 @@
-import type { PaymentStatus, SubscriptionStatus } from '@paybox/shared';
+import {
+  DISPUTE_STATUSES,
+  PayboxError,
+  type DisputeStatus,
+  type PaymentStatus,
+  type SubscriptionStatus,
+} from '@paybox/shared';
 
 /**
  * Paystack's transaction status vocabulary.
@@ -151,5 +157,25 @@ export function gatewayCodes(
       responseCode: '06',
       gatewayResponseCode: 'unknown',
     }
+  );
+}
+
+
+/**
+ * Paystack's hyphenated dispute status -> canonical.
+ *
+ * Rejects anything outside the documented enum. Casting an unknown value
+ * through to the repository instead produces a query that matches nothing and
+ * an empty 200, which reads as "no disputes" rather than "bad filter".
+ */
+export function fromPaystackDisputeStatus(status: string): DisputeStatus {
+  const canonical = status.replace(/-/g, '_') as DisputeStatus;
+  if ((DISPUTE_STATUSES as readonly string[]).includes(canonical)) return canonical;
+  throw new PayboxError(
+    'validation_failed',
+    `Unknown dispute status "${status}". Expected one of: ${DISPUTE_STATUSES.map((s) =>
+      s.replace(/_/g, '-'),
+    ).join(', ')}.`,
+    { details: { status } },
   );
 }

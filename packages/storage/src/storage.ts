@@ -1,5 +1,5 @@
 import { Kysely, sql, type Transaction } from 'kysely';
-import { PayboxError, type Customer, type Payment, type PayboxEvent, type ProviderId, type Refund, type Transfer } from '@paybox/shared';
+import { PayboxError, type Customer, type Payment, type PayboxEvent, type ProviderId, type Refund, type Split, type Transfer } from '@paybox/shared';
 import type {
   AuthorizationRepository,
   CustomerRepository,
@@ -170,6 +170,10 @@ class SqliteStorage implements Storage {
       if (filter?.status) {
         query = query.where('status', '=', filter.status);
         count = count.where('status', '=', filter.status);
+      } else if (filter?.statuses && filter.statuses.length > 0) {
+        const statuses = [...filter.statuses];
+        query = query.where('status', 'in', statuses);
+        count = count.where('status', 'in', statuses);
       }
       if (filter?.reference) {
         query = query.where('reference', '=', filter.reference);
@@ -197,6 +201,31 @@ class SqliteStorage implements Storage {
         .execute();
       const total = await count.executeTakeFirst();
       return { items: rows.map(map.toPayment), total: Number(total?.total ?? 0) };
+    },
+    sumByCurrency: async (filter) => {
+      let query = this.#db
+        .selectFrom('payments')
+        .select(['currency'])
+        .select(({ fn }) => [
+          fn.sum<number>('amount').as('amount'),
+          fn.countAll<number>().as('count'),
+        ])
+        .groupBy('currency');
+      if (filter?.provider) query = query.where('provider', '=', filter.provider);
+      if (filter?.status) {
+        query = query.where('status', '=', filter.status);
+      } else if (filter?.statuses && filter.statuses.length > 0) {
+        query = query.where('status', 'in', [...filter.statuses]);
+      }
+      if (filter?.customerId) query = query.where('customer_id', '=', filter.customerId);
+      if (filter?.from) query = query.where('created_at', '>=', filter.from);
+      if (filter?.to) query = query.where('created_at', '<=', filter.to);
+      const rows = await query.execute();
+      return rows.map((r) => ({
+        currency: r.currency,
+        amount: Number(r.amount ?? 0),
+        count: Number(r.count ?? 0),
+      }));
     },
     countByStatus: async () => {
       const rows = await this.#db
@@ -415,6 +444,15 @@ class SqliteStorage implements Storage {
       const total = await count.executeTakeFirst();
       return { items: rows.map(map.toCustomer), total: Number(total?.total ?? 0) };
     },
+    byIds: async (ids) => {
+      if (ids.length === 0) return new Map();
+      const rows = await this.#db
+        .selectFrom('customers')
+        .selectAll()
+        .where('id', 'in', [...new Set(ids)])
+        .execute();
+      return new Map(rows.map((row) => [row.id, map.toCustomer(row)]));
+    },
   };
 
   readonly authorizations: AuthorizationRepository = {
@@ -450,6 +488,18 @@ class SqliteStorage implements Storage {
         .where('signature', '=', signature)
         .executeTakeFirst();
       return row ? map.toAuthorization(row) : null;
+    },
+    byCodes: async (provider, codes) => {
+      if (codes.length === 0) return new Map();
+      const rows = await this.#db
+        .selectFrom('authorizations')
+        .selectAll()
+        .where('provider', '=', provider)
+        .where('provider_authorization_code', 'in', [...new Set(codes)])
+        .execute();
+      return new Map(
+        rows.map((row) => [row.provider_authorization_code, map.toAuthorization(row)]),
+      );
     },
     listByCustomer: async (customerId) => {
       const rows = await this.#db
@@ -848,6 +898,20 @@ class SqliteStorage implements Storage {
         .executeTakeFirst();
       return row ? map.toSplit(row, await this.#splitEntries(row.id)) : null;
     },
+    byCodes: async (provider, codes) => {
+      if (codes.length === 0) return new Map();
+      const rows = await this.#db
+        .selectFrom('splits')
+        .selectAll()
+        .where('provider', '=', provider)
+        .where('provider_split_code', 'in', [...new Set(codes)])
+        .execute();
+      const out = new Map<string, Split>();
+      for (const row of rows) {
+        out.set(row.provider_split_code, map.toSplit(row, await this.#splitEntries(row.id)));
+      }
+      return out;
+    },
     update: async (id, patch) => {
       const columns: Record<string, unknown> = {};
       if (patch.name !== undefined) columns.name = patch.name;
@@ -1137,6 +1201,23 @@ class SqliteStorage implements Storage {
         .execute();
       const total = await count.executeTakeFirst();
       return { items: rows.map(map.toEvent), total: Number(total?.total ?? 0) };
+    },
+    listByResources: async (resourceIds) => {
+      const grouped = new Map<string, PayboxEvent[]>();
+      if (resourceIds.length === 0) return grouped;
+      const rows = await this.#db
+        .selectFrom('events')
+        .selectAll()
+        .where('resource_id', 'in', [...new Set(resourceIds)])
+        .orderBy('resource_id', 'asc')
+        .orderBy('sequence', 'asc')
+        .execute();
+      for (const row of rows) {
+        const list = grouped.get(row.resource_id) ?? [];
+        list.push(map.toEvent(row));
+        grouped.set(row.resource_id, list);
+      }
+      return grouped;
     },
     nextSequence: async (resourceId) => {
       // Upsert-and-return in one statement so concurrent appends to the same

@@ -5,8 +5,10 @@ import {
   isSupportedCurrency,
   type Clock,
   type IdFactory,
+  type Dispute,
   type Payment,
   type PaymentMethod,
+  type Refund,
 } from '@paybox/shared';
 import type { PaymentEngine, Storage } from '@paybox/core';
 import type { SubscriptionRunner } from '@paybox/simulator';
@@ -69,7 +71,11 @@ import {
 import { toPaystackError } from './errors.js';
 import { assertPaystackCredentials } from './auth.js';
 import { renderCheckoutPage, renderCheckoutResult } from './checkout.js';
-import { fromPaystackStatus, toPaystackStatus } from './status.js';
+import {
+  fromPaystackDisputeStatus,
+  fromPaystackStatus,
+  toPaystackStatus,
+} from './status.js';
 import { paystackAuthorizationMinter } from './authorization.js';
 import {
   expectedOtp,
@@ -155,9 +161,10 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
 
     const numeric = Number(handle);
     if (Number.isFinite(numeric)) {
-      const { items } = await storage.payments.list({ provider: PROVIDER, limit: 500 });
-      const match = items.find(
-        (p) => numericTransactionId(p.providerTransactionId) === numeric,
+      const match = await findByNumericId(
+        numeric,
+        (p: Payment) => p.providerTransactionId,
+        (limit, offset) => storage.payments.list({ provider: PROVIDER, limit, offset }),
       );
       if (match) return match;
     }
@@ -187,6 +194,59 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
     const code = payment.metadata.split_code;
     if (typeof code !== 'string' || code.length === 0) return null;
     return storage.splits.byCode(PROVIDER, code.replace(/^SPL_/, ''));
+  }
+
+  /**
+   * Serialise a page of transactions with a fixed number of queries.
+   *
+   * `decorate` costs four queries per payment, which on a 200-row page is 800
+   * against a synchronous SQLite driver that serialises them -- so the page
+   * blocks the event loop for the whole run. This batches each lookup into one
+   * query regardless of page size.
+   */
+  async function decorateMany(payments: readonly Payment[]) {
+    if (payments.length === 0) return [];
+
+    const customers = await storage.customers.byIds(
+      payments.map((p) => p.customerId).filter((id): id is string => id !== null),
+    );
+    const events = await storage.events.listByResources(payments.map((p) => p.id));
+
+    // Only settled payments can carry an authorization or a split breakdown,
+    // so unsettled rows contribute nothing to either lookup.
+    const settled = payments.filter((p) => p.status === 'successful');
+    const authorizations = await storage.authorizations.byCodes(
+      PROVIDER,
+      payments
+        .map((p) => paystackAuthorizationMinter(p)?.providerAuthorizationCode)
+        .filter((code): code is string => typeof code === 'string'),
+    );
+    const splits = await storage.splits.byCodes(
+      PROVIDER,
+      settled
+        .map((p) => p.metadata.split_code)
+        .filter((code): code is string => typeof code === 'string')
+        .map((code) => code.replace(/^SPL_/, '')),
+    );
+
+    return payments.map((payment) => {
+      const draft = paystackAuthorizationMinter(payment);
+      const rawSplit = payment.metadata.split_code;
+      const split =
+        typeof rawSplit === 'string' ? (splits.get(rawSplit.replace(/^SPL_/, '')) ?? null) : null;
+      return serializeTransaction(payment, {
+        customer: payment.customerId ? (customers.get(payment.customerId) ?? null) : null,
+        events: events.get(payment.id) ?? [],
+        includeFees,
+        authorization: draft?.providerAuthorizationCode
+          ? (authorizations.get(draft.providerAuthorizationCode) ?? null)
+          : null,
+        split,
+        ...(split && payment.status === 'successful'
+          ? { splitBreakdown: engine.computeSplit(split, payment.amount) }
+          : {}),
+      });
+    });
   }
 
   /**
@@ -381,7 +441,7 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
         ...(canonical ? { status: canonical } : {}),
         ...normalizeDateRange(request.query.from, request.query.to),
       });
-      const data = await Promise.all(items.map((p) => decorate(p)));
+      const data = await decorateMany(items);
       return reply.send({
         status: true,
         message: 'Transactions retrieved',
@@ -418,32 +478,29 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
     '/transaction/totals',
     async (request, reply) => {
       authenticate(request);
-      const { items, total } = await storage.payments.list({
-        provider: PROVIDER,
-        limit: 500,
-        ...normalizeDateRange(request.query.from, request.query.to),
-      });
+      const range = normalizeDateRange(request.query.from, request.query.to);
 
-      const settled = items.filter(
-        (p) =>
-          p.status === 'successful' ||
-          p.status === 'partially_refunded' ||
-          p.status === 'refunded',
-      );
-      const byCurrency = new Map<string, number>();
-      for (const payment of settled) {
-        byCurrency.set(
-          payment.currency,
-          (byCurrency.get(payment.currency) ?? 0) + payment.amount,
-        );
-      }
-      const volumes = [...byCurrency].map(([currency, amount]) => ({ currency, amount }));
+      // Aggregated across every matching row, not across one page: summing a
+      // page would silently disagree with the count printed beside it.
+      const volumes = await storage.payments.sumByCurrency({
+        provider: PROVIDER,
+        statuses: SETTLED_STATUSES,
+        ...range,
+      });
+      const { total } = await storage.payments.list({
+        provider: PROVIDER,
+        limit: 1,
+        ...range,
+      });
 
       return reply.send(
         ok('Transaction totals', {
           total_transactions: total,
           total_volume: volumes.reduce((sum, v) => sum + v.amount, 0),
-          total_volume_by_currency: volumes,
+          total_volume_by_currency: volumes.map((v) => ({
+            currency: v.currency,
+            amount: v.amount,
+          })),
           pending_transfers: 0,
           pending_transfers_by_currency: [],
         }),
@@ -465,12 +522,17 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
       const canonical = request.query.status
         ? fromPaystackStatus(request.query.status)
         : undefined;
-      const { items } = await storage.payments.list({
+      const filter = {
         provider: PROVIDER,
-        limit: 500,
         ...(canonical ? { status: canonical } : {}),
         ...normalizeDateRange(request.query.from, request.query.to),
-      });
+      };
+
+      // Paged to exhaustion. A truncated export is worse than a slow one: it
+      // looks complete and is not.
+      const items = await collectAll((limit, offset) =>
+        storage.payments.list({ ...filter, limit, offset }),
+      );
 
       const rows = items.map((payment) => ({
         id: numericTransactionId(payment.providerTransactionId),
@@ -487,6 +549,7 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
         ok('Export successful', {
           path: `${options.baseUrl}${options.basePath}/transaction/export.csv`,
           expiresAt: new Date(clock.now() + 60 * 60_000).toISOString(),
+          total: rows.length,
           rows,
         }),
       );
@@ -962,8 +1025,11 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
 
     const numeric = Number(handle);
     if (Number.isFinite(numeric)) {
-      const { items } = await storage.refunds.list({ limit: 500 });
-      const match = items.find((r) => numericTransactionId(r.providerRefundId) === numeric);
+      const match = await findByNumericId(
+        numeric,
+        (r: Refund) => r.providerRefundId,
+        (limit, offset) => storage.refunds.list({ limit, offset }),
+      );
       if (match) return match;
     }
     throw new PayboxError('not_found', `Refund ${handle} not found.`);
@@ -994,12 +1060,34 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
         );
       }
 
+      // Paystack: the account currency "should be the same as the currency the
+      // payment was made". A mismatch cannot be settled, so refuse it here
+      // rather than accepting details that could never be used.
+      const supplied = body.refund_account_details.currency.toUpperCase();
+      if (supplied !== refund.currency) {
+        throw new PayboxError(
+          'validation_failed',
+          `Refund account currency ${supplied} does not match the refund's ${refund.currency}.`,
+          { details: { supplied, expected: refund.currency } },
+        );
+      }
+
       // Bank details supplied: the refund goes back on the processing path.
       const retried = await engine.transitionRefund(refund.id, 'processing', {
         accountDetails: { ...body.refund_account_details },
       });
-      const settled = await engine.transitionRefund(retried.id, 'successful');
-      const payment = await storage.payments.byId(settled.paymentId);
+
+      // The retry is not guaranteed to work. Re-resolve the outcome from the
+      // instrument so a card documented as failing its refund keeps failing
+      // -- a retry that always succeeds would make the give-up path
+      // untestable.
+      const payment = await storage.payments.byId(retried.paymentId);
+      const last4 = payment?.paymentMethodDetails.last4;
+      const outcome = paystackRefundOutcome(typeof last4 === 'string' ? last4 : null);
+      const settled = await engine.transitionRefund(
+        retried.id,
+        outcome === 'needs_attention' ? 'successful' : outcome,
+      );
       return reply.send(ok('Refund retry successful', serializeRefund(settled, payment)));
     },
   );
@@ -1489,9 +1577,10 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
     // Paystack addresses disputes by numeric id, so accept that too.
     const numeric = Number(handle);
     if (Number.isFinite(numeric)) {
-      const { items } = await storage.disputes.list({ provider: PROVIDER, limit: 500 });
-      const match = items.find(
-        (d) => numericTransactionId(d.providerDisputeId) === numeric,
+      const match = await findByNumericId(
+        numeric,
+        (d: Dispute) => d.providerDisputeId,
+        (limit, offset) => storage.disputes.list({ provider: PROVIDER, limit, offset }),
       );
       if (match) return match;
     }
@@ -1532,8 +1621,10 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
       authenticate(request);
       const perPage = Math.min(Number(request.query.perPage ?? 50) || 50, 200);
       const pageNumber = Math.max(Number(request.query.page ?? 1) || 1, 1);
+      // Validated, not cast: an unrecognised filter should be a bad request,
+      // not an empty 200 that reads as "no disputes".
       const canonical = request.query.status
-        ? (request.query.status.replace(/-/g, '_') as 'resolved')
+        ? fromPaystackDisputeStatus(request.query.status)
         : undefined;
 
       const { items, total } = await storage.disputes.list({
@@ -2022,6 +2113,62 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
   });
 
 };
+
+/** Statuses in which money was actually collected. */
+const SETTLED_STATUSES = ['successful', 'partially_refunded', 'refunded'] as const;
+
+/** One repository page. `page()` in storage clamps this to 500. */
+const PAGE_SIZE = 500;
+
+/**
+ * A hard ceiling on paged reads, so a runaway loop cannot exhaust memory.
+ *
+ * Far above any realistic local dataset. Reaching it means something is
+ * wrong, and stopping is better than growing without bound.
+ */
+const MAX_PAGED_ROWS = 100_000;
+
+/**
+ * Read every page of a listing rather than only the first.
+ *
+ * The repository caps a single page at 500. Anything that needs *all* rows --
+ * an export, a lookup by a derived id -- has to page, or it silently operates
+ * on a 500-row window and reports a confidently wrong answer.
+ */
+async function collectAll<T>(
+  fetch: (limit: number, offset: number) => Promise<{ items: T[]; total: number }>,
+): Promise<T[]> {
+  const all: T[] = [];
+  for (let offset = 0; offset < MAX_PAGED_ROWS; offset += PAGE_SIZE) {
+    const { items } = await fetch(PAGE_SIZE, offset);
+    all.push(...items);
+    if (items.length < PAGE_SIZE) break;
+  }
+  return all;
+}
+
+/**
+ * Find a row by the numeric id Paystack would have minted for it.
+ *
+ * The numeric form is a one-way hash of the provider id, so it cannot be
+ * queried directly; the rows have to be scanned. Scanning only the newest
+ * page -- which is what this used to do -- makes older resources return 404
+ * for an id this API itself issued, so it pages to exhaustion and stops at
+ * the first match.
+ */
+async function findByNumericId<T>(
+  numeric: number,
+  providerIdOf: (row: T) => string,
+  fetch: (limit: number, offset: number) => Promise<{ items: T[]; total: number }>,
+): Promise<T | null> {
+  for (let offset = 0; offset < MAX_PAGED_ROWS; offset += PAGE_SIZE) {
+    const { items } = await fetch(PAGE_SIZE, offset);
+    const match = items.find((row) => numericTransactionId(providerIdOf(row)) === numeric);
+    if (match) return match;
+    if (items.length < PAGE_SIZE) break;
+  }
+  return null;
+}
 
 /**
  * Normalise Paystack's `from`/`to` query parameters into repository bounds.

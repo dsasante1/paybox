@@ -190,13 +190,26 @@ export function expectedOtp(identifier: string | null | undefined): string {
 /**
  * How a refund against this payment's instrument settles.
  *
- * Matched on the last four, because that is all a settled payment retains --
- * and Paystack's two refund-outcome cards have distinct suffixes, so four
- * digits are enough to tell them apart.
+ * Keyed explicitly on the last four rather than scanning every published
+ * instrument for a matching suffix. A settled payment retains only four
+ * digits, and those collide: `0000` is shared by the M-PESA test number, the
+ * Orange CIV test number, and paybox's own success card. A scan would return
+ * whichever happened to be listed first, so adding a refund outcome to any of
+ * them would silently apply it to the other two.
+ *
+ * Only Paystack's two documented refund-outcome cards belong here. Keep the
+ * keys collision-free: every entry must be a suffix no other test instrument
+ * shares.
  */
+const REFUND_BY_LAST4: Record<string, RefundOutcome> = {
+  // 4084 0800 0067 1803 — "Failed"
+  '1803': 'failed',
+  // 4084 0800 0067 1902 — "Needs attention"
+  '1902': 'needs_attention',
+};
+
 export function paystackRefundOutcome(last4: string | null | undefined): RefundOutcome {
   if (!last4) return 'successful';
   const suffix = last4.replace(/\D/g, '').slice(-4);
-  const match = [...CARDS, ...MOBILE_MONEY].find((i) => i.digits.slice(-4) === suffix);
-  return match?.refund ?? 'successful';
+  return REFUND_BY_LAST4[suffix] ?? 'successful';
 }
