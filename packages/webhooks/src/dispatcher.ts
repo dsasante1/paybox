@@ -93,6 +93,19 @@ export class WebhookDispatcher {
     return { ...this.#chaos };
   }
 
+  /**
+   * Turn every chaos setting off.
+   *
+   * `setChaos` merges, which is right for adjusting one knob but gives no way
+   * to get back to a clean slate. Without this, clearing meant knowing to send
+   * each field back as null -- and a forced-failure setting left on by mistake
+   * makes every later webhook fail for no visible reason.
+   */
+  resetChaos(): WebhookChaos {
+    this.#chaos = {};
+    return { ...this.#chaos };
+  }
+
   /* ---------------------------------------------------------------- *
    * Fan-out
    * ---------------------------------------------------------------- */

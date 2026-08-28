@@ -23,11 +23,14 @@ reaches a payment network, and it refuses live API keys.
 | Provider | Coverage |
 |---|---|
 | Paystack | **Partial** — [what works](docs/paystack.md) |
-| Stripe | Not implemented |
+| Stripe | **Partial** — [what works](docs/stripe.md) |
 | Flutterwave | Not implemented |
 | Kora | Not implemented |
 
-The engine is provider-independent; Paystack is the first adapter built on it.
+The engine is provider-independent, and two adapters now sit on it. Anything a
+provider needs from the engine reaches it as an injected function — a status
+mapping, an instrument table, an authorization minter — never an import, so
+neither adapter can see the other and the engine sees neither.
 
 ---
 

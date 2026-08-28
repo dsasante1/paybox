@@ -16,7 +16,9 @@ All packages are implemented and the vertical slice runs end to end: `shared`, `
 
 **Paystack and Stripe are the implemented adapters.** Flutterwave and Kora are not.
 
-_(historical note, kept because the invariants below were written under it)_ **Paystack was the only provider adapter.** Flutterwave and Kora are unimplemented and reported as such by `paybox provider` and the startup banner. Stripe's coverage is documented in `docs/stripe.md`, which is a contract on the same terms as `docs/paystack.md`. Coverage is documented honestly in `docs/paystack.md` — that file is a contract, not marketing.
+Flutterwave and Kora are unimplemented and reported as such by `paybox provider` and the startup banner. Coverage for each implemented adapter is documented honestly in `docs/paystack.md` and `docs/stripe.md` — those files are contracts, not marketing.
+
+Adding Stripe was the test of the injection design, and it needed three new seams rather than a rewrite: a `retry` transition flag (Stripe's PaymentIntent has no terminal failure), a clock-aware webhook signature with per-attempt re-signing, and webhook fan-out (one canonical event can be several provider events). All three are in `docs/architecture.md`.
 
 Paystack coverage is now broad: transactions, all five documented `/charge` channels, stored authorizations (`charge_authorization`, the PIN/OTP loop), plans/subscriptions/invoices, subaccounts and splits, a balance ledger, disputes, dedicated virtual accounts, and reporting endpoints. **The authoritative source is Paystack's official OpenAPI spec** — `PaystackOSS/openapi`, `dist/paystack.yaml`, pinned at blob `efa5c8d25611a60f01fd8ce59352fb38b7edfbfb` — because `paystack.com/docs` returns HTTP 403 to automated fetches. Cite the `operationId` and that SHA next to anything derived from it. Where the spec types a response generically (every `/charge` envelope; all of `/settlement`), `docs/paystack.md` says so rather than inventing a shape.
 
