@@ -21,6 +21,7 @@
     "@fastify/swagger": "^9.8.1",
     "@scalar/fastify-api-reference": "^1.66.1",
     "yaml": "^2.8.0",
-    "fastify-plugin": "^5.1.0"
+    "fastify-plugin": "^5.1.0",
+    "@paybox/stripe": "0.1.0"
   }
 }

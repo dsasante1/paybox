@@ -7,6 +7,7 @@
     { "path": "./packages/webhooks" },
     { "path": "./packages/simulator" },
     { "path": "./packages/providers/paystack" },
+    { "path": "./packages/providers/stripe" },
     { "path": "./apps/api" },
     { "path": "./apps/cli" }
   ]
