@@ -217,3 +217,22 @@ The default is off. A body-only signature is identical on every attempt, so
 Paystack retries stay byte-identical, which is what makes the delivery log
 trustworthy. Only the signature headers are recomputed; the payload never
 changes.
+
+## One canonical event, several provider events
+
+`WebhookFormatter.format()` may return an array. Each entry becomes its own
+delivery: its own event type, its own endpoint match, its own signature, its
+own row in the delivery log.
+
+Paystack never needs this — one canonical event is one Paystack webhook. Stripe
+does, because it reports one occurrence on several objects: a settled payment
+is both `payment_intent.succeeded` (carrying the intent) and `charge.succeeded`
+(carrying the charge), and a merchant may subscribe to either.
+
+Matching endpoints **per formatted webhook** rather than once per canonical
+event is what makes that work. An endpoint subscribed to only
+`charge.succeeded` gets exactly one delivery, not two, and not one of the wrong
+type.
+
+Providers that return a single webhook are unaffected: the dispatcher
+normalises one or many into the same loop.

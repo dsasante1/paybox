@@ -147,33 +147,37 @@ a failure the emulator would have invented.
 | `refund.failed` | `refund.failed` |
 | `customer.created` | `customer.created` |
 
+**One canonical event fans out to several Stripe events**, because Stripe
+reports one thing happening on more than one object. A settlement sends both
+`payment_intent.succeeded` and `charge.succeeded`, each carrying its own
+object and its own `evt_` id, and each matched against endpoint subscriptions
+separately — so an endpoint subscribed to only `charge.succeeded` receives only
+that. A failure fans out the same way, to `payment_intent.payment_failed` and
+`charge.failed`.
+
 Note the contrast with Paystack, which has **no** failure webhook at all.
 Stripe does, because its intent survives the failure and the merchant is
 expected to react.
 
 ## Known limitations
 
-1. **A canonical event emits one Stripe event, not two.** Stripe reports a
-   settlement on both `payment_intent.succeeded` and `charge.succeeded`; paybox
-   sends the intent one only. The dispatcher creates one delivery per formatted
-   webhook, so fanning out needs a wider contract than exists today.
-2. **The intent and its charge are one row.** `pi_…` and `ch_…` address the
+1. **The intent and its charge are one row.** `pi_…` and `ch_…` address the
    same payment. They are not independent objects as they are at Stripe, so a
    payment cannot have several charges — which is also why a retry reuses the
    charge id rather than minting a new one.
-3. **Cursor pagination is emulated over offsets.** `starting_after` and
+2. **Cursor pagination is emulated over offsets.** `starting_after` and
    `ending_before` work by scanning up to 10,000 rows for the cursor id; a
    cursor beyond that window is ignored rather than honoured.
-4. `POST /v1/payment_intents/{id}` updates metadata, description and
+3. `POST /v1/payment_intents/{id}` updates metadata, description and
    `receipt_email` only. Amount and currency are deliberately not updatable.
-5. Charges are read-only. There is no `POST /v1/charges`; the legacy direct
+4. Charges are read-only. There is no `POST /v1/charges`; the legacy direct
    charge API is not implemented.
-6. Refunds settle **immediately**. Stripe's asynchronous refund path applies to
+5. Refunds settle **immediately**. Stripe's asynchronous refund path applies to
    bank-backed methods, which this slice does not implement.
-7. `client_secret` is derived from the intent id and is **not** a credential.
+6. `client_secret` is derived from the intent id and is **not** a credential.
    It keeps runs reproducible; do not treat it as unguessable.
-8. `receipt_url` is always null, because the emulator serves no receipt page.
+7. `receipt_url` is always null, because the emulator serves no receipt page.
    That is what Stripe returns before one exists.
-9. A customer created without an email gets a synthetic local address, because
+8. A customer created without an email gets a synthetic local address, because
    paybox keys customers on email and Stripe does not require one.
-10. `expand[]` is parsed and ignored. Nothing is expanded.
+9. `expand[]` is parsed and ignored. Nothing is expanded.

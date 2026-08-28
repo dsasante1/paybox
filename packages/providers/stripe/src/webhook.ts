@@ -80,22 +80,24 @@ export class StripeWebhookFormatter implements WebhookFormatter {
   async format(
     event: PayboxEvent,
     context: FormatterContext,
-  ): Promise<FormattedWebhook | null> {
+  ): Promise<FormattedWebhook[] | null> {
     const types = EVENT_MAP[event.type];
     if (!types || types.length === 0) return null;
 
-    // One canonical event can be several Stripe events; the first is the one
-    // this delivery carries. The dispatcher creates one delivery per formatted
-    // webhook, so fanning out fully would need a wider contract -- recorded in
-    // docs/stripe.md rather than faked here.
-    const eventType = types[0]!;
-    const data = await this.#buildData(event, eventType, context);
-    if (!data) return null;
-
-    return {
-      eventType,
-      body: serializeEvent(event, eventType, data, STRIPE_API_VERSION),
-    };
+    // Stripe reports one thing happening on several objects: a settlement is
+    // both `payment_intent.succeeded` and `charge.succeeded`, each carrying its
+    // own object. Each becomes its own delivery, so an endpoint subscribed to
+    // only one of them receives only that.
+    const webhooks: FormattedWebhook[] = [];
+    for (const eventType of types) {
+      const data = await this.#buildData(event, eventType, context);
+      if (!data) continue;
+      webhooks.push({
+        eventType,
+        body: serializeEvent(event, eventType, data, STRIPE_API_VERSION),
+      });
+    }
+    return webhooks.length > 0 ? webhooks : null;
   }
 
   async #buildData(

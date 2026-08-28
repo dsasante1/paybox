@@ -41,8 +41,20 @@ export interface SigningContext {
  */
 export interface WebhookFormatter {
   provider: ProviderId;
-  /** Return null for canonical events this provider does not emit. */
-  format(event: PayboxEvent, context: FormatterContext): Promise<FormattedWebhook | null>;
+  /**
+   * Turn a canonical event into the provider's webhook(s).
+   *
+   * Return null for canonical events this provider does not emit. Return an
+   * **array** where one canonical event is several provider events: Stripe
+   * reports a settlement on both `payment_intent.succeeded` and
+   * `charge.succeeded`, carrying a different object in each. Each one becomes
+   * its own delivery, matched against endpoints by its own event type, so a
+   * subscriber to only `charge.succeeded` receives only that.
+   */
+  format(
+    event: PayboxEvent,
+    context: FormatterContext,
+  ): Promise<FormattedWebhook | FormattedWebhook[] | null>;
   /**
    * Signature headers for the exact bytes being sent. Takes the raw string,
    * never a re-serialised object -- providers sign bytes, and a whitespace

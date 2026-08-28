@@ -109,35 +109,43 @@ export class WebhookDispatcher {
     // webhook. Paystack has no "payment.processing" webhook, for instance.
     if (!formatted) return [];
 
-    const endpoints = await this.#storage.webhooks.endpointsFor(
-      event.provider,
-      formatted.eventType,
-    );
-    if (endpoints.length === 0) {
-      this.#logger.debug('No webhook endpoint matched', {
-        provider: event.provider,
-        eventType: formatted.eventType,
-      });
-      return [];
-    }
-
-    // Serialise once. Everything downstream -- the signature, the stored
-    // payload, the bytes on the wire, a later replay -- uses this exact string.
-    const rawBody = JSON.stringify(formatted.body);
+    // One canonical event can be several provider events. Each is matched
+    // against endpoints and signed on its own, because they have different
+    // event types and a subscriber may want only one of them.
+    const webhooks = Array.isArray(formatted) ? formatted : [formatted];
 
     const created: WebhookDelivery[] = [];
-    for (const endpoint of endpoints) {
-      const copies = this.#chaos.duplicate ? 2 : 1;
-      for (let copy = 0; copy < copies; copy++) {
-        created.push(
-          await this.#createAndSchedule(endpoint, event, formatted.eventType, rawBody, {
-            ...(formatted.headers ?? {}),
-            ...formatter.sign(rawBody, endpoint.secret, {
-              timestamp: this.#clock.now(),
-              attempt: 0,
+    for (const webhook of webhooks) {
+      const endpoints = await this.#storage.webhooks.endpointsFor(
+        event.provider,
+        webhook.eventType,
+      );
+      if (endpoints.length === 0) {
+        this.#logger.debug('No webhook endpoint matched', {
+          provider: event.provider,
+          eventType: webhook.eventType,
+        });
+        continue;
+      }
+
+      // Serialise once per webhook. Everything downstream -- the signature,
+      // the stored payload, the bytes on the wire, a later replay -- uses this
+      // exact string.
+      const rawBody = JSON.stringify(webhook.body);
+
+      for (const endpoint of endpoints) {
+        const copies = this.#chaos.duplicate ? 2 : 1;
+        for (let copy = 0; copy < copies; copy++) {
+          created.push(
+            await this.#createAndSchedule(endpoint, event, webhook.eventType, rawBody, {
+              ...(webhook.headers ?? {}),
+              ...formatter.sign(rawBody, endpoint.secret, {
+                timestamp: this.#clock.now(),
+                attempt: 0,
+              }),
             }),
-          }),
-        );
+          );
+        }
       }
     }
     return created;

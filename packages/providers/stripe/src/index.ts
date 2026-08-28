@@ -30,6 +30,7 @@ export {
   serializeCustomer,
   serializePaymentMethod,
   serializeEvent,
+  stripeEventId,
   stripeId,
   clientSecret,
   unix,
