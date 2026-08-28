@@ -144,3 +144,54 @@ export const listQuerySchema = z.object({
   ending_before: z.string().optional(),
   customer: z.string().optional(),
 });
+
+/**
+ * Checkout Sessions.
+ *
+ * Only `mode: payment` is implemented in this slice. Line items arrive as
+ * `line_items[0][price_data][unit_amount]` and friends, which the form
+ * expander turns into an array of objects before this runs.
+ */
+const priceData = z.object({
+  currency: z.string().min(3).max(3),
+  unit_amount: amount,
+  product_data: z
+    .object({
+      name: z.string().min(1),
+      description: z.string().optional(),
+    })
+    .optional(),
+});
+
+const lineItem = z.object({
+  price_data: priceData.optional(),
+  price: z.string().optional(),
+  quantity: z
+    .union([z.number(), z.string()])
+    .optional()
+    .transform((value) => {
+      const parsed = value === undefined ? 1 : Number(value);
+      return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : 1;
+    }),
+});
+
+export const checkoutSessionCreateSchema = z.object({
+  mode: z.enum(['payment', 'setup', 'subscription']).default('payment'),
+  success_url: z.string().optional(),
+  cancel_url: z.string().optional(),
+  return_url: z.string().optional(),
+  client_reference_id: z.string().optional(),
+  customer: z.string().optional(),
+  customer_email: z.string().email().optional(),
+  line_items: z.array(lineItem).min(1),
+  currency: z.string().min(3).max(3).optional(),
+  metadata,
+  expires_at: z.union([z.number(), z.string()]).optional(),
+});
+
+/** The hosted page's own form. Not a Stripe API shape. */
+export const checkoutPaySchema = z.object({
+  card_number: z.string().min(12),
+  exp_month: z.string().optional(),
+  exp_year: z.string().optional(),
+});

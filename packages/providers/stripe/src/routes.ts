@@ -15,6 +15,8 @@ import { toStripeError } from './errors.js';
 import { stripeInstrumentResolver } from './instruments.js';
 import { fromStripeStatus } from './status.js';
 import {
+  checkoutPaySchema,
+  checkoutSessionCreateSchema,
   customerCreateSchema,
   listQuerySchema,
   paymentIntentCancelSchema,
@@ -26,9 +28,12 @@ import {
   paymentMethodCreateSchema,
   refundCreateSchema,
 } from './schemas.js';
+import { renderCheckoutPage, renderCheckoutResult } from './checkout.js';
 import {
   list,
   serializeCharge,
+  serializeCheckoutSession,
+  serializeLineItems,
   serializeCustomer,
   serializePaymentIntent,
   serializePaymentMethod,
@@ -441,6 +446,233 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
       );
       const data = await Promise.all(page.map((payment) => decorate(payment)));
       return reply.send(list(data, '/v1/payment_intents', hasMore));
+    },
+  );
+
+  /* ---------------------------------------------------------------- *
+   * Checkout Sessions
+   *
+   * A `mode: payment` session and the payment it collects are one lifecycle,
+   * so paybox stores the session on the payment with its own fields in
+   * metadata rather than as a separate row. `expires_at` and `status:
+   * expired` map onto the canonical `expiresAt` and `expired` directly.
+   * ---------------------------------------------------------------- */
+
+  /** Stripe expires an unpaid Checkout Session 24 hours after creation. */
+  const SESSION_LIFETIME_MS = 24 * 60 * 60_000;
+
+  async function loadSession(handle: string): Promise<Payment> {
+    const canonical = handle.replace(/^cs_/, 'pay_');
+    const payment =
+      (await storage.payments.byId(canonical)) ?? (await storage.payments.byId(handle));
+    if (payment && payment.provider === PROVIDER && payment.metadata.mode) return payment;
+    throw new PayboxError('not_found', `No such checkout.session: '${handle}'.`);
+  }
+
+  async function decorateSession(payment: Payment) {
+    const customer = payment.customerId ? await storage.customers.byId(payment.customerId) : null;
+    return serializeCheckoutSession(payment, {
+      customer,
+      baseUrl: options.baseUrl,
+      basePath: options.basePath,
+    });
+  }
+
+  fastify.post('/v1/checkout/sessions', async (request, reply) => {
+    authenticate(request);
+    const body = checkoutSessionCreateSchema.parse(request.body);
+
+    if (body.mode !== 'payment') {
+      throw new PayboxError(
+        'unsupported_operation',
+        `paybox implements Checkout in mode=payment only; received "${body.mode}". ` +
+          'Subscription mode arrives with the billing slice.',
+      );
+    }
+
+    // Every line item must price itself: `price` ids belong to the Prices API,
+    // which this slice does not implement, so accepting one would silently
+    // produce a zero-amount session.
+    const priced = body.line_items.map((item) => {
+      if (!item.price_data) {
+        throw new PayboxError(
+          'unsupported_operation',
+          'paybox requires `price_data` on each line item; `price` ids need the Prices ' +
+            'API, which is not implemented yet.',
+        );
+      }
+      return {
+        name: item.price_data.product_data?.name ?? 'Item',
+        unit_amount: item.price_data.unit_amount,
+        quantity: item.quantity,
+        currency: item.price_data.currency,
+      };
+    });
+
+    const currency = (body.currency ?? priced[0]!.currency).toUpperCase();
+    if (!isSupportedCurrency(currency)) {
+      throw new PayboxError(
+        'unsupported_currency',
+        `The currency ${currency.toLowerCase()} is not supported.`,
+      );
+    }
+    if (priced.some((item) => item.currency.toUpperCase() !== currency)) {
+      throw new PayboxError(
+        'validation_failed',
+        'All line items in a session must share one currency.',
+      );
+    }
+
+    const total = priced.reduce((sum, item) => sum + item.unit_amount * item.quantity, 0);
+    const customer = body.customer ? await loadCustomer(body.customer) : null;
+
+    const payment = await engine.createPayment({
+      provider: PROVIDER,
+      amount: total,
+      currency,
+      customerId: customer?.id ?? null,
+      callbackUrl: body.success_url ?? null,
+      metadata: {
+        ...(body.metadata ?? {}),
+        mode: body.mode,
+        line_items: priced,
+        ...(body.success_url ? { success_url: body.success_url } : {}),
+        ...(body.cancel_url ? { cancel_url: body.cancel_url } : {}),
+        ...(body.customer_email ? { customer_email: body.customer_email } : {}),
+        ...(body.client_reference_id ? { client_reference_id: body.client_reference_id } : {}),
+      },
+      status: 'created',
+      // Stripe expires an unpaid session; modelling it is what lets
+      // `paybox time advance 25h` reproduce an abandoned checkout.
+      expiresInMs: SESSION_LIFETIME_MS,
+    });
+
+    return reply.send(await decorateSession(payment));
+  });
+
+  fastify.get<{ Params: { session: string } }>(
+    '/v1/checkout/sessions/:session',
+    async (request, reply) => {
+      authenticate(request);
+      return reply.send(await decorateSession(await loadSession(request.params.session)));
+    },
+  );
+
+  fastify.get<{ Querystring: Record<string, string> }>(
+    '/v1/checkout/sessions',
+    async (request, reply) => {
+      authenticate(request);
+      const query = listQuerySchema.parse(request.query);
+      const { page, hasMore } = await paginate(
+        query,
+        (limit, offset) => storage.payments.list({ provider: PROVIDER, limit, offset }),
+        (payment) => stripeId('cs', payment.id),
+      );
+      const sessions = page.filter((payment) => Boolean(payment.metadata.mode));
+      const data = await Promise.all(sessions.map((p) => decorateSession(p)));
+      return reply.send(list(data, '/v1/checkout/sessions', hasMore));
+    },
+  );
+
+  fastify.get<{ Params: { session: string } }>(
+    '/v1/checkout/sessions/:session/line_items',
+    async (request, reply) => {
+      authenticate(request);
+      const payment = await loadSession(request.params.session);
+      return reply.send(
+        list(
+          serializeLineItems(payment),
+          `/v1/checkout/sessions/${request.params.session}/line_items`,
+          false,
+        ),
+      );
+    },
+  );
+
+  fastify.post<{ Params: { session: string } }>(
+    '/v1/checkout/sessions/:session/expire',
+    async (request, reply) => {
+      authenticate(request);
+      const payment = await loadSession(request.params.session);
+      if (payment.status === 'successful') {
+        throw new PayboxError(
+          'invalid_state_transition',
+          'You cannot expire a Checkout Session that has already been paid.',
+        );
+      }
+      const expired = await simulator.expire(payment.id);
+      return reply.send(await decorateSession(expired));
+    },
+  );
+
+  /* -------------------- the hosted page -------------------- */
+
+  /**
+   * Deliberately unauthenticated: this is the page the *payer* visits, not an
+   * API call the merchant makes. Stripe's hosted Checkout is public too.
+   */
+  fastify.get<{ Params: { session: string } }>(
+    '/checkout/:session',
+    async (request, reply) => {
+      const payment = await storage.payments
+        .byId(request.params.session.replace(/^cs_/, 'pay_'))
+        .catch(() => null);
+      if (!payment || payment.provider !== PROVIDER || !payment.metadata.mode) {
+        return reply.status(404).type('text/html').send('<h1>Checkout session not found</h1>');
+      }
+      if (payment.status === 'expired' || payment.status === 'cancelled') {
+        return reply
+          .status(410)
+          .type('text/html')
+          .send('<h1>This checkout session has expired</h1>');
+      }
+
+      const items = Array.isArray(payment.metadata.line_items)
+        ? (payment.metadata.line_items as { name?: string }[])
+        : [];
+      return reply.type('text/html').send(
+        renderCheckoutPage({
+          payment,
+          sessionId: stripeId('cs', payment.id),
+          basePath: options.basePath,
+          productName: items[0]?.name ?? 'Payment',
+        }),
+      );
+    },
+  );
+
+  fastify.post<{ Params: { session: string } }>(
+    '/checkout/:session/pay',
+    async (request, reply) => {
+      const payment = await storage.payments
+        .byId(request.params.session.replace(/^cs_/, 'pay_'))
+        .catch(() => null);
+      if (!payment || payment.provider !== PROVIDER || !payment.metadata.mode) {
+        return reply.status(404).type('text/html').send('<h1>Checkout session not found</h1>');
+      }
+
+      const form = checkoutPaySchema.parse(request.body);
+      const details = cardDetailsFrom({
+        number: form.card_number,
+        exp_month: form.exp_month,
+        exp_year: form.exp_year,
+      });
+
+      await engine.transitionPayment(payment.id, 'pending', {
+        paymentMethod: 'card',
+        paymentMethodDetails: details,
+      });
+      const fresh = await loadSession(request.params.session);
+      const started = await confirmPayment(fresh, form.card_number);
+
+      const successUrl = payment.metadata.success_url;
+      return reply.type('text/html').send(
+        renderCheckoutResult({
+          payment: started,
+          redirectUrl: typeof successUrl === 'string' ? successUrl : null,
+          message: 'Your payment is being processed.',
+        }),
+      );
     },
   );
 

@@ -30,6 +30,8 @@ export {
   serializeCustomer,
   serializePaymentMethod,
   serializeEvent,
+  serializeCheckoutSession,
+  serializeLineItems,
   stripeEventId,
   stripeId,
   clientSecret,
