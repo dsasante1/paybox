@@ -457,4 +457,29 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE refunds ADD COLUMN account_details TEXT;
     `,
   },
+  {
+    id: '0009_products_and_interval_count',
+    sql: `
+      -- Stripe separates the Product (what it is) from the Price (what it
+      -- costs). Paystack folds both into a plan, so product_id is nullable.
+      CREATE TABLE products (
+        id                  TEXT PRIMARY KEY,
+        provider            TEXT NOT NULL,
+        provider_product_id TEXT NOT NULL,
+        name                TEXT NOT NULL,
+        description         TEXT,
+        active              INTEGER NOT NULL DEFAULT 1,
+        metadata            TEXT NOT NULL DEFAULT '{}',
+        created_at          TEXT NOT NULL,
+        updated_at          TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX idx_products_provider_id
+        ON products (provider, provider_product_id);
+
+      -- Stripe writes "every three months" as interval=month plus a count.
+      -- Existing plans are all count 1, which is Paystack's only shape.
+      ALTER TABLE plans ADD COLUMN interval_count INTEGER NOT NULL DEFAULT 1;
+      ALTER TABLE plans ADD COLUMN product_id TEXT REFERENCES products(id) ON DELETE SET NULL;
+    `,
+  },
 ];

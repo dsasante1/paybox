@@ -216,6 +216,8 @@ export interface PlanRow {
   amount: number;
   currency: string;
   interval: string;
+  interval_count: number;
+  product_id: string | null;
   description: string | null;
   invoice_limit: number;
   send_invoices: number;
@@ -340,6 +342,18 @@ export interface DisputeRow {
   updated_at: string;
 }
 
+export interface ProductRow {
+  id: string;
+  provider: string;
+  provider_product_id: string;
+  name: string;
+  description: string | null;
+  active: number;
+  metadata: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface MigrationRow {
   id: string;
   applied_at: string;
@@ -357,6 +371,7 @@ export interface Database {
   idempotency_keys: IdempotencyRow;
   authorizations: AuthorizationRow;
   dedicated_accounts: DedicatedAccountRow;
+  products: ProductRow;
   plans: PlanRow;
   subscriptions: SubscriptionRow;
   invoices: InvoiceRow;

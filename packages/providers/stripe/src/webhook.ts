@@ -10,6 +10,8 @@ import {
   serializeCharge,
   serializeCheckoutSession,
   serializeCustomer,
+  serializeInvoice,
+  serializeSubscription,
   serializeEvent,
   serializePaymentIntent,
   serializeRefund,
@@ -54,12 +56,22 @@ const EVENT_MAP: Record<string, readonly string[]> = {
   'refund.successful': ['charge.refunded', 'refund.updated'],
   'refund.failed': ['refund.failed'],
   'customer.created': ['customer.created'],
+  'subscription.created': ['customer.subscription.created'],
+  'subscription.non_renewing': ['customer.subscription.updated'],
+  'subscription.attention': ['customer.subscription.updated'],
+  'subscription.cancelled': ['customer.subscription.deleted'],
+  'subscription.completed': ['customer.subscription.deleted'],
+  'invoice.created': ['invoice.created'],
+  'invoice.success': ['invoice.paid'],
+  'invoice.payment_failed': ['invoice.payment_failed'],
 };
 
 /** Which Stripe object each event carries in `data.object`. */
 function subjectFor(
   eventType: string,
-): 'intent' | 'charge' | 'refund' | 'customer' | 'session' {
+): 'intent' | 'charge' | 'refund' | 'customer' | 'session' | 'subscription' | 'invoice' {
+  if (eventType.startsWith('customer.subscription.')) return 'subscription';
+  if (eventType.startsWith('invoice.')) return 'invoice';
   if (eventType.startsWith('checkout.session.')) return 'session';
   if (eventType.startsWith('charge.refunded')) return 'charge';
   if (eventType.startsWith('charge.')) return 'charge';
@@ -158,6 +170,31 @@ export class StripeWebhookFormatter implements WebhookFormatter {
         return serializeCharge(payment, { customer });
       }
       return serializeRefund(refund, payment);
+    }
+
+    if (event.resourceType === 'subscription') {
+      const subscription = await storage.subscriptions.byId(event.resourceId);
+      if (!subscription) return null;
+      const plan = await storage.plans.byId(subscription.planId);
+      const invoices = await storage.invoices.listBySubscription(subscription.id);
+      return serializeSubscription(subscription, {
+        plan,
+        product: plan?.productId ? await storage.products.byId(plan.productId) : null,
+        customer: await storage.customers.byId(subscription.customerId),
+        latestInvoice: invoices.at(-1) ?? null,
+      });
+    }
+
+    if (event.resourceType === 'invoice') {
+      const invoice = await storage.invoices.byId(event.resourceId);
+      if (!invoice) return null;
+      const subscription = await storage.subscriptions.byId(invoice.subscriptionId);
+      return serializeInvoice(invoice, {
+        subscription,
+        customer: await storage.customers.byId(invoice.customerId),
+        payment: invoice.paymentId ? await storage.payments.byId(invoice.paymentId) : null,
+        plan: subscription ? await storage.plans.byId(subscription.planId) : null,
+      });
     }
 
     if (event.resourceType === 'customer') {

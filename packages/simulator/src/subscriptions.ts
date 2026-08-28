@@ -5,6 +5,7 @@ import {
   type Invoice,
   type Subscription,
 } from '@paybox/shared';
+import type { ProviderId } from '@paybox/shared';
 import {
   addInterval,
   isRenewable,
@@ -21,13 +22,20 @@ export const SUBSCRIPTION_INVOICE_JOB = 'subscription.invoice';
 export const SUBSCRIPTION_CHARGE_JOB = 'subscription.charge';
 
 /**
- * How far ahead of the debit the invoice is raised.
+ * How far ahead of the debit an invoice is raised, per provider.
  *
  * Paystack documents sending `invoice.create` three days before the next
- * payment date, giving the merchant a window to react before money moves.
- * Verified 2026-08-27 against Paystack's subscription documentation.
+ * payment date (verified 2026-08-27). Stripe creates the invoice and finalises
+ * it about an hour later, so its window is far shorter. Hardcoding either
+ * would make the other's `invoice.created` webhook arrive at the wrong time,
+ * which is precisely the timing a dunning integration is built around.
+ *
+ * Injected rather than imported, like every other provider-specific value the
+ * shared packages need (spec §30).
  */
-const INVOICE_LEAD_MS = 3 * 24 * 60 * 60_000;
+export type InvoiceLeadTimes = Partial<Record<ProviderId, number>>;
+
+const DEFAULT_INVOICE_LEAD_MS = 3 * 24 * 60 * 60_000;
 
 export interface SubscriptionRunnerDeps {
   storage: Storage;
@@ -35,6 +43,8 @@ export interface SubscriptionRunnerDeps {
   ids: IdFactory;
   engine: PaymentEngine;
   simulator: PaymentSimulator;
+  /** Per-provider lead time for `invoice.created`. */
+  invoiceLeadMs?: InvoiceLeadTimes;
 }
 
 /**
@@ -58,6 +68,7 @@ export class SubscriptionRunner {
   readonly #ids: IdFactory;
   readonly #engine: PaymentEngine;
   readonly #simulator: PaymentSimulator;
+  readonly #invoiceLeadMs: InvoiceLeadTimes;
 
   constructor(deps: SubscriptionRunnerDeps) {
     this.#storage = deps.storage;
@@ -65,12 +76,13 @@ export class SubscriptionRunner {
     this.#ids = deps.ids;
     this.#engine = deps.engine;
     this.#simulator = deps.simulator;
+    this.#invoiceLeadMs = deps.invoiceLeadMs ?? {};
   }
 
   /** Schedule the first billing cycle for a freshly created subscription. */
   async start(subscription: Subscription): Promise<void> {
     if (!subscription.nextPaymentDate) return;
-    await this.#scheduleCycle(subscription.id, subscription.nextPaymentDate);
+    await this.#scheduleCycle(subscription.id, subscription.nextPaymentDate, subscription.provider);
   }
 
   /**
@@ -142,7 +154,7 @@ export class SubscriptionRunner {
 
     if (settled.status === 'successful') {
       await this.#engine.transitionInvoice(invoice.id, 'success', { paymentId: settled.id });
-      await this.#advanceToNextCycle(subscription, plan.interval, dueAt);
+      await this.#advanceToNextCycle(subscription, plan.interval, dueAt, plan.intervalCount);
       return;
     }
 
@@ -151,7 +163,7 @@ export class SubscriptionRunner {
     // renewal. `invoice.payment_failed` fires and the merchant has to act.
     await this.#engine.transitionInvoice(invoice.id, 'failed', { paymentId: settled.id });
     await this.#moveToAttention(subscription);
-    await this.#advanceToNextCycle(subscription, plan.interval, dueAt);
+    await this.#advanceToNextCycle(subscription, plan.interval, dueAt, plan.intervalCount);
   };
 
   /* ---------------------------------------------------------------- */
@@ -164,7 +176,7 @@ export class SubscriptionRunner {
     return this.#engine.createInvoice({
       subscriptionId: subscription.id,
       periodStart: dueAt,
-      periodEnd: addInterval(dueAt, plan.interval),
+      periodEnd: addInterval(dueAt, plan.interval, plan.intervalCount),
       dueAt,
     });
   }
@@ -198,6 +210,7 @@ export class SubscriptionRunner {
     subscription: Subscription,
     interval: Parameters<typeof addInterval>[1],
     dueAt: string,
+    intervalCount = 1,
   ): Promise<void> {
     const current = await this.#storage.subscriptions.byId(subscription.id);
     if (!current || !isRenewable(current.status)) return;
@@ -210,22 +223,26 @@ export class SubscriptionRunner {
     // Advance from the date this cycle was due, not from the clock. They are
     // the same instant during a normal run, but deriving from the due date is
     // what stops a long `time advance` collapsing later cycles onto one date.
-    const next = addInterval(dueAt, interval);
+    const next = addInterval(dueAt, interval, intervalCount);
     await this.#storage.subscriptions.update(current.id, {
       nextPaymentDate: next,
       updatedAt: this.#clock.nowISO(),
     });
-    await this.#scheduleCycle(current.id, next);
+    await this.#scheduleCycle(current.id, next, current.provider);
   }
 
-  async #scheduleCycle(subscriptionId: string, dueAt: string): Promise<void> {
+  async #scheduleCycle(
+    subscriptionId: string,
+    dueAt: string,
+    provider: ProviderId,
+  ): Promise<void> {
     const now = this.#clock.now();
     const due = Date.parse(dueAt);
     const payload = { subscriptionId, dueAt };
     const group = `subscription:${subscriptionId}`;
 
     // Only raise the invoice ahead of time when there is time to be ahead of.
-    const invoiceAt = due - INVOICE_LEAD_MS;
+    const invoiceAt = due - this.#leadFor(provider);
     if (invoiceAt > now) {
       await this.#enqueue(SUBSCRIPTION_INVOICE_JOB, payload, new Date(invoiceAt).toISOString(), group);
     }
@@ -235,6 +252,11 @@ export class SubscriptionRunner {
       new Date(Math.max(due, now)).toISOString(),
       group,
     );
+  }
+
+  /** The lead time for the provider that owns this subscription. */
+  #leadFor(provider: ProviderId): number {
+    return this.#invoiceLeadMs[provider] ?? DEFAULT_INVOICE_LEAD_MS;
   }
 
   async #enqueue(

@@ -182,6 +182,25 @@ export interface DedicatedAccount {
   updatedAt: string;
 }
 
+/**
+ * A sellable thing a recurring price belongs to.
+ *
+ * Stripe separates the Product (what it is) from the Price (what it costs and
+ * how often). Paystack folds both into a Plan, so `productId` is optional and
+ * a Paystack plan simply has none.
+ */
+export interface Product {
+  id: string;
+  provider: ProviderId;
+  providerProductId: string;
+  name: string;
+  description: string | null;
+  active: boolean;
+  metadata: Metadata;
+  createdAt: string;
+  updatedAt: string;
+}
+
 /** A recurring price. Canonical: Stripe and Flutterwave both have one. */
 export interface Plan {
   id: string;
@@ -191,6 +210,15 @@ export interface Plan {
   amount: number;
   currency: string;
   interval: PlanInterval;
+  /**
+   * How many intervals make one billing period.
+   *
+   * Stripe expresses "every three months" as `interval: month,
+   * interval_count: 3`. Paystack has no equivalent and always uses 1.
+   */
+  intervalCount: number;
+  /** The product this price belongs to, where the provider has products. */
+  productId: string | null;
   description: string | null;
   /** How many invoices to raise before the subscription completes. 0 = forever. */
   invoiceLimit: number;
