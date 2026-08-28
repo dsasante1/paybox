@@ -1,4 +1,11 @@
-import type { PaymentStatus, RefundStatus } from '@paybox/shared';
+import {
+  PayboxError,
+  type InvoiceStatus,
+  type PaymentStatus,
+  type PlanInterval,
+  type RefundStatus,
+  type SubscriptionStatus,
+} from '@paybox/shared';
 
 /**
  * Stripe's PaymentIntent status vocabulary.
@@ -119,4 +126,94 @@ export function cancellationReason(status: PaymentStatus): string | null {
   if (status === 'expired') return 'abandoned';
   if (status === 'cancelled') return 'requested_by_customer';
   return null;
+}
+
+
+/**
+ * Subscription status: canonical -> Stripe.
+ *
+ * Stripe's enum is `active | canceled | incomplete | incomplete_expired |
+ * past_due | paused | trialing | unpaid`. Two mappings deserve a note:
+ *
+ *   attention     -> past_due   A renewal failed and the merchant must act.
+ *   non_renewing  -> active     Stripe expresses "stops at period end" as a
+ *                               *flag* (`cancel_at_period_end`), not a status,
+ *                               so the status stays active and the serializer
+ *                               sets the flag.
+ *   completed     -> canceled   Stripe has no completed state; a subscription
+ *                               that has run its course is simply canceled.
+ */
+export function toStripeSubscriptionStatus(status: SubscriptionStatus): string {
+  switch (status) {
+    case 'attention':
+      return 'past_due';
+    case 'non_renewing':
+      return 'active';
+    case 'completed':
+    case 'cancelled':
+      return 'canceled';
+    default:
+      return 'active';
+  }
+}
+
+/**
+ * Invoice status: canonical -> Stripe.
+ *
+ * Stripe's enum is `draft | open | paid | uncollectible | void`. A *failed*
+ * invoice stays `open` there, because Stripe keeps retrying it -- the same
+ * "failure is not final" theme that runs through its PaymentIntents.
+ */
+export function toStripeInvoiceStatus(status: InvoiceStatus): string {
+  switch (status) {
+    case 'success':
+      return 'paid';
+    case 'failed':
+      return 'open';
+    default:
+      return 'open';
+  }
+}
+
+/** Canonical interval + count -> Stripe's `recurring` object. */
+export function toStripeRecurring(
+  interval: PlanInterval,
+  intervalCount: number,
+): { interval: string; interval_count: number } {
+  switch (interval) {
+    case 'daily':
+      return { interval: 'day', interval_count: intervalCount };
+    case 'weekly':
+      return { interval: 'week', interval_count: intervalCount };
+    case 'annually':
+      return { interval: 'year', interval_count: intervalCount };
+    // Stripe has no half-yearly interval; it writes six months.
+    case 'biannually':
+      return { interval: 'month', interval_count: intervalCount * 6 };
+    default:
+      return { interval: 'month', interval_count: intervalCount };
+  }
+}
+
+/** Stripe's `recurring` -> canonical interval + count. */
+export function fromStripeRecurring(
+  interval: string,
+  intervalCount: number,
+): { interval: PlanInterval; intervalCount: number } {
+  const count = Number.isInteger(intervalCount) && intervalCount > 0 ? intervalCount : 1;
+  switch (interval) {
+    case 'day':
+      return { interval: 'daily', intervalCount: count };
+    case 'week':
+      return { interval: 'weekly', intervalCount: count };
+    case 'year':
+      return { interval: 'annually', intervalCount: count };
+    case 'month':
+      return { interval: 'monthly', intervalCount: count };
+    default:
+      throw new PayboxError(
+        'validation_failed',
+        `Unknown recurring interval "${interval}". Expected day, week, month or year.`,
+      );
+  }
 }

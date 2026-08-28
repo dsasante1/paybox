@@ -8,6 +8,7 @@ import type {
   InvoiceRepository,
   LedgerRepository,
   PlanRepository,
+  ProductRepository,
   SplitRepository,
   SubaccountRepository,
   SubscriptionRepository,
@@ -92,6 +93,7 @@ class SqliteStorage implements Storage {
       'invoices',
       'subscriptions',
       'plans',
+      'products',
       'disputes',
       'split_subaccounts',
       'splits',
@@ -623,6 +625,60 @@ class SqliteStorage implements Storage {
         .execute();
       const total = await count.executeTakeFirst();
       return { items: rows.map(map.toDedicatedAccount), total: Number(total?.total ?? 0) };
+    },
+  };
+
+  readonly products: ProductRepository = {
+    insert: async (product) => {
+      await this.#db.insertInto('products').values(map.fromProduct(product)).execute();
+      return product;
+    },
+    byId: async (id) => {
+      const row = await this.#db
+        .selectFrom('products')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toProduct(row) : null;
+    },
+    byProviderProductId: async (provider, id) => {
+      const row = await this.#db
+        .selectFrom('products')
+        .selectAll()
+        .where('provider', '=', provider)
+        .where('provider_product_id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toProduct(row) : null;
+    },
+    update: async (id, patch) => {
+      const columns = map.productPatch(patch);
+      if (Object.keys(columns).length > 0) {
+        await this.#db.updateTable('products').set(columns).where('id', '=', id).execute();
+      }
+      const row = await this.#db
+        .selectFrom('products')
+        .selectAll()
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row ? map.toProduct(row) : notFound('product', id);
+    },
+    list: async (filter) => {
+      const { limit, offset } = page(filter);
+      let query = this.#db.selectFrom('products').selectAll();
+      let count = this.#db
+        .selectFrom('products')
+        .select(({ fn }) => fn.countAll<number>().as('total'));
+      if (filter?.provider) {
+        query = query.where('provider', '=', filter.provider);
+        count = count.where('provider', '=', filter.provider);
+      }
+      const rows = await query
+        .orderBy('created_at', 'desc')
+        .limit(limit)
+        .offset(offset)
+        .execute();
+      const total = await count.executeTakeFirst();
+      return { items: rows.map(map.toProduct), total: Number(total?.total ?? 0) };
     },
   };
 

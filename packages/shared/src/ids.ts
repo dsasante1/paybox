@@ -17,6 +17,7 @@ export const ID_PREFIXES = [
   'aut', // stored authorization
   'dva', // dedicated virtual account
   'pln', // plan
+  'prd', // product
   'sub', // subscription
   'inv', // invoice
   'sac', // subaccount

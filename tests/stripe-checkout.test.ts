@@ -105,21 +105,45 @@ describe('creating a session', () => {
     expect(items.data[0].amount_total).toBe(4000);
   });
 
-  it('refuses a mode it has not implemented, rather than pretending', async () => {
-    const res = await createSession({ mode: 'subscription' });
+  it('refuses setup mode, which needs SetupIntents', async () => {
+    const res = await createSession({ mode: 'setup' });
     expect(res.statusCode).toBe(400);
-    expect(res.json().error.message).toMatch(/mode=payment only/);
+    expect(res.json().error.message).toMatch(/mode=setup/);
   });
 
-  it('refuses a bare price id, which needs an API it does not have', async () => {
+  it('refuses a line item with neither price nor price_data', async () => {
     const res = await post('/stripe/v1/checkout/sessions', {
       mode: 'payment',
       success_url: 'https://shop.example/done',
-      'line_items[0][price]': 'price_123',
       'line_items[0][quantity]': '1',
     });
     expect(res.statusCode).toBe(400);
-    expect(res.json().error.message).toMatch(/price_data/);
+  });
+
+  it('accepts a real price id', async () => {
+    const price = (
+      await post('/stripe/v1/prices', {
+        currency: 'usd',
+        unit_amount: 1500,
+        'recurring[interval]': 'month',
+        'product_data[name]': 'Pro plan',
+      })
+    ).json();
+
+    const res = await post('/stripe/v1/checkout/sessions', {
+      mode: 'payment',
+      success_url: 'https://shop.example/done',
+      'line_items[0][price]': price.id,
+      'line_items[0][quantity]': '2',
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().amount_total).toBe(3000);
+  });
+
+  it('refuses a subscription session with no recurring price', async () => {
+    const res = await createSession({ mode: 'subscription' });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.message).toMatch(/recurring `price`/);
   });
 
   it('refuses line items in mixed currencies', async () => {

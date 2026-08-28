@@ -236,3 +236,24 @@ type.
 
 Providers that return a single webhook are unaffected: the dispatcher
 normalises one or many into the same loop.
+
+## Recurring billing is provider-neutral
+
+`SubscriptionRunner` was written for Paystack and later carried Stripe with two
+changes, both of which were Paystack constants that should never have been
+constants:
+
+- **The invoice lead time.** Paystack raises `invoice.create` three days before
+  the debit; Stripe finalises about an hour after creating one. Hardcoding
+  either lands the other provider's webhook at the wrong time, which is exactly
+  the timing a dunning integration is built around. It is now injected
+  per-provider.
+- **`interval_count`.** Stripe writes "every three months" as
+  `interval: month, interval_count: 3`. Paystack has no equivalent and always
+  means 1, so the canonical `Plan` gained a count that defaults to 1 and
+  `addInterval` multiplies by it.
+
+Everything else -- the self-enqueuing cycle, the invoice-limit check, the
+`attention` state on a failed renewal, the anchoring on `VirtualClock#at` --
+carried across untouched. Both providers now produce twelve monthly invoices
+one calendar month apart from a single `time advance 360d`.

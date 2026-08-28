@@ -54,7 +54,13 @@ The **Charge** is different: charges are immutable attempt records, and
 | `GET /v1/checkout/sessions/{id}/line_items` | **Compatible** | |
 | `POST /v1/checkout/sessions/{id}/expire` | **Compatible** | |
 | `GET /stripe/checkout/{id}` | **Emulator-only** | The hosted page; see below. |
-| SetupIntents, Billing, Connect, Terminal, Issuing, Radar, Tax, everything else | **Not supported** | Later slices, or out of scope. |
+| `POST /v1/products`, `GET /v1/products`, `GET /v1/products/{id}` | **Partially compatible** | No update or delete. |
+| `POST /v1/prices`, `GET /v1/prices`, `GET /v1/prices/{id}` | **Partially compatible** | Recurring prices only. |
+| `POST /v1/subscriptions`, `GET /v1/subscriptions`, `GET /v1/subscriptions/{id}` | **Partially compatible** | One price per subscription. |
+| `POST /v1/subscriptions/{id}` | **Partially compatible** | `cancel_at_period_end` only. |
+| `DELETE /v1/subscriptions/{id}` | **Compatible** | Cancels immediately. |
+| `GET /v1/invoices`, `GET /v1/invoices/{id}` | **Partially compatible** | Read-only; no draft/finalise/void. |
+| SetupIntents, Connect, Terminal, Issuing, Radar, Tax, everything else | **Not supported** | Out of scope. |
 
 ## Requests are form-encoded
 
@@ -116,6 +122,49 @@ paybox time advance 25h     # fires checkout.session.expired
 A **declined** card leaves the session `open`, so the payer can try another —
 which is what Stripe does, and follows from a PaymentIntent surviving its own
 failure.
+
+## Billing
+
+A canonical **Plan is a Stripe Price** — an amount plus how often. Stripe's
+**Product** (what the thing is) is a separate row, because one product can
+carry several prices; Paystack folds both into a plan, so its plans have no
+product.
+
+Recurring billing runs on virtual time, on the same machinery Paystack uses:
+
+```bash
+paybox time advance 360d    # twelve monthly invoices, one calendar month apart
+```
+
+`interval_count` is honoured, so `interval: month, interval_count: 3` bills
+four times a year rather than twelve.
+
+| Canonical subscription | Stripe |
+|---|---|
+| `active` | `active` |
+| `attention` | `past_due` |
+| `non_renewing` | `active` **plus `cancel_at_period_end: true`** |
+| `completed`, `cancelled` | `canceled` |
+
+`cancel_at_period_end` is the mapping worth knowing: Stripe expresses "stops at
+period end" as a **flag on an active subscription**, not a status of its own.
+
+| Canonical invoice | Stripe |
+|---|---|
+| `pending` | `open` |
+| `success` | `paid` |
+| `failed` | **`open`** — Stripe keeps retrying, so a failed invoice is still collectible |
+
+`invoice.created` is raised **one hour** before the debit for Stripe, against
+Paystack's three days, because Stripe finalises an invoice shortly after
+creating it. That lead time is per-provider.
+
+### Checkout in subscription mode
+
+`mode: subscription` works, given a line item pointing at a recurring `price`.
+The session's own payment covers the first period, so the subscription is
+anchored **one interval ahead** rather than billing immediately — otherwise the
+payer would be charged twice for the same period.
 
 ## Status mapping
 
@@ -181,6 +230,12 @@ a failure the emulator would have invented.
 | `customer.created` | `customer.created` |
 | `payment.successful` (session) | `checkout.session.completed` |
 | `payment.expired` (session) | `checkout.session.expired` |
+| `subscription.created` | `customer.subscription.created` |
+| `subscription.non_renewing`, `subscription.attention` | `customer.subscription.updated` |
+| `subscription.cancelled`, `subscription.completed` | `customer.subscription.deleted` |
+| `invoice.created` | `invoice.created` |
+| `invoice.success` | `invoice.paid` |
+| `invoice.payment_failed` | `invoice.payment_failed` |
 
 **One canonical event fans out to several Stripe events**, because Stripe
 reports one thing happening on more than one object. A settlement sends both
@@ -201,26 +256,31 @@ expected to react.
    `mode: payment` session and a payment are one lifecycle, and `expires_at` /
    `status: expired` map straight onto the canonical `expiresAt` / `expired`.
    `mode: subscription` will need a real session row; it is not implemented.
-2. Checkout requires `price_data` on every line item. A bare `price` id needs
-   the Prices API, which is not implemented, and accepting one would silently
-   produce a zero-amount session.
-3. **The intent and its charge are one row.** `pi_…` and `ch_…` address the
+2. **One price per subscription.** Multi-item subscriptions are refused rather
+   than silently billing only the first. There is no `subscription_items` API.
+3. Invoices are **read-only**. Stripe's draft/finalise/void/pay lifecycle is
+   not modelled: an invoice here is created open and settles or fails.
+4. `trialing`, `paused`, `incomplete` and `incomplete_expired` subscription
+   states are not modelled. Neither are trials or proration.
+5. Prices must be **recurring**. A one-off price has no plan to model, so it is
+   refused rather than stored as something it is not.
+6. **The intent and its charge are one row.** `pi_…` and `ch_…` address the
    same payment. They are not independent objects as they are at Stripe, so a
    payment cannot have several charges — which is also why a retry reuses the
    charge id rather than minting a new one.
-4. **Cursor pagination is emulated over offsets.** `starting_after` and
+7. **Cursor pagination is emulated over offsets.** `starting_after` and
    `ending_before` work by scanning up to 10,000 rows for the cursor id; a
    cursor beyond that window is ignored rather than honoured.
-5. `POST /v1/payment_intents/{id}` updates metadata, description and
+8. `POST /v1/payment_intents/{id}` updates metadata, description and
    `receipt_email` only. Amount and currency are deliberately not updatable.
-6. Charges are read-only. There is no `POST /v1/charges`; the legacy direct
+9. Charges are read-only. There is no `POST /v1/charges`; the legacy direct
    charge API is not implemented.
-7. Refunds settle **immediately**. Stripe's asynchronous refund path applies to
+10. Refunds settle **immediately**. Stripe's asynchronous refund path applies to
    bank-backed methods, which this slice does not implement.
-8. `client_secret` is derived from the intent id and is **not** a credential.
+11. `client_secret` is derived from the intent id and is **not** a credential.
    It keeps runs reproducible; do not treat it as unguessable.
-9. `receipt_url` is always null, because the emulator serves no receipt page.
+12. `receipt_url` is always null, because the emulator serves no receipt page.
    That is what Stripe returns before one exists.
-10. A customer created without an email gets a synthetic local address, because
+13. A customer created without an email gets a synthetic local address, because
    paybox keys customers on email and Stripe does not require one.
-11. `expand[]` is parsed and ignored. Nothing is expanded.
+14. `expand[]` is parsed and ignored. Nothing is expanded.

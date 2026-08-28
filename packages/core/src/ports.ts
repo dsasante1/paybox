@@ -12,6 +12,7 @@ import type {
   PayboxEvent,
   PaymentStatus,
   Plan,
+  Product,
   ProviderId,
   Refund,
   RefundStatus,
@@ -246,6 +247,14 @@ export interface DedicatedAccountRepository {
   list(filter?: ListOptions & { provider?: ProviderId }): Promise<Page<DedicatedAccount>>;
 }
 
+export interface ProductRepository {
+  insert(product: Product): Promise<Product>;
+  byId(id: string): Promise<Product | null>;
+  byProviderProductId(provider: ProviderId, id: string): Promise<Product | null>;
+  update(id: string, patch: Partial<Product>): Promise<Product>;
+  list(filter?: ListOptions & { provider?: ProviderId }): Promise<Page<Product>>;
+}
+
 export interface PlanRepository {
   insert(plan: Plan): Promise<Plan>;
   byId(id: string): Promise<Plan | null>;
@@ -392,6 +401,7 @@ export interface Storage {
   readonly customers: CustomerRepository;
   readonly authorizations: AuthorizationRepository;
   readonly dedicatedAccounts: DedicatedAccountRepository;
+  readonly products: ProductRepository;
   readonly plans: PlanRepository;
   readonly subscriptions: SubscriptionRepository;
   readonly invoices: InvoiceRepository;

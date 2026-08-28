@@ -195,3 +195,59 @@ export const checkoutPaySchema = z.object({
   exp_month: z.string().optional(),
   exp_year: z.string().optional(),
 });
+
+/** Products, Prices and Subscriptions. */
+export const productCreateSchema = z.object({
+  name: z.string().min(1),
+  description: z.string().optional(),
+  active: formBool,
+  metadata,
+});
+
+export const priceCreateSchema = z.object({
+  currency: z.string().min(3).max(3),
+  unit_amount: amount,
+  product: z.string().optional(),
+  product_data: z
+    .object({ name: z.string().min(1), description: z.string().optional() })
+    .optional(),
+  nickname: z.string().optional(),
+  recurring: z
+    .object({
+      interval: z.enum(['day', 'week', 'month', 'year']),
+      interval_count: z
+        .union([z.number(), z.string()])
+        .optional()
+        .transform((value) => {
+          const parsed = value === undefined ? 1 : Number(value);
+          return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : 1;
+        }),
+    })
+    .optional(),
+  metadata,
+});
+
+export const subscriptionCreateSchema = z.object({
+  customer: z.string().min(1),
+  items: z
+    .array(
+      z.object({
+        price: z.string().min(1),
+        quantity: z.union([z.number(), z.string()]).optional(),
+      }),
+    )
+    .min(1),
+  default_payment_method: z.string().optional(),
+  metadata,
+});
+
+export const subscriptionUpdateSchema = z.object({
+  cancel_at_period_end: formBool,
+  default_payment_method: z.string().optional(),
+  metadata,
+});
+
+export const subscriptionCancelSchema = z.object({
+  invoice_now: formBool,
+  prorate: formBool,
+});
