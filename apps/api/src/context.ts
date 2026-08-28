@@ -35,6 +35,12 @@ import {
   PAYSTACK_TEST_MODE_MAX_ATTEMPTS,
   toPaystackStatus,
 } from '@paybox/paystack';
+import {
+  StripeWebhookFormatter,
+  generateStripeKeys,
+  stripeAuthorizationMinter,
+  toStripeStatus,
+} from '@paybox/stripe';
 import type { PayboxConfig } from './config.js';
 import { PayboxLogger, type LogEntry } from './logger.js';
 import { NetworkSimulator } from './network.js';
@@ -55,6 +61,8 @@ export interface PayboxContext {
   network: NetworkSimulator;
   logger: PayboxLogger;
   keys: { secretKey: string; publicKey: string };
+  /** Per-provider local test credentials (spec §29). */
+  stripeKeys: { secretKey: string; publishableKey: string };
   baseUrl: string;
   shutdown(): Promise<void>;
 }
@@ -99,13 +107,19 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
 
   // Each adapter contributes its own canonical -> provider status mapping.
   // The engine only sees a function, so it stays provider-agnostic (spec §30).
-  const providerStatus: ProviderStatusResolver = (provider, status) =>
-    provider === 'paystack' ? toPaystackStatus(status) : status;
+  const providerStatus: ProviderStatusResolver = (provider, status) => {
+    if (provider === 'paystack') return toPaystackStatus(status);
+    if (provider === 'stripe') return toStripeStatus(status);
+    return status;
+  };
 
   // Which channels mint a reusable authorization is also provider knowledge,
   // injected the same way and for the same reason as the status mapping above.
-  const mintAuthorization = (payment: Parameters<typeof paystackAuthorizationMinter>[0]) =>
-    payment.provider === 'paystack' ? paystackAuthorizationMinter(payment) : null;
+  const mintAuthorization = (payment: Parameters<typeof paystackAuthorizationMinter>[0]) => {
+    if (payment.provider === 'paystack') return paystackAuthorizationMinter(payment);
+    if (payment.provider === 'stripe') return stripeAuthorizationMinter(payment);
+    return null;
+  };
 
   const engine = new PaymentEngine({
     storage,
@@ -149,6 +163,7 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
     },
   });
   dispatcher.register(new PaystackWebhookFormatter());
+  dispatcher.register(new StripeWebhookFormatter({ basePath: '/stripe' }));
   dispatcher.attachTo(bus);
 
   // Structured event log (spec §42) and a bus-level error boundary, so a
@@ -243,6 +258,7 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
   });
 
   const keys = generateLocalKeys(ids.token(20));
+  const stripeKeys = generateStripeKeys(ids.token(20));
 
   return {
     config,
@@ -260,6 +276,7 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
     network,
     logger,
     keys,
+    stripeKeys,
     baseUrl,
     async shutdown() {
       await scheduler.stop();

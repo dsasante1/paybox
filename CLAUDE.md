@@ -14,7 +14,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 All packages are implemented and the vertical slice runs end to end: `shared`, `core`, `storage`, `webhooks`, `simulator`, `providers/paystack`, `apps/api`, `apps/cli`. `npm start` serves the API, dashboard and OpenAPI docs; `npm run cli -- …` drives it.
 
-**Paystack is the only provider adapter.** Stripe, Flutterwave and Kora are unimplemented and reported as such by `paybox provider` and the startup banner. Coverage is documented honestly in `docs/paystack.md` — that file is a contract, not marketing.
+**Paystack and Stripe are the implemented adapters.** Flutterwave and Kora are not.
+
+_(historical note, kept because the invariants below were written under it)_ **Paystack was the only provider adapter.** Flutterwave and Kora are unimplemented and reported as such by `paybox provider` and the startup banner. Stripe's coverage is documented in `docs/stripe.md`, which is a contract on the same terms as `docs/paystack.md`. Coverage is documented honestly in `docs/paystack.md` — that file is a contract, not marketing.
 
 Paystack coverage is now broad: transactions, all five documented `/charge` channels, stored authorizations (`charge_authorization`, the PIN/OTP loop), plans/subscriptions/invoices, subaccounts and splits, a balance ledger, disputes, dedicated virtual accounts, and reporting endpoints. **The authoritative source is Paystack's official OpenAPI spec** — `PaystackOSS/openapi`, `dist/paystack.yaml`, pinned at blob `efa5c8d25611a60f01fd8ce59352fb38b7edfbfb` — because `paystack.com/docs` returns HTTP 403 to automated fetches. Cite the `operationId` and that SHA next to anything derived from it. Where the spec types a response generically (every `/charge` envelope; all of `/settlement`), `docs/paystack.md` says so rather than inventing a shape.
 
@@ -46,6 +48,11 @@ Dependency direction is strict and one-way:
 
 ```
 shared ──> core ──> (storage, webhooks, simulator) ──> providers/* ──> apps/api ──> apps/cli
+
+providers/ now holds two adapters. Anything a provider needs from core reaches
+it as an injected function -- ProviderStatusResolver, AuthorizationMinter,
+InstrumentResolver -- never an import. Adding Stripe was the test of that, and
+it needed three new seams rather than a rewrite: see docs/architecture.md.
 ```
 
 - **`packages/shared`** — types and pure helpers with no runtime deps: canonical statuses, the domain model, seeded `Random`, `IdFactory`, the `Clock` *port* (interface only), currency, and the `PayboxError` taxonomy.

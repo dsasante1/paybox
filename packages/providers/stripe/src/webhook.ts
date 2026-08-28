@@ -1,0 +1,150 @@
+import type { PayboxEvent } from '@paybox/shared';
+import type {
+  FormattedWebhook,
+  FormatterContext,
+  SigningContext,
+  WebhookFormatter,
+} from '@paybox/webhooks';
+import { stripeSignatureHeaders } from './signature.js';
+import {
+  serializeCharge,
+  serializeCustomer,
+  serializeEvent,
+  serializePaymentIntent,
+  serializeRefund,
+} from './serializers.js';
+
+/**
+ * The API version stamped on every event.
+ *
+ * Matches the spec this adapter was built against, so a developer comparing
+ * payloads knows which shape to expect.
+ */
+export const STRIPE_API_VERSION = '2026-08-26.dahlia';
+
+/**
+ * Canonical event -> Stripe webhook event.
+ *
+ * Only events Stripe actually sends. Note the asymmetry with Paystack: Stripe
+ * *does* have a failure webhook (`payment_intent.payment_failed`), because its
+ * intent survives the failure and the merchant is expected to react. Paystack
+ * has no `charge.failed` at all.
+ *
+ * A canonical failure fans out to two Stripe events -- the intent's and the
+ * charge's -- because Stripe reports them on separate objects with different
+ * lifetimes. Verified against `stripe/openapi`, read 2026-08-28.
+ */
+const EVENT_MAP: Record<string, readonly string[]> = {
+  'payment.created': ['payment_intent.created'],
+  'payment.processing': ['payment_intent.processing'],
+  'payment.requires_action': ['payment_intent.requires_action'],
+  'payment.authorized': ['payment_intent.amount_capturable_updated'],
+  'payment.successful': ['payment_intent.succeeded', 'charge.succeeded'],
+  'payment.failed': ['payment_intent.payment_failed', 'charge.failed'],
+  'payment.cancelled': ['payment_intent.canceled'],
+  'payment.expired': ['payment_intent.canceled'],
+  'refund.created': ['refund.created'],
+  'refund.successful': ['charge.refunded', 'refund.updated'],
+  'refund.failed': ['refund.failed'],
+  'customer.created': ['customer.created'],
+};
+
+/** Which Stripe object each event carries in `data.object`. */
+function subjectFor(eventType: string): 'intent' | 'charge' | 'refund' | 'customer' {
+  if (eventType.startsWith('charge.refunded')) return 'charge';
+  if (eventType.startsWith('charge.')) return 'charge';
+  if (eventType.startsWith('refund.')) return 'refund';
+  if (eventType.startsWith('customer.')) return 'customer';
+  return 'intent';
+}
+
+export interface StripeFormatterOptions {
+  baseUrl?: string;
+  basePath?: string;
+}
+
+export class StripeWebhookFormatter implements WebhookFormatter {
+  readonly provider = 'stripe' as const;
+  /**
+   * Stripe signs `${timestamp}.${payload}` and regenerates both on every
+   * delivery attempt, so a retry must be re-signed rather than replayed.
+   */
+  readonly resignsPerAttempt = true;
+
+  readonly #basePath: string;
+
+  constructor(options: StripeFormatterOptions = {}) {
+    this.#basePath = options.basePath ?? '/stripe';
+  }
+
+  async format(
+    event: PayboxEvent,
+    context: FormatterContext,
+  ): Promise<FormattedWebhook | null> {
+    const types = EVENT_MAP[event.type];
+    if (!types || types.length === 0) return null;
+
+    // One canonical event can be several Stripe events; the first is the one
+    // this delivery carries. The dispatcher creates one delivery per formatted
+    // webhook, so fanning out fully would need a wider contract -- recorded in
+    // docs/stripe.md rather than faked here.
+    const eventType = types[0]!;
+    const data = await this.#buildData(event, eventType, context);
+    if (!data) return null;
+
+    return {
+      eventType,
+      body: serializeEvent(event, eventType, data, STRIPE_API_VERSION),
+    };
+  }
+
+  async #buildData(
+    event: PayboxEvent,
+    eventType: string,
+    context: FormatterContext,
+  ): Promise<unknown> {
+    const { storage, baseUrl } = context;
+    const subject = subjectFor(eventType);
+
+    if (event.resourceType === 'payment') {
+      const payment = await storage.payments.byId(event.resourceId);
+      if (!payment) return null;
+      const customer = payment.customerId
+        ? await storage.customers.byId(payment.customerId)
+        : null;
+      return subject === 'charge'
+        ? serializeCharge(payment, { customer })
+        : serializePaymentIntent(payment, {
+            customer,
+            baseUrl,
+            basePath: this.#basePath,
+          });
+    }
+
+    if (event.resourceType === 'refund') {
+      const refund = await storage.refunds.byId(event.resourceId);
+      if (!refund) return null;
+      const payment = await storage.payments.byId(refund.paymentId);
+      // `charge.refunded` carries the charge, not the refund.
+      if (subject === 'charge') {
+        if (!payment) return null;
+        const customer = payment.customerId
+          ? await storage.customers.byId(payment.customerId)
+          : null;
+        return serializeCharge(payment, { customer });
+      }
+      return serializeRefund(refund, payment);
+    }
+
+    if (event.resourceType === 'customer') {
+      const customer = await storage.customers.byId(event.resourceId);
+      return customer ? serializeCustomer(customer) : null;
+    }
+
+    return null;
+  }
+
+  sign(rawBody: string, secret: string, context: SigningContext): Record<string, string> {
+    return stripeSignatureHeaders(rawBody, secret, context.timestamp);
+  }
+}
