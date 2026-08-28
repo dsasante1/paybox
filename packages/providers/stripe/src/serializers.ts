@@ -47,6 +47,20 @@ export function stripeId(prefix: string, canonicalId: string): string {
  * reproducible. docs/stripe.md says so rather than implying it is a
  * credential.
  */
+/**
+ * A distinct, stable event id per canonical event and Stripe event type.
+ *
+ * Deterministic so a fixed seed still yields byte-identical payloads.
+ */
+export function stripeEventId(canonicalEventId: string, type: string): string {
+  let hash = 0x811c9dc5;
+  for (const char of type) {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `${stripeId('evt', canonicalEventId)}${hash.toString(32).slice(0, 4)}`;
+}
+
 export function clientSecret(intentId: string): string {
   return `${intentId}_secret_${intentId.split('_').at(-1) ?? 'local'}`;
 }
@@ -329,7 +343,14 @@ export function serializeCustomer(customer: Customer) {
   };
 }
 
-/** Stripe's event envelope. */
+/**
+ * Stripe's event envelope.
+ *
+ * The id is derived from the canonical event *and* the Stripe event type,
+ * because one canonical event fans out to several Stripe events and each needs
+ * its own id -- a subscriber deduplicating on `event.id` would otherwise drop
+ * the second one as a repeat of the first.
+ */
 export function serializeEvent(
   event: PayboxEvent,
   type: string,
@@ -337,7 +358,7 @@ export function serializeEvent(
   apiVersion: string,
 ) {
   return {
-    id: stripeId('evt', event.id),
+    id: stripeEventId(event.id, type),
     object: 'event' as const,
     api_version: apiVersion,
     created: unix(event.createdAt),
