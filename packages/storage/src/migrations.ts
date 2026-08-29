@@ -795,4 +795,24 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_transfers_group ON transfers (transfer_group);
     `,
   },
+  {
+    id: '0018_job_sequence',
+    sql: `
+      -- Enqueue order, explicitly.
+      --
+      -- claimDue ordered by run_at alone. Under the frozen clock -- the
+      -- emulator's headline feature -- every job scheduled at the same instant
+      -- shares a run_at, so the tie fell to SQLite's arbitrary row order and
+      -- shifted whenever unrelated ids changed. That made **webhook delivery
+      -- order nondeterministic**, which breaks the same-seed-same-output
+      -- promise and would deliver a settlement webhook before the creation one.
+      --
+      -- created_at cannot carry it either: it ties for exactly the same reason.
+      ALTER TABLE jobs ADD COLUMN sequence INTEGER NOT NULL DEFAULT 0;
+      -- Existing rows keep their relative order under the new sort by taking
+      -- distinct ascending values in rowid order.
+      UPDATE jobs SET sequence = rowid;
+      CREATE INDEX idx_jobs_due ON jobs (status, run_at, sequence);
+    `,
+  },
 ];

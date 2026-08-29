@@ -1,9 +1,39 @@
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "rootDir": "src", "outDir": "dist" },
-  "include": ["src/**/*.ts"],
-  "references": [{ "path": "../../packages/shared" },{ "path": "../../packages/core" },{ "path": "../../packages/storage" },{ "path": "../../packages/webhooks" },{ "path": "../../packages/simulator" },{ "path": "../../packages/providers/paystack"
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": [
+    "src/**/*.ts"
+  ],
+  "references": [
+    {
+      "path": "../../packages/shared"
     },
     {
-      "path": "../../packages/providers/stripe" }]
+      "path": "../../packages/core"
+    },
+    {
+      "path": "../../packages/storage"
+    },
+    {
+      "path": "../../packages/webhooks"
+    },
+    {
+      "path": "../../packages/simulator"
+    },
+    {
+      "path": "../../packages/providers/paystack"
+    },
+    {
+      "path": "../../packages/providers/stripe"
+    },
+    {
+      "path": "../../packages/providers/flutterwave"
+    },
+    {
+      "path": "../../packages/providers/kora"
+    }
+  ]
 }

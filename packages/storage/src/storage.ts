@@ -1734,7 +1734,14 @@ class SqliteStorage implements Storage {
 
   readonly jobs: JobRepository = {
     enqueue: async (job: Job) => {
-      await this.#db.insertInto('jobs').values(map.fromJob(job)).execute();
+      // Assigned here, monotonic across the table, so `claimDue` has a
+      // deterministic tiebreak for jobs that share a `run_at`.
+      const highest = await this.#db
+        .selectFrom('jobs')
+        .select(({ fn }) => fn.max<number>('sequence').as('highest'))
+        .executeTakeFirst();
+      const sequence = Number(highest?.highest ?? 0) + 1;
+      await this.#db.insertInto('jobs').values(map.fromJob(job, sequence)).execute();
       return job;
     },
     claimDue: async (nowISO, leaseUntilISO, limit) => {
@@ -1748,6 +1755,11 @@ class SqliteStorage implements Storage {
           .where('status', '=', 'ready')
           .where('run_at', '<=', nowISO)
           .orderBy('run_at', 'asc')
+          // Enqueue order breaks the tie. Under the frozen clock every job
+          // scheduled in one instant shares a run_at, and without this the
+          // order fell to SQLite's arbitrary row order -- which made webhook
+          // delivery order nondeterministic run to run.
+          .orderBy('sequence', 'asc')
           .limit(limit)
           .execute();
         const ids = candidates.map((c) => c.id);
@@ -1764,6 +1776,11 @@ class SqliteStorage implements Storage {
           .selectAll()
           .where('id', 'in', ids)
           .orderBy('run_at', 'asc')
+          // The same tiebreak as the candidate query above. Without it this
+          // second select re-ordered the batch arbitrarily and undid the
+          // ordering that had just been chosen -- which is what actually made
+          // webhook delivery order nondeterministic.
+          .orderBy('sequence', 'asc')
           .execute();
         return rows.map(map.toJob);
       });

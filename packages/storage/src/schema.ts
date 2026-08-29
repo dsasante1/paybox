@@ -143,6 +143,7 @@ export interface JobRow {
   lease_expires_at: string | null;
   last_error: string | null;
   group_key: string | null;
+  sequence: number;
   created_at: string;
   updated_at: string;
 }

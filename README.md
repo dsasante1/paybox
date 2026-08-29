@@ -6,6 +6,9 @@ that are hard to test: pending transactions, asynchronous mobile-money
 authorization, duplicate webhooks, retries, timeouts, refunds, idempotency and
 flaky networks.
 
+Every adapter is **partially** implemented, and each one's coverage is
+documented honestly — see the table below.
+
 > **If your production payment integration can hit it, you should be able to
 > reproduce it locally.**
 
@@ -20,17 +23,26 @@ reaches a payment network, and it refuses live API keys.
 
 ## Status
 
-| Provider | Coverage |
-|---|---|
-| Paystack | **Partial** — [what works](docs/paystack.md) |
-| Stripe | **Partial** — [what works](docs/stripe.md) |
-| Flutterwave | Not implemented |
-| Kora | Not implemented |
+| Provider | Base path | Coverage |
+|---|---|---|
+| Paystack | `/paystack` | **Partial** — [what works](docs/paystack.md) |
+| Stripe | `/stripe` | **Partial** — [what works](docs/stripe.md) |
+| Flutterwave v3 | `/flutterwave/v3` | **Partial** — [what works](docs/flutterwave.md) |
+| Flutterwave v4 | `/flutterwave/v4` | **Partial** — [what works](docs/flutterwave.md) |
+| Kora | `/kora` | **Partial** — [what works](docs/kora.md) |
 
-The engine is provider-independent, and two adapters now sit on it. Anything a
+**Partial means partial.** Each `docs/<provider>.md` is a contract, not
+marketing: it lists what is implemented, what differs and what is absent. If
+something is missing from that file, assume it is not there.
+
+Flutterwave ships two live APIs with different authentication, envelopes and
+webhook signatures, so paybox implements them as two adapters rather than one
+with a flag.
+
+The engine is provider-independent, and five adapters now sit on it. Anything a
 provider needs from the engine reaches it as an injected function — a status
-mapping, an instrument table, an authorization minter — never an import, so
-neither adapter can see the other and the engine sees neither.
+mapping, an instrument table, an authorization minter — never an import, so no
+adapter can see another and the engine sees none of them.
 
 ---
 
@@ -57,6 +69,14 @@ Point your app at it:
 ```env
 PAYSTACK_BASE_URL=http://127.0.0.1:8080/paystack
 PAYSTACK_SECRET_KEY=sk_test_local_a1b2c3...
+```
+
+Or any of the others — `paybox status` prints the credentials each one issued:
+
+```env
+STRIPE_API_BASE=http://127.0.0.1:8080/stripe
+FLW_BASE_URL=http://127.0.0.1:8080/flutterwave      # v3, FLWSECK_TEST-… keys
+KORA_BASE_URL=http://127.0.0.1:8080/kora
 ```
 
 Then initialize a payment exactly as you would against Paystack:

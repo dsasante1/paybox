@@ -72,7 +72,12 @@ const DEFAULTS: PayboxConfig = {
     retry: { enabled: true, maxAttempts: 5, schedule: 'exponential' },
     timeoutMs: 10_000,
   },
-  providers: { paystack: { enabled: true }, stripe: { enabled: true } },
+  providers: {
+    paystack: { enabled: true },
+    stripe: { enabled: true },
+    flutterwave: { enabled: true },
+    kora: { enabled: true },
+  },
   security: { allowAnyKey: false },
   simulation: { autoAdvance: true, autoAdvanceDelayMs: 3_000 },
   // 10,000,000 minor units — NGN 100,000 or GHS 100,000. Large enough that a
