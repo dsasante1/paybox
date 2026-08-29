@@ -387,13 +387,24 @@ export interface SplitRepository {
  */
 export interface LedgerRepository {
   append(entry: LedgerEntry): Promise<LedgerEntry>;
-  /** Net of credits and debits, per currency. Excludes any opening float. */
-  net(provider: ProviderId, currency: string): Promise<number>;
+  /**
+   * Net of credits and debits for one owner's pot. Excludes any opening float.
+   *
+   * `subaccountId` is required rather than optional: a marketplace has several
+   * balances, and a caller that forgot to say which one it meant would
+   * silently get the platform's. Pass null for the platform.
+   */
+  net(provider: ProviderId, currency: string, subaccountId: string | null): Promise<number>;
   list(
-    filter?: ListOptions & { provider?: ProviderId; currency?: string },
+    filter?: ListOptions & {
+      provider?: ProviderId;
+      currency?: string;
+      /** Undefined means every owner; null means the platform only. */
+      subaccountId?: string | null;
+    },
   ): Promise<Page<LedgerEntry>>;
-  /** Distinct currencies that have seen movement. */
-  currencies(provider: ProviderId): Promise<string[]>;
+  /** Distinct currencies that have seen movement, for one owner's pot. */
+  currencies(provider: ProviderId, subaccountId?: string | null): Promise<string[]>;
 }
 
 export interface DisputeRepository {

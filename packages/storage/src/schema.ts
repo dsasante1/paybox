@@ -17,6 +17,11 @@ export interface PaymentRow {
   customer_id: string | null;
   callback_url: string | null;
   amount_refunded: number;
+  subaccount_id: string | null;
+  settlement_mode: string | null;
+  platform_fee: number;
+  platform_fee_refunded: number;
+  transfer_group: string | null;
   failure_code: string | null;
   failure_message: string | null;
   metadata: string;
@@ -366,6 +371,7 @@ export interface LedgerEntryRow {
   amount: number;
   reason: string;
   resource_id: string | null;
+  subaccount_id: string | null;
   created_at: string;
 }
 

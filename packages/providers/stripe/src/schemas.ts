@@ -50,6 +50,24 @@ const paymentMethodData = z.object({
   metadata,
 });
 
+/** Splitting a charge with a connected account. */
+export const connectChargeFields = {
+  application_fee_amount: z.union([z.number(), z.string()]).optional(),
+  transfer_group: z.string().optional(),
+  on_behalf_of: z.string().optional(),
+  transfer_data: z
+    .object({
+      destination: z.string().min(1),
+      amount: z.union([z.number(), z.string()]).optional(),
+    })
+    .optional(),
+};
+
+export const applicationFeeRefundSchema = z.object({
+  amount: z.union([z.number(), z.string()]).optional(),
+  metadata,
+});
+
 export const paymentIntentCreateSchema = z.object({
   amount,
   currency: z.string().min(3).max(3),
@@ -65,6 +83,7 @@ export const paymentIntentCreateSchema = z.object({
   confirm: formBool,
   return_url: z.string().optional(),
   setup_future_usage: z.enum(['on_session', 'off_session']).optional(),
+  ...connectChargeFields,
   expand: z.array(z.string()).optional(),
 });
 
@@ -266,9 +285,9 @@ export const chargeCreateSchema = z.object({
   description: z.string().optional(),
   receipt_email: z.string().optional(),
   statement_descriptor: z.string().optional(),
-  transfer_group: z.string().optional(),
   /** Defaults to true. False authorizes now and captures later. */
   capture: formBool,
+  ...connectChargeFields,
   metadata,
 });
 

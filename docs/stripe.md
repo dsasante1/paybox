@@ -87,6 +87,9 @@ The **Charge** is different: charges are immutable attempt records, and
 | `DELETE /v1/accounts/{id}` | **Partially compatible** | Rejects rather than removes; see below. |
 | `POST /v1/account_links` | **Compatible** | Expiry is real virtual time. |
 | `GET /stripe/connect/onboard/{id}` | **Emulator-only** | The onboarding page; see below. |
+| `GET /v1/balance` | **Partially compatible** | Scoped by `Stripe-Account`; `pending` always empty. |
+| `GET /v1/application_fees`, `GET /v1/application_fees/{id}` | **Compatible** | |
+| `POST`/`GET /v1/application_fees/{id}/refunds` | **Partially compatible** | No update; no metadata on a fee refund. |
 | Terminal, Issuing, Radar, Tax, everything else | **Not supported** | Out of scope. |
 
 ## Requests are form-encoded
@@ -389,7 +392,30 @@ expected to react.
    `DELETE` rejects rather than removes so charges the account took do not end
    up pointing at nothing, and there is no `account.application.authorized`,
    `capability.updated` or `account.external_account.*` event.
-21. `expand[]` is honoured on every route, in the query string and in a POST
+21. **Connect charges move real money between real balances.** The ledger has
+   an owner per entry — null for the platform, a connected account otherwise —
+   and the balance is still a fold over it, just folded per owner. A **direct**
+   charge (`Stripe-Account` header) credits the connected account the amount
+   less the fee and the platform the fee; a **destination** charge
+   (`transfer_data[destination]`) credits the platform in full, and the share
+   moves separately. A charge cannot be both, and one naming an account that
+   has not onboarded is refused.
+
+   Three consequences worth knowing, all of which are what really happens:
+   refunding a direct charge debits the **connected account**, not the
+   platform, and does not return the application fee — so a refunded direct
+   charge **can push a connected account negative**. A connected account starts
+   at a zero balance with no share of the opening test float, because it has
+   genuinely earned nothing. And an unknown `Stripe-Account` header is a 404
+   rather than a silent fallback to the platform, since quietly charging the
+   wrong party is a bug only found by reconciling money.
+
+   Application fees are derived from the charge that carries them rather than
+   stored as their own rows, the same way `pi_` and `ch_` are two views of one
+   payment. `GET /v1/balance` reports `pending` as always empty: paybox settles
+   instantly, and a developer testing "wait for funds to become available"
+   needs to know that wait does not exist here.
+22. `expand[]` is honoured on every route, in the query string and in a POST
    body, on single objects and on `data.` paths in a list. Naming a nested path
    expands the levels above it, as Stripe does, and more than four levels is
    refused. Two differences from Stripe: an id that does not resolve leaves the

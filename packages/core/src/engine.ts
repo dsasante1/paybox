@@ -64,6 +64,13 @@ export interface CreatePaymentInput {
   status?: PaymentStatus;
   /** Verbatim provider status string to echo back at the API boundary. */
   providerStatus?: string;
+  /** The marketplace participant this payment involves. */
+  subaccountId?: string | null;
+  /** How the money is arranged between the platform and that participant. */
+  settlementMode?: 'direct' | 'forwarded' | null;
+  /** The platform's cut, in minor units. */
+  platformFee?: number;
+  transferGroup?: string | null;
   /** Schedules a `payment.expire` job. Paystack links, Stripe intents and
    *  mobile-money prompts all expire; modelling it is the point (spec §39). */
   expiresInMs?: number | null;
@@ -188,6 +195,16 @@ export interface InvoiceItemDraft {
  */
 export type ProrationBehavior = 'create_prorations' | 'none' | 'always_invoice';
 
+/** One movement in a balance. `subaccountId` null means the platform's own. */
+export interface LedgerInput {
+  provider: ProviderId;
+  currency: string;
+  amount: number;
+  reason: string;
+  resourceId?: string | null;
+  subaccountId?: string | null;
+}
+
 function sumItems(items: readonly InvoiceItemDraft[]): number {
   return items.reduce(
     (total, item) => total + (item.amount ?? (item.unitAmount ?? 0) * (item.quantity ?? 1)),
@@ -296,6 +313,11 @@ export class PaymentEngine {
       customerId: input.customerId ?? null,
       callbackUrl: input.callbackUrl ?? null,
       amountRefunded: 0,
+      subaccountId: input.subaccountId ?? null,
+      settlementMode: input.settlementMode ?? null,
+      platformFee: Math.max(0, Math.trunc(input.platformFee ?? 0)),
+      platformFeeRefunded: 0,
+      transferGroup: input.transferGroup ?? null,
       failureCode: null,
       failureMessage: null,
       metadata: input.metadata ?? {},
@@ -404,13 +426,39 @@ export class PaymentEngine {
 
         // Money collected lands in the balance. Inside the transaction, so a
         // rolled-back success cannot leave a phantom credit behind.
-        await this.#ledgerIn(tx, 'credit', {
-          provider: updated.provider,
-          currency: updated.currency,
-          amount: updated.amount,
-          reason: 'charge',
-          resourceId: updated.id,
-        });
+        //
+        // On a *direct* charge the participant took the payment, so the money
+        // is theirs and the platform keeps only its fee: two credits, never
+        // one. Anything else -- an ordinary payment, or a forwarded one whose
+        // share moves separately -- lands wholly with the platform.
+        if (updated.settlementMode === 'direct' && updated.subaccountId) {
+          const fee = Math.min(updated.platformFee, updated.amount);
+          await this.#ledgerIn(tx, 'credit', {
+            provider: updated.provider,
+            currency: updated.currency,
+            amount: updated.amount - fee,
+            reason: 'charge',
+            resourceId: updated.id,
+            subaccountId: updated.subaccountId,
+          });
+          if (fee > 0) {
+            await this.#ledgerIn(tx, 'credit', {
+              provider: updated.provider,
+              currency: updated.currency,
+              amount: fee,
+              reason: 'application_fee',
+              resourceId: updated.id,
+            });
+          }
+        } else {
+          await this.#ledgerIn(tx, 'credit', {
+            provider: updated.provider,
+            currency: updated.currency,
+            amount: updated.amount,
+            reason: 'charge',
+            resourceId: updated.id,
+          });
+        }
       }
 
       return { result: updated, events: emitted };
@@ -576,13 +624,20 @@ export class PaymentEngine {
         updatedAt: now,
       });
 
-      // Refunded money leaves the balance.
+      // Refunded money leaves the balance of whoever received it.
+      //
+      // On a direct charge that is the connected account, and the platform's
+      // fee is *not* returned with it -- so a refunded direct charge can push
+      // a connected account negative. That is what really happens, and a
+      // marketplace has to handle it; hiding it here would only move the
+      // discovery to production.
       await this.#ledgerIn(tx, 'debit', {
         provider: updated.provider,
         currency: updated.currency,
         amount: updated.amount,
         reason: 'refund',
         resourceId: updated.id,
+        subaccountId: payment.settlementMode === 'direct' ? payment.subaccountId : null,
       });
       emitted.push(
         await this.#appendEvent(tx, {
@@ -672,7 +727,7 @@ export class PaymentEngine {
       const fee = Math.max(0, Math.trunc(input.fee ?? 0));
       const required = transfer.amount + fee;
       if (this.#enforceBalance) {
-        const net = await tx.ledger.net(transfer.provider, transfer.currency);
+        const net = await tx.ledger.net(transfer.provider, transfer.currency, null);
         const available = this.#openingBalance + net;
         if (required > available) {
           throw new PayboxError(
@@ -2491,6 +2546,82 @@ export class PaymentEngine {
     });
   }
 
+  /**
+   * Give back part of the platform's cut.
+   *
+   * A separate movement from refunding the charge, because it is a separate
+   * decision: refunding a customer does not oblige the platform to give up its
+   * fee, and Stripe keeps the two apart for exactly that reason.
+   */
+  async refundPlatformFee(paymentId: string, amount?: number): Promise<Payment> {
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const payment = await this.#requirePayment(tx, paymentId);
+      if (payment.platformFee <= 0) {
+        throw new PayboxError(
+          'validation_failed',
+          `Payment ${paymentId} carries no platform fee to refund.`,
+        );
+      }
+      if (!payment.subaccountId) {
+        throw new PayboxError(
+          'validation_failed',
+          `Payment ${paymentId} involves no connected account.`,
+        );
+      }
+
+      const remaining = payment.platformFee - payment.platformFeeRefunded;
+      const requested = amount ?? remaining;
+      if (requested <= 0) {
+        throw new PayboxError('validation_failed', 'Fee refund must be greater than zero.');
+      }
+      if (requested > remaining) {
+        throw new PayboxError(
+          'refund_exceeds_amount',
+          `Fee refund of ${requested} exceeds the ${remaining} still refundable.`,
+          { details: { platformFee: payment.platformFee, refunded: payment.platformFeeRefunded } },
+        );
+      }
+
+      const now = this.#clock.nowISO();
+      const updated = await tx.payments.update(payment.id, {
+        platformFeeRefunded: payment.platformFeeRefunded + requested,
+        updatedAt: now,
+      });
+
+      // The fee goes back to whoever it was taken from. On a direct charge the
+      // platform holds it, so it returns to the connected account.
+      await this.transferBetweenBalances(tx, {
+        provider: updated.provider,
+        currency: updated.currency,
+        amount: requested,
+        from: null,
+        to: updated.subaccountId,
+        reason: 'application_fee_refund',
+        resourceId: updated.id,
+      });
+
+      const event = await this.#appendEvent(tx, {
+        type: 'application_fee.refunded',
+        provider: updated.provider,
+        resourceId: updated.id,
+        resourceType: 'payment',
+        data: {
+          payment_id: updated.id,
+          amount: requested,
+          fee: updated.platformFee,
+          fee_refunded: updated.platformFeeRefunded,
+          subaccount_id: updated.subaccountId,
+        },
+        previousStatus: updated.status,
+        currentStatus: updated.status,
+      });
+      return { result: updated, events: [event] };
+    });
+
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
   async getSubaccount(id: string): Promise<Subaccount | null> {
     return this.#storage.subaccounts.byId(id);
   }
@@ -2591,43 +2722,79 @@ export class PaymentEngine {
     return { entries, merchant: amount - allocated };
   }
 
-  /** Current balance for a currency, including the opening test float. */
-  async getBalance(provider: ProviderId, currency: string): Promise<number> {
-    const net = await this.#storage.ledger.net(provider, currency.toUpperCase());
-    return this.#openingBalance + net;
+  /**
+   * Current balance for one owner's pot, including the opening test float.
+   *
+   * The float belongs to the **platform** only. A connected account starts at
+   * zero, because it has genuinely earned nothing -- handing every connected
+   * account a free float would let a marketplace pay out money nobody paid in,
+   * which is exactly the bug this balance model exists to catch.
+   */
+  async getBalance(
+    provider: ProviderId,
+    currency: string,
+    subaccountId: string | null = null,
+  ): Promise<number> {
+    const net = await this.#storage.ledger.net(provider, currency.toUpperCase(), subaccountId);
+    return (subaccountId === null ? this.#openingBalance : 0) + net;
   }
 
-  async creditBalance(input: {
-    provider: ProviderId;
-    currency: string;
-    amount: number;
-    reason: string;
-    resourceId?: string | null;
-  }): Promise<LedgerEntry> {
+  async creditBalance(input: LedgerInput): Promise<LedgerEntry> {
     return this.#appendLedger('credit', input);
   }
 
-  async debitBalance(input: {
-    provider: ProviderId;
-    currency: string;
-    amount: number;
-    reason: string;
-    resourceId?: string | null;
-  }): Promise<LedgerEntry> {
+  async debitBalance(input: LedgerInput): Promise<LedgerEntry> {
     return this.#appendLedger('debit', input);
+  }
+
+  /**
+   * Move money from one owner's pot to another, atomically.
+   *
+   * Two entries, never one: a debit from the source and a credit to the
+   * destination, in the same transaction. A single entry would make the
+   * marketplace's books stop balancing the moment anything went wrong halfway.
+   */
+  async transferBetweenBalances(
+    tx: Storage,
+    input: {
+      provider: ProviderId;
+      currency: string;
+      amount: number;
+      from: string | null;
+      to: string | null;
+      reason: string;
+      resourceId?: string | null;
+    },
+  ): Promise<void> {
+    if (input.from === input.to) {
+      throw new PayboxError(
+        'validation_failed',
+        'A balance transfer needs two different owners.',
+      );
+    }
+    await this.#ledgerIn(tx, 'debit', {
+      provider: input.provider,
+      currency: input.currency,
+      amount: input.amount,
+      reason: input.reason,
+      resourceId: input.resourceId ?? null,
+      subaccountId: input.from,
+    });
+    await this.#ledgerIn(tx, 'credit', {
+      provider: input.provider,
+      currency: input.currency,
+      amount: input.amount,
+      reason: input.reason,
+      resourceId: input.resourceId ?? null,
+      subaccountId: input.to,
+    });
   }
 
   /** Ledger append bound to an open transaction. */
   async #ledgerIn(
     tx: Storage,
     direction: LedgerEntry['direction'],
-    input: {
-      provider: ProviderId;
-      currency: string;
-      amount: number;
-      reason: string;
-      resourceId?: string | null;
-    },
+    input: LedgerInput,
   ): Promise<void> {
     await tx.ledger.append({
       id: this.#ids.next('led'),
@@ -2637,19 +2804,14 @@ export class PaymentEngine {
       amount: input.amount,
       reason: input.reason,
       resourceId: input.resourceId ?? null,
+      subaccountId: input.subaccountId ?? null,
       createdAt: this.#clock.nowISO(),
     });
   }
 
   async #appendLedger(
     direction: LedgerEntry['direction'],
-    input: {
-      provider: ProviderId;
-      currency: string;
-      amount: number;
-      reason: string;
-      resourceId?: string | null;
-    },
+    input: LedgerInput,
   ): Promise<LedgerEntry> {
     validateAmount(input.amount);
     return this.#storage.ledger.append({
@@ -2660,6 +2822,7 @@ export class PaymentEngine {
       amount: input.amount,
       reason: input.reason,
       resourceId: input.resourceId ?? null,
+      subaccountId: input.subaccountId ?? null,
       createdAt: this.#clock.nowISO(),
     });
   }

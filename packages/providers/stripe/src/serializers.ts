@@ -201,7 +201,7 @@ export function serializePaymentIntent(payment: Payment, options: SerializeInten
     amount_capturable: payment.status === 'authorized' ? payment.amount : 0,
     amount_received: payment.status === 'successful' ? payment.amount : 0,
     application: null,
-    application_fee_amount: null,
+    application_fee_amount: payment.platformFee > 0 ? payment.platformFee : null,
     automatic_payment_methods: null,
     canceled_at: reason ? unix(payment.updatedAt) : null,
     cancellation_reason: reason,
@@ -217,7 +217,7 @@ export function serializePaymentIntent(payment: Payment, options: SerializeInten
     livemode: false,
     metadata: payment.metadata,
     next_action: nextAction(payment, options.baseUrl ?? '', options.basePath ?? ''),
-    on_behalf_of: null,
+    on_behalf_of: payment.subaccountId ? stripeId('acct', payment.subaccountId) : null,
     payment_method: payment.paymentMethod ? stripeId('pm', payment.id) : null,
     payment_method_options: {},
     payment_method_types: ['card'],
@@ -229,8 +229,16 @@ export function serializePaymentIntent(payment: Payment, options: SerializeInten
     statement_descriptor: null,
     statement_descriptor_suffix: null,
     status,
-    transfer_data: null,
-    transfer_group: null,
+    // A forwarded charge names where the money is going; a direct one does
+    // not, because the connected account already has it.
+    transfer_data:
+      payment.settlementMode === 'forwarded' && payment.subaccountId
+        ? {
+            amount: null,
+            destination: stripeId('acct', payment.subaccountId),
+          }
+        : null,
+    transfer_group: payment.transferGroup,
   };
 }
 
@@ -250,8 +258,8 @@ export function serializeCharge(
     amount_captured: payment.status === 'successful' ? payment.amount : 0,
     amount_refunded: refunded,
     application: null,
-    application_fee: null,
-    application_fee_amount: null,
+    application_fee: payment.platformFee > 0 ? stripeId('fee', payment.id) : null,
+    application_fee_amount: payment.platformFee > 0 ? payment.platformFee : null,
     balance_transaction: payment.status === 'successful' ? stripeId('txn', payment.id) : null,
     billing_details: billingDetails(options.customer),
     calculated_statement_descriptor: null,
@@ -298,8 +306,17 @@ export function serializeCharge(
     review: null,
     shipping: null,
     status,
-    transfer_data: null,
-    transfer_group: null,
+    // A forwarded charge names where the money is going; a direct one does
+    // not, because the connected account already has it.
+    transfer_data:
+      payment.settlementMode === 'forwarded' && payment.subaccountId
+        ? {
+            amount: null,
+            destination: stripeId('acct', payment.subaccountId),
+          }
+        : null,
+    transfer_group: payment.transferGroup,
+    on_behalf_of: payment.subaccountId ? stripeId('acct', payment.subaccountId) : null,
   };
 }
 
@@ -949,5 +966,78 @@ export function serializeAccountLink(options: {
     created: unix(options.createdISO),
     expires_at: unix(options.expiresISO),
     url: options.url,
+  };
+}
+
+/**
+ * A balance.
+ *
+ * `available` is what can be paid out now and `pending` what has not settled.
+ * paybox settles instantly, so `pending` is always empty -- stated in
+ * docs/stripe.md rather than faked with a plausible-looking number, because a
+ * developer testing "wait for funds to become available" needs to know that
+ * wait does not exist here.
+ */
+export function serializeBalance(
+  amounts: readonly { currency: string; amount: number }[],
+) {
+  const entries = amounts.map(({ currency, amount }) => ({
+    amount,
+    currency: currency.toLowerCase(),
+    source_types: { card: amount },
+  }));
+  return {
+    object: 'balance' as const,
+    available: entries,
+    connect_reserved: [],
+    livemode: false,
+    pending: entries.map((entry) => ({ ...entry, amount: 0, source_types: { card: 0 } })),
+  };
+}
+
+/**
+ * An application fee.
+ *
+ * Derived from the payment rather than stored as its own row: the fee is a
+ * property of one charge and has no life apart from it, exactly as `pi_` and
+ * `ch_` are two views of one payment. The id is derived the same way, so it is
+ * stable under a fixed seed.
+ */
+export function serializeApplicationFee(payment: Payment) {
+  const id = stripeId('fee', payment.id);
+  return {
+    id,
+    object: 'application_fee' as const,
+    account: payment.subaccountId ? stripeId('acct', payment.subaccountId) : null,
+    amount: payment.platformFee,
+    amount_refunded: payment.platformFeeRefunded,
+    application: null,
+    balance_transaction: stripeId('txn', payment.id),
+    charge: stripeId('ch', payment.id),
+    created: unix(payment.createdAt),
+    currency: payment.currency.toLowerCase(),
+    livemode: false,
+    originating_transaction: null,
+    refunded: payment.platformFeeRefunded >= payment.platformFee && payment.platformFee > 0,
+    refunds: {
+      object: 'list' as const,
+      data:
+        payment.platformFeeRefunded > 0
+          ? [
+              {
+                id: stripeId('fr', payment.id),
+                object: 'fee_refund' as const,
+                amount: payment.platformFeeRefunded,
+                balance_transaction: null,
+                created: unix(payment.updatedAt),
+                currency: payment.currency.toLowerCase(),
+                fee: id,
+                metadata: {},
+              },
+            ]
+          : [],
+      has_more: false,
+      url: `/v1/application_fees/${id}/refunds`,
+    },
   };
 }

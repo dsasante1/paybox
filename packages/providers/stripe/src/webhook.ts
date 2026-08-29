@@ -8,6 +8,7 @@ import type {
 import { stripeSignatureHeaders } from './signature.js';
 import {
   serializeAccount,
+  serializeApplicationFee,
   serializeCharge,
   serializeCheckoutSession,
   serializeCustomer,
@@ -76,6 +77,7 @@ const EVENT_MAP: Record<string, readonly string[]> = {
   // because the platform made the account and already knows.
   'subaccount.created': ['account.updated'],
   'subaccount.updated': ['account.updated'],
+  'application_fee.refunded': ['application_fee.refunded'],
   'subscription.created': ['customer.subscription.created'],
   'subscription.updated': ['customer.subscription.updated'],
   'subscription.non_renewing': ['customer.subscription.updated'],
@@ -107,10 +109,12 @@ function subjectFor(
   | 'invoice'
   | 'setup'
   | 'account'
+  | 'application_fee'
   | 'payment_method' {
   if (eventType.startsWith('customer.subscription.')) return 'subscription';
   if (eventType.startsWith('setup_intent.')) return 'setup';
   if (eventType.startsWith('account.')) return 'account';
+  if (eventType.startsWith('application_fee.')) return 'application_fee';
   if (eventType.startsWith('payment_method.')) return 'payment_method';
   if (eventType.startsWith('invoice.')) return 'invoice';
   if (eventType.startsWith('checkout.session.')) return 'session';
@@ -177,6 +181,12 @@ export class StripeWebhookFormatter implements WebhookFormatter {
       const customer = payment.customerId
         ? await storage.customers.byId(payment.customerId)
         : null;
+
+      if (subject === 'application_fee') {
+        // The fee lives on the charge, so an event about it carries the
+        // derived fee object rather than the payment.
+        return payment.platformFee > 0 ? serializeApplicationFee(payment) : null;
+      }
 
       // Only a payment created through Checkout has a session to report on.
       // Returning null drops just this entry from the fan-out.

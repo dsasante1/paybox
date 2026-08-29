@@ -93,6 +93,11 @@ export const toPayment = (row: PaymentRow): Payment => ({
   customerId: row.customer_id,
   callbackUrl: row.callback_url,
   amountRefunded: row.amount_refunded,
+  subaccountId: row.subaccount_id,
+  settlementMode: (row.settlement_mode as Payment['settlementMode']) ?? null,
+  platformFee: row.platform_fee,
+  platformFeeRefunded: row.platform_fee_refunded,
+  transferGroup: row.transfer_group,
   failureCode: row.failure_code,
   failureMessage: row.failure_message,
   metadata: readJson(row.metadata),
@@ -117,6 +122,11 @@ export const fromPayment = (payment: Payment): PaymentRow => ({
   customer_id: payment.customerId,
   callback_url: payment.callbackUrl,
   amount_refunded: payment.amountRefunded,
+  subaccount_id: payment.subaccountId,
+  settlement_mode: payment.settlementMode,
+  platform_fee: payment.platformFee,
+  platform_fee_refunded: payment.platformFeeRefunded,
+  transfer_group: payment.transferGroup,
   failure_code: payment.failureCode,
   failure_message: payment.failureMessage,
   metadata: writeJson(payment.metadata),
@@ -140,6 +150,13 @@ export function paymentPatch(patch: Partial<Payment>): Partial<PaymentRow> {
   if (patch.customerId !== undefined) out.customer_id = patch.customerId;
   if (patch.callbackUrl !== undefined) out.callback_url = patch.callbackUrl;
   if (patch.amountRefunded !== undefined) out.amount_refunded = patch.amountRefunded;
+  if (patch.subaccountId !== undefined) out.subaccount_id = patch.subaccountId;
+  if (patch.settlementMode !== undefined) out.settlement_mode = patch.settlementMode;
+  if (patch.platformFee !== undefined) out.platform_fee = patch.platformFee;
+  if (patch.platformFeeRefunded !== undefined) {
+    out.platform_fee_refunded = patch.platformFeeRefunded;
+  }
+  if (patch.transferGroup !== undefined) out.transfer_group = patch.transferGroup;
   if (patch.failureCode !== undefined) out.failure_code = patch.failureCode;
   if (patch.failureMessage !== undefined) out.failure_message = patch.failureMessage;
   if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
@@ -890,6 +907,7 @@ export const toLedgerEntry = (row: LedgerEntryRow): LedgerEntry => ({
   amount: row.amount,
   reason: row.reason,
   resourceId: row.resource_id,
+  subaccountId: row.subaccount_id,
   createdAt: row.created_at,
 });
 
@@ -901,6 +919,7 @@ export const fromLedgerEntry = (entry: LedgerEntry): LedgerEntryRow => ({
   amount: entry.amount,
   reason: entry.reason,
   resource_id: entry.resourceId,
+  subaccount_id: entry.subaccountId,
   created_at: entry.createdAt,
 });
 

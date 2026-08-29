@@ -40,6 +40,24 @@ export interface Payment {
   /** Where the developer wants the payer sent after checkout. */
   callbackUrl: string | null;
   amountRefunded: number;
+  /** The marketplace participant this payment involves, if any. */
+  subaccountId: string | null;
+  /**
+   * How the money is arranged between the platform and that participant.
+   *
+   *   direct     The participant took the payment; the platform keeps only its
+   *              fee. Stripe's direct charge.
+   *   forwarded  The platform took the payment and passes a share on. Stripe's
+   *              destination charge; a Paystack split is the same idea.
+   *
+   * Null for an ordinary payment involving no participant.
+   */
+  settlementMode: 'direct' | 'forwarded' | null;
+  /** The platform's cut, in minor units. Stripe calls it an application fee. */
+  platformFee: number;
+  platformFeeRefunded: number;
+  /** Ties charges and transfers that belong to one piece of business. */
+  transferGroup: string | null;
   /** Set once the payment reaches a terminal successful/failed state. */
   failureCode: string | null;
   failureMessage: string | null;
@@ -524,6 +542,15 @@ export interface LedgerEntry {
   reason: string;
   /** The payment, refund or transfer that caused the movement. */
   resourceId: string | null;
+  /**
+   * Whose money this is. Null means the platform's own balance.
+   *
+   * A marketplace is several pots, not one: the platform's, and one per
+   * connected account. Every movement between them is two entries -- a debit
+   * from one owner and a credit to another -- so the pair can always be
+   * reconciled and neither can go missing on its own.
+   */
+  subaccountId: string | null;
   createdAt: string;
 }
 

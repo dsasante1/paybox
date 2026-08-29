@@ -27,6 +27,7 @@ import {
   accountLinkCreateSchema,
   accountRejectSchema,
   accountUpdateSchema,
+  applicationFeeRefundSchema,
   chargeCaptureSchema,
   chargeCreateSchema,
   chargeUpdateSchema,
@@ -73,6 +74,8 @@ import {
   list,
   serializeAccount,
   serializeAccountLink,
+  serializeApplicationFee,
+  serializeBalance,
   serializeCharge,
   serializeCheckoutSession,
   serializeInvoice,
@@ -425,12 +428,16 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
     const customer = body.customer ? await loadCustomer(body.customer) : null;
     const inlineCard = body.payment_method_data?.card;
 
+    const connect = await resolveConnect(request, body);
+    assertFeeFits(body.amount, connect.platformFee);
+
     const payment = await engine.createPayment({
       provider: PROVIDER,
       amount: body.amount,
       currency,
       customerId: customer?.id ?? null,
       callbackUrl: body.return_url ?? null,
+      ...connect,
       ...(inlineCard
         ? { paymentMethod: 'card' as PaymentMethod, paymentMethodDetails: cardDetailsFrom(inlineCard) }
         : {}),
@@ -592,6 +599,191 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
       return reply.send(list(data, '/v1/payment_intents', hasMore));
     },
   );
+
+  /* ---------------------------------------------------------------- *
+   * The Stripe-Account header
+   *
+   * Every Connect request can be made *as* a connected account. It is a
+   * header rather than a parameter because it changes whose books the whole
+   * request touches, not what one field means -- so it is resolved once, here,
+   * and handed to whichever route needs it.
+   * ---------------------------------------------------------------- */
+
+  /**
+   * The connected account this request acts as, or null for the platform.
+   *
+   * An unknown account is an error rather than a silent fallback to the
+   * platform: quietly charging the platform because a header was mistyped is
+   * the kind of bug that is only discovered by reconciling money.
+   */
+  async function actingAccount(request: FastifyRequest) {
+    const header = request.headers['stripe-account'];
+    const handle = Array.isArray(header) ? header[0] : header;
+    if (!handle) return null;
+    return loadAccount(handle);
+  }
+
+  /**
+   * Work out whose books a charge lands on.
+   *
+   * Two arrangements, and they move money differently:
+   *
+   *   direct     Made with the `Stripe-Account` header. The connected account
+   *              takes the payment and the platform keeps only its fee.
+   *   forwarded  Made by the platform with `transfer_data[destination]`. The
+   *              platform takes the payment and passes a share on.
+   *
+   * Refused for an account that has not onboarded, which is the whole reason
+   * the onboarding lifecycle is modelled at all.
+   */
+  async function resolveConnect(
+    request: FastifyRequest,
+    body: {
+      application_fee_amount?: number | string | undefined;
+      transfer_data?: { destination: string } | undefined;
+      transfer_group?: string | undefined;
+      on_behalf_of?: string | undefined;
+    },
+  ): Promise<{
+    subaccountId: string | null;
+    settlementMode: 'direct' | 'forwarded' | null;
+    platformFee: number;
+    transferGroup: string | null;
+  }> {
+    const acting = await actingAccount(request);
+    const destination = body.transfer_data?.destination
+      ? await loadAccount(body.transfer_data.destination)
+      : null;
+
+    if (acting && destination) {
+      throw new PayboxError(
+        'validation_failed',
+        'A charge cannot be both a direct charge and a destination charge. Use the ' +
+          '`Stripe-Account` header or `transfer_data[destination]`, not both.',
+      );
+    }
+
+    const account = acting ?? destination;
+    if (!account) {
+      return {
+        subaccountId: null,
+        settlementMode: null,
+        platformFee: 0,
+        transferGroup: body.transfer_group ?? null,
+      };
+    }
+
+    engine.assertChargeableAccount(account);
+
+    const fee = Math.max(0, Math.trunc(Number(body.application_fee_amount ?? 0)));
+    return {
+      subaccountId: account.id,
+      settlementMode: acting ? 'direct' : 'forwarded',
+      platformFee: Number.isFinite(fee) ? fee : 0,
+      transferGroup: body.transfer_group ?? null,
+    };
+  }
+
+  /** A fee cannot be larger than the charge it is taken from. */
+  function assertFeeFits(amount: number, fee: number): void {
+    if (fee > amount) {
+      throw new PayboxError(
+        'validation_failed',
+        `application_fee_amount of ${fee} exceeds the charge amount of ${amount}.`,
+        { details: { amount, fee } },
+      );
+    }
+  }
+
+  /* ---------------------------------------------------------------- *
+   * Connect: application fees
+   *
+   * Derived from the payment that carries them rather than stored as their
+   * own rows: a fee is a property of one charge and has no life apart from it,
+   * exactly as `pi_` and `ch_` are two views of one payment.
+   * ---------------------------------------------------------------- */
+
+  async function loadFeeCharge(handle: string) {
+    const payment = await loadPayment(handle.replace(/^fee_/, 'ch_'));
+    if (payment.platformFee <= 0) {
+      throw new PayboxError('not_found', `No such application fee: '${handle}'.`);
+    }
+    return payment;
+  }
+
+  fastify.get<{ Params: { fee: string } }>(
+    '/v1/application_fees/:fee',
+    async (request, reply) => {
+      authenticate(request);
+      return reply.send(serializeApplicationFee(await loadFeeCharge(request.params.fee)));
+    },
+  );
+
+  fastify.get<{ Querystring: Record<string, string> }>(
+    '/v1/application_fees',
+    async (request, reply) => {
+      authenticate(request);
+      const query = listQuerySchema.parse(request.query);
+      const { page, hasMore } = await paginate(
+        query,
+        async (limit, offset) => {
+          const rows = await storage.payments.list({ provider: PROVIDER, limit, offset });
+          const charged = rows.items.filter((payment) => payment.platformFee > 0);
+          return { items: charged, total: charged.length };
+        },
+        (payment) => stripeId('fee', payment.id),
+      );
+      return reply.send(
+        list(page.map(serializeApplicationFee), '/v1/application_fees', hasMore),
+      );
+    },
+  );
+
+  fastify.post<{ Params: { fee: string } }>(
+    '/v1/application_fees/:fee/refunds',
+    async (request, reply) => {
+      authenticate(request);
+      const body = applicationFeeRefundSchema.parse(request.body ?? {});
+      const payment = await loadFeeCharge(request.params.fee);
+      const amount = body.amount !== undefined ? Number(body.amount) : undefined;
+      const refunded = await engine.refundPlatformFee(
+        payment.id,
+        amount !== undefined && Number.isFinite(amount) ? Math.trunc(amount) : undefined,
+      );
+      const fee = serializeApplicationFee(refunded);
+      return reply.send(fee.refunds.data[0] ?? fee);
+    },
+  );
+
+  fastify.get<{ Params: { fee: string } }>(
+    '/v1/application_fees/:fee/refunds',
+    async (request, reply) => {
+      authenticate(request);
+      const fee = serializeApplicationFee(await loadFeeCharge(request.params.fee));
+      return reply.send(
+        list(fee.refunds.data, `/v1/application_fees/${fee.id}/refunds`, false),
+      );
+    },
+  );
+
+  fastify.get('/v1/balance', async (request, reply) => {
+    authenticate(request);
+    const account = await actingAccount(request);
+    const owner = account?.id ?? null;
+
+    // Every currency that pot has seen, plus the default -- so a fresh
+    // platform balance still reports its opening float rather than nothing.
+    const seen = await storage.ledger.currencies(PROVIDER, owner);
+    const currencies = new Set(seen.length > 0 ? seen : []);
+    if (account) currencies.add(account.currency);
+    else currencies.add('USD');
+
+    const amounts = [];
+    for (const currency of [...currencies].sort()) {
+      amounts.push({ currency, amount: await engine.getBalance(PROVIDER, currency, owner) });
+    }
+    return reply.send(serializeBalance(amounts));
+  });
 
   /* ---------------------------------------------------------------- *
    * Connect: connected accounts
@@ -2408,6 +2600,9 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
       );
     }
 
+    const connect = await resolveConnect(request, body);
+    assertFeeFits(body.amount, connect.platformFee);
+
     const payment = await engine.createPayment({
       provider: PROVIDER,
       amount: body.amount,
@@ -2415,11 +2610,11 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
       customerId: customer?.id ?? null,
       paymentMethod: 'card',
       paymentMethodDetails: details,
+      ...connect,
       metadata: {
         ...(body.metadata ?? {}),
         ...(body.description ? { description: body.description } : {}),
         ...(body.receipt_email ? { receipt_email: body.receipt_email } : {}),
-        ...(body.transfer_group ? { transfer_group: body.transfer_group } : {}),
         ...(body.capture === false ? { capture_method: 'manual' } : {}),
       },
       status: 'pending',
