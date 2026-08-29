@@ -28,6 +28,9 @@
     },
     {
       "path": "../../packages/providers/kora"
+    },
+    {
+      "path": "../../packages/providers/wewire"
     }
   ]
 }

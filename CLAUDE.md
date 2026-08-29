@@ -16,7 +16,7 @@ All packages are implemented and the vertical slice runs end to end: `shared`, `
 
 **All four providers are implemented**, each partially: Paystack, Stripe, Flutterwave and Kora. Flutterwave ships two live APIs — v3 (`FLWSECK_TEST-` keys, `{status:"success",…}`) and v4 (OAuth2, `{status:"failed", error:{…}}`) — with different authentication, envelopes and webhook signatures, so they are **two adapters** at `/flutterwave/v3` and `/flutterwave/v4` rather than one with a flag.
 
-Coverage for each is documented honestly in `docs/paystack.md`, `docs/stripe.md`, `docs/flutterwave.md` and `docs/kora.md` — those files are contracts, not marketing. If something is missing from one, assume it is not implemented.
+Coverage for each is documented honestly in `docs/paystack.md`, `docs/stripe.md`, `docs/flutterwave.md`, `docs/kora.md` and `docs/wewire.md` — those files are contracts, not marketing. If something is missing from one, assume it is not implemented.
 
 **The contract is enforced, not just written.** Each adapter declares what it serves in a `coverage.ts` manifest, and `tests/coverage-drift.test.ts` fails if the manifest and the router disagree in either direction, or if an entry has nothing in the provider's docs file. The README's endpoint table is generated from the same manifests (`npm run coverage:table`) and a test fails if it is stale, so the counts on the repo's front page cannot overstate what the emulator serves. `paybox coverage` prints the same figures; `paybox coverage <provider>` breaks one down.
 
@@ -43,6 +43,9 @@ Provider-specific facts worth knowing before touching an adapter:
 - **Flutterwave sends `charge.completed` for failures too**; Kora has separate `charge.success` / `charge.failed`. The difference between two providers in one market is preserved, not smoothed over.
 - **v4's `X-Scenario-Key`** is Flutterwave's own outcome-simulation header (`scenario:auth_pin&issuer:insufficient_funds`). All four card scenarios, 45 issuer responses and five transfer scenarios are honoured.
 - Card payloads arrive encrypted: Flutterwave v3 uses **3DES-ECB** in `client`, Kora uses **AES-256-GCM** in `charge_data`. Both are decrypted at the boundary so a developer's existing client works unmodified.
+- **WeWire is the only adapter that does not roll its own webhook scheme**: it implements [Standard Webhooks](https://www.standardwebhooks.com) — three headers, `{id}.{timestamp}.{body}` signed, and the HMAC key is the *base64-decoded* portion after `whsec_`, not the literal secret. It is also the only one whose event *name* depends on the corridor rather than the resource: one canonical `transfer.successful` is `disbursement.completed` on the Ghana rail and `transaction.status_updated` offshore.
+- **WeWire takes its idempotency key as a body field**, on three endpoints only, so the shared `idempotencyPlugin` (which reads a header) is deliberately not registered for it. The quirk stays in the adapter that has it.
+- **WeWire is FX-centric, and the "no FX conversion" invariant still holds.** The rate lives in `providers/wewire/src/rates.ts` — a fixed table, because a moving rate would break determinism — and a cross-currency payout is stored as integer minor units in the source currency with the destination amount and rate as metadata. The adapter quotes; core only records what was quoted, and `getBalance` still folds per currency.
 
 The default branch is `main`. `feat/paystack-coverage` carries the six-phase Paystack build-out described above.
 
@@ -67,13 +70,14 @@ Dependency direction is strict and one-way:
 ```
 shared ──> core ──> (storage, webhooks, simulator) ──> providers/* ──> apps/api ──> apps/cli
 
-providers/ now holds four packages and five adapters (Flutterwave serves two
+providers/ now holds five packages and six adapters (Flutterwave serves two
 API versions). Anything a provider needs from core reaches it as an injected
 function -- ProviderStatusResolver, AuthorizationMinter, InstrumentResolver,
 SetupAuthorizationMinter -- never an import. Adding Stripe was the first test
-of that and needed three new seams; adding Flutterwave and Kora needed none at
-all, which is the strongest evidence the design holds. See
-docs/architecture.md.
+of that and needed three new seams; Flutterwave, Kora and WeWire needed none
+at all, which is the strongest evidence the design holds. WeWire is the
+sharpest case: an FX payout provider with wallets, corridors and conversions,
+added with one new job kind and no migration. See docs/architecture.md.
 ```
 
 - **`packages/shared`** — types and pure helpers with no runtime deps: canonical statuses, the domain model, seeded `Random`, `IdFactory`, the `Clock` *port* (interface only), currency, and the `PayboxError` taxonomy.
@@ -143,7 +147,7 @@ The engine only raises `PayboxError` with a code from the `ERROR_CODES` list. Ea
 
 ## Testing
 
-Ten suites, 145 tests. The load-bearing one is in `tests/paystack-subscriptions.test.ts`: a monthly subscription plus a single `advance` must yield twelve invoices one calendar month apart, each payment stamped at its own period start. If that breaks, `VirtualClock#at` has broken.
+38 suites, 657 tests. The load-bearing one is in `tests/paystack-subscriptions.test.ts`: a monthly subscription plus a single `advance` must yield twelve invoices one calendar month apart, each payment stamped at its own period start. If that breaks, `VirtualClock#at` has broken.
 
 `tests/helpers.ts` exposes `createHarness()` — in-memory SQLite, clock frozen at a fixed instant, fixed seed. Assertions can therefore be exact (literal ids, exact timestamps, gapless sequence numbers) rather than approximate. Prefer it over ad-hoc setup.
 

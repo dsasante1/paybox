@@ -193,5 +193,5 @@ export const PAYMENT_METHODS = [
 ] as const;
 export type PaymentMethod = (typeof PAYMENT_METHODS)[number];
 
-export const PROVIDERS = ['paystack', 'stripe', 'flutterwave', 'kora'] as const;
+export const PROVIDERS = ['paystack', 'stripe', 'flutterwave', 'kora', 'wewire'] as const;
 export type ProviderId = (typeof PROVIDERS)[number];

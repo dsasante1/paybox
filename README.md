@@ -31,6 +31,7 @@ reaches a payment network, and it refuses live API keys.
 | Flutterwave v3 | `/flutterwave` | 26 | **Partial** — [what works](docs/flutterwave.md) |
 | Flutterwave v4 | `/flutterwave/v4` | 11 | **Partial** — [what works](docs/flutterwave.md) |
 | Kora | `/kora` | 29 | **Partial** — [what works](docs/kora.md) |
+| WeWire | `/wewire` | 25 | **Partial** — [what works](docs/wewire.md) |
 <!-- coverage:end -->
 
 Endpoint counts are generated from each adapter's coverage manifest and checked

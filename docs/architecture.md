@@ -257,3 +257,76 @@ Everything else -- the self-enqueuing cycle, the invoice-limit check, the
 `attention` state on a failed renewal, the anchoring on `VirtualClock#at` --
 carried across untouched. Both providers now produce twelve monthly invoices
 one calendar month apart from a single `time advance 360d`.
+
+## FX without the engine ever converting
+
+WeWire and Wise are payout providers built around a rate: you quote a pair,
+then move money across it. `CLAUDE.md` states a non-negotiable that appears to
+be in the way — *"No FX conversion ever happens; `formatAmount` is
+display-only."* It is worth being precise about what that rule protects,
+because the answer determines whether an FX provider can be modelled at all.
+
+It protects two things: the engine must never **invent** a rate, and money must
+never lose precision by round-tripping through a float. Neither requires the
+engine to refuse cross-currency movement outright.
+
+So the WeWire adapter follows the same shape as every other provider-specific
+fact:
+
+- **The rate lives in the adapter.** `providers/wewire/src/rates.ts` is a fixed
+  table with a fixed spread, exactly as Paystack's status vocabulary and
+  Stripe's fee schedule live in theirs. Core never sees it, never asks for one,
+  and has no code path that could produce one.
+- **A conversion is two integer amounts and a recorded rate.** The payout is
+  stored in minor units of the source currency; the destination amount and the
+  rate that produced it go on the transfer's metadata. The float exists for one
+  multiplication inside `convertMinor` and is rounded away before anything is
+  written.
+- **`getBalance` still folds per currency.** There is no cross-currency
+  arithmetic anywhere in `packages/core`, and a wallet is still one balance per
+  currency per holder.
+
+The engine still never converts. The adapter quotes, and the ledger records
+what was quoted — which is the same injection pattern as `ProviderStatusResolver`,
+applied to a number instead of a string.
+
+The rates are **fixed rather than live** for the usual reason: a rate that moved
+between two runs would make the same inputs produce different output. WeWire
+refreshes on a 30-minute cycle and paybox cannot follow it without giving up the
+one property the whole project rests on. `docs/wewire.md` says so plainly, so
+nobody mistakes the table for market data.
+
+## One canonical event, several provider *names*
+
+Stripe forced webhook fan-out: one settlement is both
+`payment_intent.succeeded` and `charge.succeeded`. WeWire forced the
+neighbouring case — one canonical event that is a *different single event*
+depending on which product produced the resource.
+
+`transfer.successful` on the Ghana corridor is `disbursement.completed`,
+carrying WeWire's flat Africa object. The same canonical event offshore is
+`transaction.status_updated`, carrying a wallet-transaction object with
+different field names (`transactionId`, not `id`), a different channel string
+(`PAYOUT`, not `AUTOMATED_PAYOUT`) and extra `walletId` / `businessId` fields.
+
+This needed no new seam. The formatter already receives the resource, and the
+corridor is recorded on the transfer's metadata when it is created — so the
+adapter reads a fact it wrote rather than inferring one from the currency. The
+lesson is the same one the `InvoiceLeadTimes` injection taught: when two
+providers disagree, the disagreement belongs on the resource, not in a
+conditional in `core`.
+
+## A `transfer.settle` job, and why transfers needed one
+
+Until WeWire, transfers had no scheduled settlement path — they were moved by
+the control API, the CLI, or an adapter transitioning them inline. WeWire
+cannot work that way: it returns `PENDING` and settles asynchronously, and its
+own sandbox documents the outcome arriving "within seconds".
+
+`transfer.settle` is registered in `context.ts` beside `payment.simulate` and
+`refund.settle`, and follows the same rule as both: **the outcome is decided
+when the job is enqueued, never when it runs.** The adapter reads WeWire's
+published sandbox number at request time and writes the answer into the job
+payload. A `paybox time advance` therefore delivers a result that was already
+determined, which is what keeps the whole thing reproducible under a fixed
+seed.

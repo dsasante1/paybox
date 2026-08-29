@@ -3,6 +3,7 @@ import cors from '@fastify/cors';
 import { stripePlugin } from '@paybox/stripe';
 import { flutterwavePlugin, flutterwaveV4Plugin } from '@paybox/flutterwave';
 import { koraPlugin } from '@paybox/kora';
+import { wewirePlugin } from '@paybox/wewire';
 import { paystackPlugin, fail } from '@paybox/paystack';
 import type { PayboxContext } from './context.js';
 import { controlApiPlugin } from './control-api.js';
@@ -262,6 +263,48 @@ export async function buildApp(context: PayboxContext): Promise<FastifyInstance>
         });
       },
       { prefix: '/kora' },
+    );
+  }
+
+  if (context.config.providers.wewire?.enabled !== false) {
+    await app.register(
+      async (scope) => {
+        await scope.register(networkPlugin, {
+          simulator: context.network,
+          // WeWire's structured envelope. `success: false` is the field its
+          // own docs tell clients to branch on, so a simulated outage has to
+          // carry it or the client would read the failure as a success.
+          errorBody: (status) => ({
+            success: false,
+            error: {
+              code: status === 429 ? 'RATE_LIMIT_EXCEEDED' : 'INTEGRATION_UNAVAILABLE',
+              message:
+                status === 429
+                  ? 'Too many requests'
+                  : 'The provider is temporarily unavailable (simulated by paybox).',
+              statusCode: status,
+            },
+          }),
+        });
+        // No `idempotencyPlugin` here on purpose: WeWire takes its
+        // idempotency key as a **body field** on three endpoints rather than
+        // as a header on all of them, so the adapter handles it itself. See
+        // the note in providers/wewire/src/routes.ts.
+        await scope.register(wewirePlugin, {
+          engine: context.engine,
+          simulator: context.simulator,
+          storage: context.storage,
+          clock: context.clock,
+          ids: context.ids,
+          random: context.random,
+          baseUrl: context.baseUrl,
+          basePath: '/wewire',
+          allowAnyKey: context.config.security.allowAnyKey,
+          autoAdvance: context.config.simulation.autoAdvance,
+          autoAdvanceDelayMs: context.config.simulation.autoAdvanceDelayMs,
+        });
+      },
+      { prefix: '/wewire' },
     );
   }
 
