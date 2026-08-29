@@ -12,7 +12,11 @@
     "commander": "^15.0.0",
     "picocolors": "^1.1.1",
     "cli-table3": "^0.6.5",
-    "@paybox/api": "0.1.0"
+    "@paybox/api": "0.1.0",
+    "@paybox/paystack": "0.1.0",
+    "@paybox/stripe": "0.1.0",
+    "@paybox/flutterwave": "0.1.0",
+    "@paybox/kora": "0.1.0"
   },
   "bin": {
     "paybox": "./src/main.ts"

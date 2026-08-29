@@ -27,3 +27,4 @@ export {
   serializeVirtualAccount,
 } from './serializers.js';
 export { koraPlugin, registerKora, type KoraPluginOptions } from './routes.js';
+export { KORA_COVERAGE } from './coverage.js';

@@ -23,13 +23,20 @@ reaches a payment network, and it refuses live API keys.
 
 ## Status
 
-| Provider | Base path | Coverage |
-|---|---|---|
-| Paystack | `/paystack` | **Partial** — [what works](docs/paystack.md) |
-| Stripe | `/stripe` | **Partial** — [what works](docs/stripe.md) |
-| Flutterwave v3 | `/flutterwave/v3` | **Partial** — [what works](docs/flutterwave.md) |
-| Flutterwave v4 | `/flutterwave/v4` | **Partial** — [what works](docs/flutterwave.md) |
-| Kora | `/kora` | **Partial** — [what works](docs/kora.md) |
+<!-- coverage:start -->
+| Provider | Base path | Endpoints | Coverage |
+|---|---|---|---|
+| Paystack | `/paystack` | 64 | **Partial** — [what works](docs/paystack.md) |
+| Stripe | `/stripe` | 92 | **Partial** — [what works](docs/stripe.md) |
+| Flutterwave v3 | `/flutterwave` | 26 | **Partial** — [what works](docs/flutterwave.md) |
+| Flutterwave v4 | `/flutterwave/v4` | 11 | **Partial** — [what works](docs/flutterwave.md) |
+| Kora | `/kora` | 29 | **Partial** — [what works](docs/kora.md) |
+<!-- coverage:end -->
+
+Endpoint counts are generated from each adapter's coverage manifest and checked
+against the router by `tests/coverage-drift.test.ts` — the table cannot claim an
+endpoint the emulator does not serve. `paybox coverage` prints the same figures,
+and `paybox coverage <provider>` breaks them down.
 
 **Partial means partial.** Each `docs/<provider>.md` is a contract, not
 marketing: it lists what is implemented, what differs and what is absent. If

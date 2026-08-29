@@ -62,3 +62,4 @@ export {
   list,
 } from './serializers.js';
 export { stripePlugin, registerStripe, type StripePluginOptions } from './routes.js';
+export { STRIPE_COVERAGE } from './coverage.js';
