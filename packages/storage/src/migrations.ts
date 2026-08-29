@@ -774,4 +774,25 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_payments_transfer_group ON payments (transfer_group);
     `,
   },
+  {
+    id: '0017_transfers_between_balances',
+    sql: `
+      -- A transfer already models "money leaves a balance and may fail".
+      -- Moving funds to a connected account is the same shape of problem, so
+      -- it reuses the mechanism rather than growing a second one: the only new
+      -- facts are which balance it left and which it landed in.
+      --
+      -- destination NULL means it went to a bank, which is every existing row.
+      ALTER TABLE transfers
+        ADD COLUMN source_subaccount_id TEXT REFERENCES subaccounts(id) ON DELETE RESTRICT;
+      ALTER TABLE transfers
+        ADD COLUMN destination_subaccount_id TEXT REFERENCES subaccounts(id) ON DELETE RESTRICT;
+      ALTER TABLE transfers
+        ADD COLUMN source_payment_id TEXT REFERENCES payments(id) ON DELETE SET NULL;
+      ALTER TABLE transfers ADD COLUMN transfer_group TEXT;
+      ALTER TABLE transfers ADD COLUMN amount_reversed INTEGER NOT NULL DEFAULT 0;
+      CREATE INDEX idx_transfers_destination ON transfers (destination_subaccount_id);
+      CREATE INDEX idx_transfers_group ON transfers (transfer_group);
+    `,
+  },
 ];

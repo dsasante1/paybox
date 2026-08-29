@@ -71,6 +71,14 @@ const ERRORS: Partial<Record<ErrorCode, StripeErrorShape>> = {
     declineCode: 'insufficient_funds',
     httpStatus: 402,
   },
+  // The platform's own balance, not a card. Stripe reports this as an
+  // invalid_request_error with `balance_insufficient` and HTTP 400 -- a 402
+  // here would tell an integration to retry a card that was never involved.
+  balance_insufficient: {
+    type: 'invalid_request_error',
+    code: 'balance_insufficient',
+    httpStatus: 400,
+  },
   expired_card: { type: 'card_error', code: 'expired_card', httpStatus: 402 },
   authentication_required: {
     type: 'card_error',

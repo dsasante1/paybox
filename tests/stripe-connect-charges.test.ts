@@ -146,6 +146,9 @@ describe('a direct charge', () => {
 
     expect(response.statusCode).toBe(400);
     expect(response.json().error.message).toContain('onboarding is incomplete');
+    // Named by the handle the caller sent, not an internal code they have
+    // never seen.
+    expect(response.json().error.message).toContain(pending.id);
     // No money moved.
     expect(await balanceOf(pending.id)).toBe(0);
   });
@@ -212,7 +215,7 @@ describe('a direct charge', () => {
 });
 
 describe('a destination charge', () => {
-  it('keeps the money with the platform and names where it is going', async () => {
+  it('takes the payment on the platform and forwards the share', async () => {
     const acct = await connectedAccount();
     const platformBefore = await balanceOf(null);
 
@@ -227,9 +230,26 @@ describe('a destination charge', () => {
     ).json();
 
     expect(charge.transfer_data.destination).toBe(acct);
-    // The platform took this one; the share moves separately.
-    expect(await balanceOf(null)).toBe(platformBefore + 9_000);
-    expect(await balanceOf(acct)).toBe(0);
+    // The platform collected 9000 and passed on 8100, keeping its 900 fee.
+    expect(await balanceOf(null)).toBe(platformBefore + 900);
+    expect(await balanceOf(acct)).toBe(8_100);
+  });
+
+  it('forwards as a real transfer, not a bare ledger entry', async () => {
+    const acct = await connectedAccount();
+    await post('/stripe/v1/charges', {
+      amount: 5_000,
+      currency: 'usd',
+      application_fee_amount: 500,
+      'transfer_data[destination]': acct,
+      'card[number]': VISA,
+    });
+
+    // So it shows up in the transfer list and can be reversed like any other.
+    const transfers = await context.storage.transfers.list({});
+    const forwarded = transfers.items.find((t) => t.destinationSubaccountId !== null);
+    expect(forwarded).toMatchObject({ amount: 4_500, status: 'successful' });
+    expect(forwarded?.sourcePaymentId).toBeTruthy();
   });
 
   it('refuses to be a direct charge as well', async () => {

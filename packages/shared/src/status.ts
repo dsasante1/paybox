@@ -51,12 +51,25 @@ export const REFUND_STATUSES = [
 ] as const;
 export type RefundStatus = (typeof REFUND_STATUSES)[number];
 
+/**
+ * Money leaving a balance.
+ *
+ * Covers two things a marketplace does with one mechanism: moving funds
+ * between internal balances (Stripe's Transfer), and sending them to a bank
+ * (Stripe's Payout, Paystack's transfer). Both reserve at the point of
+ * queueing and both can fail, which is why they share a lifecycle.
+ *
+ * `cancelled` is a payout the merchant stopped before it left, which is a
+ * genuinely different outcome from one that failed on the way. Only providers
+ * that offer it produce it; Paystack has no cancel and never does.
+ */
 export const TRANSFER_STATUSES = [
   'created',
   'pending',
   'processing',
   'successful',
   'failed',
+  'cancelled',
   'reversed',
 ] as const;
 export type TransferStatus = (typeof TRANSFER_STATUSES)[number];

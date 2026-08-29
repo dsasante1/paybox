@@ -10,6 +10,8 @@ import {
   serializeAccount,
   serializeApplicationFee,
   serializeCharge,
+  serializePayout,
+  serializeTransfer,
   serializeCheckoutSession,
   serializeCustomer,
   serializeInvoice,
@@ -78,6 +80,16 @@ const EVENT_MAP: Record<string, readonly string[]> = {
   'subaccount.created': ['account.updated'],
   'subaccount.updated': ['account.updated'],
   'application_fee.refunded': ['application_fee.refunded'],
+  // Transfers and payouts share one canonical resource, so the formatter
+  // decides which Stripe object an event is about by whether it has a
+  // destination balance -- see #buildData.
+  'transfer.created': ['transfer.created', 'payout.created'],
+  'transfer.pending': ['payout.created'],
+  'transfer.processing': ['payout.updated'],
+  'transfer.successful': ['transfer.created', 'payout.paid'],
+  'transfer.failed': ['payout.failed'],
+  'transfer.cancelled': ['payout.canceled'],
+  'transfer.reversed': ['transfer.reversed'],
   'subscription.created': ['customer.subscription.created'],
   'subscription.updated': ['customer.subscription.updated'],
   'subscription.non_renewing': ['customer.subscription.updated'],
@@ -110,11 +122,15 @@ function subjectFor(
   | 'setup'
   | 'account'
   | 'application_fee'
+  | 'transfer'
+  | 'payout'
   | 'payment_method' {
   if (eventType.startsWith('customer.subscription.')) return 'subscription';
   if (eventType.startsWith('setup_intent.')) return 'setup';
   if (eventType.startsWith('account.')) return 'account';
   if (eventType.startsWith('application_fee.')) return 'application_fee';
+  if (eventType.startsWith('transfer.')) return 'transfer';
+  if (eventType.startsWith('payout.')) return 'payout';
   if (eventType.startsWith('payment_method.')) return 'payment_method';
   if (eventType.startsWith('invoice.')) return 'invoice';
   if (eventType.startsWith('checkout.session.')) return 'session';
@@ -302,6 +318,19 @@ export class StripeWebhookFormatter implements WebhookFormatter {
         ? await storage.customers.byId(authorization.customerId)
         : null;
       return serializePaymentMethod(authorization, customer);
+    }
+
+    if (event.resourceType === 'transfer') {
+      const transfer = await storage.transfers.byId(event.resourceId);
+      if (!transfer) return null;
+      // One canonical resource, two Stripe objects. A movement between
+      // balances is a Transfer; one that left for a bank is a Payout. Dropping
+      // the entry that does not apply keeps an endpoint subscribed to only
+      // `payout.paid` from receiving transfer events it never asked for.
+      const isPayout = transfer.destinationSubaccountId === null;
+      if (subject === 'payout') return isPayout ? serializePayout(transfer) : null;
+      if (subject === 'transfer') return isPayout ? null : serializeTransfer(transfer);
+      return null;
     }
 
     if (event.resourceType === 'subaccount') {

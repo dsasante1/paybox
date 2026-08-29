@@ -12,6 +12,7 @@ import type {
   Refund,
   Subaccount,
   Subscription,
+  Transfer,
   SubscriptionItem,
 } from '@paybox/shared';
 import {
@@ -1039,5 +1040,117 @@ export function serializeApplicationFee(payment: Payment) {
       has_more: false,
       url: `/v1/application_fees/${id}/refunds`,
     },
+  };
+}
+
+/**
+ * A Transfer: money moved from the platform to a connected account.
+ *
+ * Distinct from a Payout, which leaves for a bank. paybox models both with one
+ * canonical Transfer because they are the same shape of problem -- reserve
+ * now, settle later, possibly fail -- and tells them apart by whether there is
+ * a destination balance.
+ */
+export function serializeTransfer(transfer: Transfer) {
+  const id = stripeId('tr', transfer.id);
+  return {
+    id,
+    object: 'transfer' as const,
+    amount: transfer.amount,
+    amount_reversed: transfer.amountReversed,
+    balance_transaction: stripeId('txn', transfer.id),
+    created: unix(transfer.createdAt),
+    currency: transfer.currency.toLowerCase(),
+    description: transfer.reason,
+    destination: transfer.destinationSubaccountId
+      ? stripeId('acct', transfer.destinationSubaccountId)
+      : null,
+    // paybox does not mint a separate charge on the connected account for a
+    // destination charge; docs/stripe.md records that.
+    destination_payment: null,
+    livemode: false,
+    metadata: transfer.metadata,
+    reversals: {
+      object: 'list' as const,
+      data:
+        transfer.amountReversed > 0
+          ? [
+              {
+                id: stripeId('trr', transfer.id),
+                object: 'transfer_reversal' as const,
+                amount: transfer.amountReversed,
+                balance_transaction: null,
+                created: unix(transfer.updatedAt),
+                currency: transfer.currency.toLowerCase(),
+                destination_payment_refund: null,
+                metadata: {},
+                source_refund: null,
+                transfer: id,
+              },
+            ]
+          : [],
+      has_more: false,
+      url: `/v1/transfers/${id}/reversals`,
+    },
+    reversed: transfer.amountReversed >= transfer.amount && transfer.amount > 0,
+    source_transaction: transfer.sourcePaymentId
+      ? stripeId('ch', transfer.sourcePaymentId)
+      : null,
+    source_type: 'card',
+    transfer_group: transfer.transferGroup,
+  };
+}
+
+/**
+ * Payout status: canonical -> Stripe.
+ *
+ * `reversed` has no Stripe equivalent -- a payout that comes back is `failed`
+ * there -- so it maps to failed rather than inventing a status.
+ */
+export function toStripePayoutStatus(status: Transfer['status']): string {
+  switch (status) {
+    case 'successful':
+      return 'paid';
+    case 'processing':
+      return 'in_transit';
+    case 'cancelled':
+      return 'canceled';
+    case 'failed':
+    case 'reversed':
+      return 'failed';
+    default:
+      return 'pending';
+  }
+}
+
+/** A Payout: money leaving a balance for a bank. */
+export function serializePayout(transfer: Transfer) {
+  return {
+    id: stripeId('po', transfer.id),
+    object: 'payout' as const,
+    amount: transfer.amount,
+    application_fee: null,
+    application_fee_amount: null,
+    // paybox settles instantly, so a payout arrives the moment it succeeds.
+    arrival_date: unix(transfer.updatedAt),
+    automatic: false,
+    balance_transaction: stripeId('txn', transfer.id),
+    created: unix(transfer.createdAt),
+    currency: transfer.currency.toLowerCase(),
+    description: transfer.reason,
+    destination: stripeId('ba', transfer.sourceSubaccountId ?? transfer.id),
+    failure_balance_transaction: null,
+    failure_code: transfer.failureReason,
+    failure_message: transfer.failureReason,
+    livemode: false,
+    metadata: transfer.metadata,
+    method: 'standard',
+    original_payout: null,
+    reconciliation_status: 'not_applicable',
+    reversed_by: null,
+    source_type: 'card',
+    statement_descriptor: null,
+    status: toStripePayoutStatus(transfer.status),
+    type: 'bank_account',
   };
 }

@@ -90,6 +90,10 @@ The **Charge** is different: charges are immutable attempt records, and
 | `GET /v1/balance` | **Partially compatible** | Scoped by `Stripe-Account`; `pending` always empty. |
 | `GET /v1/application_fees`, `GET /v1/application_fees/{id}` | **Compatible** | |
 | `POST`/`GET /v1/application_fees/{id}/refunds` | **Partially compatible** | No update; no metadata on a fee refund. |
+| `POST /v1/transfers`, `GET /v1/transfers`, `GET`/`POST /v1/transfers/{id}` | **Compatible** | |
+| `POST`/`GET /v1/transfers/{id}/reversals` | **Partially compatible** | No `description` on a reversal. |
+| `POST /v1/payouts`, `GET /v1/payouts`, `GET`/`POST /v1/payouts/{id}` | **Partially compatible** | Manual only; see below. |
+| `POST /v1/payouts/{id}/cancel` | **Compatible** | |
 | Terminal, Issuing, Radar, Tax, everything else | **Not supported** | Out of scope. |
 
 ## Requests are form-encoded
@@ -415,7 +419,33 @@ expected to react.
    payment. `GET /v1/balance` reports `pending` as always empty: paybox settles
    instantly, and a developer testing "wait for funds to become available"
    needs to know that wait does not exist here.
-22. `expand[]` is honoured on every route, in the query string and in a POST
+22. **Transfers and payouts share one mechanism.** Stripe has two words for
+   money leaving a balance — a **Transfer** to a connected account and a
+   **Payout** to a bank — and paybox models both with one canonical resource,
+   because they are the same shape of problem: reserve now, settle later,
+   possibly fail. They stay two objects at the API boundary, and asking for one
+   by the other's id is a 404 rather than a confusing wrong answer.
+
+   A transfer between balances writes **two ledger entries in one transaction**,
+   so the pair can never balance halfway. Reversals may be partial, and are
+   refused when the destination has already spent the money. A destination
+   charge forwards its share at settlement as a real transfer — so it appears
+   in `GET /v1/transfers`, can be reversed, and fires the same events as any
+   other movement.
+
+   `refund_application_fee` on a reversal moves the fee only to the extent the
+   account still holds what it was taken from: reversing a forwarded transfer
+   in full leaves the platform holding everything, so the fee refund is then
+   recorded without moving money.
+
+   Gaps: payouts are **manual only** (no automatic schedule, and
+   `settings.payouts.schedule.interval` always reports `manual`), `arrival_date`
+   is the settlement instant because paybox settles instantly, `instant` payout
+   method is accepted and treated as standard, and a destination charge does
+   not mint a separate charge on the connected account — so `destination_payment`
+   is null. `insufficient_funds` on a balance is reported as
+   `balance_insufficient` with HTTP 400, not as the 402 card decline.
+23. `expand[]` is honoured on every route, in the query string and in a POST
    body, on single objects and on `data.` paths in a list. Naming a nested path
    expands the levels above it, as Stripe does, and more than four levels is
    refused. Two differences from Stripe: an id that does not resolve leaves the

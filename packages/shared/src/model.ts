@@ -92,6 +92,20 @@ export interface Refund {
   updatedAt: string;
 }
 
+/**
+ * Money leaving a balance.
+ *
+ * One mechanism for two things a marketplace does, because they are the same
+ * shape of problem -- reserve now, settle later, and possibly fail:
+ *
+ *   destinationSubaccountId set   An internal move between balances. Stripe
+ *                                 calls this a Transfer.
+ *   destinationSubaccountId null  Money going to a bank. Stripe calls this a
+ *                                 Payout; Paystack calls it a transfer.
+ *
+ * `sourceSubaccountId` is null for the platform's own balance, which is where
+ * every non-marketplace payout comes from.
+ */
 export interface Transfer {
   id: string;
   provider: ProviderId;
@@ -106,6 +120,16 @@ export interface Transfer {
   recipientBankCode: string | null;
   reason: string | null;
   failureReason: string | null;
+  /** Whose balance the money leaves. Null is the platform's own. */
+  sourceSubaccountId: string | null;
+  /** Whose balance it lands in. Null means it left for a bank. */
+  destinationSubaccountId: string | null;
+  /** The charge that funded it, where a provider tracks that. */
+  sourcePaymentId: string | null;
+  /** Ties charges and transfers that belong to one piece of business. */
+  transferGroup: string | null;
+  /** How much has been sent back. Reversals may be partial. */
+  amountReversed: number;
   metadata: Metadata;
   createdAt: string;
   updatedAt: string;

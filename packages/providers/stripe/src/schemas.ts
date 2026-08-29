@@ -162,6 +162,41 @@ export const accountRejectSchema = z.object({
   reason: z.enum(['fraud', 'terms_of_service', 'other']),
 });
 
+/** Moving money to a connected account. */
+export const transferCreateSchema = z.object({
+  amount,
+  currency: z.string().min(3).max(3),
+  destination: z.string().min(1),
+  description: z.string().optional(),
+  source_transaction: z.string().optional(),
+  transfer_group: z.string().optional(),
+  metadata,
+});
+
+export const transferUpdateSchema = z.object({
+  description: z.string().optional(),
+  metadata,
+});
+
+export const transferReversalSchema = z.object({
+  amount: z.union([z.number(), z.string()]).optional(),
+  description: z.string().optional(),
+  refund_application_fee: formBool,
+  metadata,
+});
+
+/** Money leaving a balance for a bank. */
+export const payoutCreateSchema = z.object({
+  amount,
+  currency: z.string().min(3).max(3),
+  description: z.string().optional(),
+  statement_descriptor: z.string().optional(),
+  method: z.enum(['standard', 'instant']).optional(),
+  metadata,
+});
+
+export const payoutUpdateSchema = z.object({ metadata });
+
 export const accountLinkCreateSchema = z.object({
   account: z.string().min(1),
   type: z

@@ -28,6 +28,11 @@ import {
   accountRejectSchema,
   accountUpdateSchema,
   applicationFeeRefundSchema,
+  payoutCreateSchema,
+  payoutUpdateSchema,
+  transferCreateSchema,
+  transferReversalSchema,
+  transferUpdateSchema,
   chargeCaptureSchema,
   chargeCreateSchema,
   chargeUpdateSchema,
@@ -77,6 +82,9 @@ import {
   serializeApplicationFee,
   serializeBalance,
   serializeCharge,
+  serializePayout,
+  serializeTransfer,
+  toStripePayoutStatus,
   serializeCheckoutSession,
   serializeInvoice,
   serializeInvoiceItem,
@@ -673,7 +681,7 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
       };
     }
 
-    engine.assertChargeableAccount(account);
+    engine.assertChargeableAccount(account, stripeId('acct', account.id));
 
     const fee = Math.max(0, Math.trunc(Number(body.application_fee_amount ?? 0)));
     return {
@@ -694,6 +702,251 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
       );
     }
   }
+
+  /* ---------------------------------------------------------------- *
+   * Connect: transfers and payouts
+   *
+   * Stripe has two words for money leaving a balance and paybox has one
+   * mechanism, because they are the same shape of problem -- reserve now,
+   * settle later, possibly fail. A **Transfer** has a destination balance; a
+   * **Payout** does not, because it left for a bank.
+   * ---------------------------------------------------------------- */
+
+  async function loadTransfer(handle: string, kind: 'transfer' | 'payout') {
+    const canonical = handle.replace(/^(tr|po)_/, 'trf_');
+    const transfer =
+      (await storage.transfers.byId(canonical)) ?? (await storage.transfers.byId(handle));
+    if (!transfer || transfer.provider !== PROVIDER) {
+      throw new PayboxError('not_found', `No such ${kind}: '${handle}'.`);
+    }
+    // A payout and a transfer are different objects at Stripe, so asking for
+    // one by the other's id is a 404 rather than a confusing wrong answer.
+    const isPayout = transfer.destinationSubaccountId === null;
+    if (kind === 'payout' && !isPayout) {
+      throw new PayboxError('not_found', `No such payout: '${handle}'.`);
+    }
+    if (kind === 'transfer' && isPayout) {
+      throw new PayboxError('not_found', `No such transfer: '${handle}'.`);
+    }
+    return transfer;
+  }
+
+  fastify.post('/v1/transfers', async (request, reply) => {
+    authenticate(request);
+    const body = transferCreateSchema.parse(request.body);
+    const currency = body.currency.toUpperCase();
+    if (!isSupportedCurrency(currency)) {
+      throw new PayboxError(
+        'unsupported_currency',
+        `The currency ${body.currency} is not supported.`,
+      );
+    }
+
+    const destination = await loadAccount(body.destination);
+    // A transfer is money the account will eventually be paid out; sending it
+    // to one that cannot receive payouts would strand it.
+    if (!destination.payoutsEnabled) {
+      throw new PayboxError(
+        'validation_failed',
+        `Account ${body.destination} cannot receive transfers: onboarding is incomplete.`,
+        { details: { requirements: destination.requirements } },
+      );
+    }
+
+    // Transfers move funds the platform already holds, so they settle at once.
+    const transfer = await engine.createTransfer({
+      provider: PROVIDER,
+      amount: body.amount,
+      currency,
+      status: 'successful',
+      destinationSubaccountId: destination.id,
+      ...(body.source_transaction
+        ? { sourcePaymentId: (await loadPayment(body.source_transaction)).id }
+        : {}),
+      ...(body.transfer_group ? { transferGroup: body.transfer_group } : {}),
+      ...(body.description ? { reason: body.description } : {}),
+      metadata: body.metadata ?? {},
+    });
+
+    return reply.send(serializeTransfer(transfer));
+  });
+
+  fastify.get<{ Params: { transfer: string } }>(
+    '/v1/transfers/:transfer',
+    async (request, reply) => {
+      authenticate(request);
+      return reply.send(
+        serializeTransfer(await loadTransfer(request.params.transfer, 'transfer')),
+      );
+    },
+  );
+
+  fastify.post<{ Params: { transfer: string } }>(
+    '/v1/transfers/:transfer',
+    async (request, reply) => {
+      authenticate(request);
+      const body = transferUpdateSchema.parse(request.body ?? {});
+      const transfer = await loadTransfer(request.params.transfer, 'transfer');
+      const updated = await storage.transfers.update(transfer.id, {
+        metadata: { ...transfer.metadata, ...(body.metadata ?? {}) },
+        updatedAt: clock.nowISO(),
+      });
+      return reply.send(serializeTransfer(updated));
+    },
+  );
+
+  fastify.get<{ Querystring: Record<string, string> }>(
+    '/v1/transfers',
+    async (request, reply) => {
+      authenticate(request);
+      const query = listQuerySchema.parse(request.query);
+      const { page, hasMore } = await paginate(
+        query,
+        async (limit, offset) => {
+          const rows = await storage.transfers.list({ limit, offset });
+          const internal = rows.items.filter(
+            (row) => row.provider === PROVIDER && row.destinationSubaccountId !== null,
+          );
+          return { items: internal, total: internal.length };
+        },
+        (transfer) => stripeId('tr', transfer.id),
+      );
+      return reply.send(list(page.map(serializeTransfer), '/v1/transfers', hasMore));
+    },
+  );
+
+  fastify.post<{ Params: { transfer: string } }>(
+    '/v1/transfers/:transfer/reversals',
+    async (request, reply) => {
+      authenticate(request);
+      const body = transferReversalSchema.parse(request.body ?? {});
+      const transfer = await loadTransfer(request.params.transfer, 'transfer');
+      const amount = body.amount !== undefined ? Number(body.amount) : undefined;
+      const reversed = await engine.reverseTransfer(
+        transfer.id,
+        amount !== undefined && Number.isFinite(amount) ? Math.trunc(amount) : undefined,
+      );
+
+      // `refund_application_fee` gives the platform's cut back with the money.
+      if (body.refund_application_fee === true && reversed.sourcePaymentId) {
+        const payment = await storage.payments.byId(reversed.sourcePaymentId);
+        if (payment && payment.platformFee > payment.platformFeeRefunded) {
+          await engine.refundPlatformFee(payment.id);
+        }
+      }
+
+      const serialized = serializeTransfer(reversed);
+      return reply.send(serialized.reversals.data[0] ?? serialized);
+    },
+  );
+
+  fastify.get<{ Params: { transfer: string } }>(
+    '/v1/transfers/:transfer/reversals',
+    async (request, reply) => {
+      authenticate(request);
+      const serialized = serializeTransfer(
+        await loadTransfer(request.params.transfer, 'transfer'),
+      );
+      return reply.send(
+        list(serialized.reversals.data, `/v1/transfers/${serialized.id}/reversals`, false),
+      );
+    },
+  );
+
+  /* ------------------------------ payouts ------------------------------ */
+
+  fastify.post('/v1/payouts', async (request, reply) => {
+    authenticate(request);
+    const body = payoutCreateSchema.parse(request.body);
+    const currency = body.currency.toUpperCase();
+    if (!isSupportedCurrency(currency)) {
+      throw new PayboxError(
+        'unsupported_currency',
+        `The currency ${body.currency} is not supported.`,
+      );
+    }
+
+    // Under `Stripe-Account` the money leaves *that* account's balance, which
+    // is how a connected account pays itself out.
+    const account = await actingAccount(request);
+    if (account && !account.payoutsEnabled) {
+      throw new PayboxError(
+        'validation_failed',
+        `Account ${stripeId('acct', account.id)} cannot pay out: onboarding is incomplete.`,
+        { details: { requirements: account.requirements } },
+      );
+    }
+
+    const payout = await engine.createTransfer({
+      provider: PROVIDER,
+      amount: body.amount,
+      currency,
+      status: 'pending',
+      sourceSubaccountId: account?.id ?? null,
+      recipientName: account?.businessName ?? null,
+      recipientBankCode: account?.settlementBank ?? null,
+      recipientAccount: account?.accountNumber ?? null,
+      ...(body.description ? { reason: body.description } : {}),
+      metadata: body.metadata ?? {},
+    });
+
+    return reply.send(serializePayout(payout));
+  });
+
+  fastify.get<{ Params: { payout: string } }>('/v1/payouts/:payout', async (request, reply) => {
+    authenticate(request);
+    return reply.send(serializePayout(await loadTransfer(request.params.payout, 'payout')));
+  });
+
+  fastify.post<{ Params: { payout: string } }>('/v1/payouts/:payout', async (request, reply) => {
+    authenticate(request);
+    const body = payoutUpdateSchema.parse(request.body ?? {});
+    const payout = await loadTransfer(request.params.payout, 'payout');
+    const updated = await storage.transfers.update(payout.id, {
+      metadata: { ...payout.metadata, ...(body.metadata ?? {}) },
+      updatedAt: clock.nowISO(),
+    });
+    return reply.send(serializePayout(updated));
+  });
+
+  fastify.post<{ Params: { payout: string } }>(
+    '/v1/payouts/:payout/cancel',
+    async (request, reply) => {
+      authenticate(request);
+      const payout = await loadTransfer(request.params.payout, 'payout');
+      if (payout.status !== 'pending' && payout.status !== 'created') {
+        throw new PayboxError(
+          'invalid_state_transition',
+          `Payout ${request.params.payout} is ${toStripePayoutStatus(payout.status)} and can ` +
+            `no longer be canceled.`,
+        );
+      }
+      return reply.send(
+        serializePayout(await engine.transitionTransfer(payout.id, 'cancelled')),
+      );
+    },
+  );
+
+  fastify.get<{ Querystring: Record<string, string> }>('/v1/payouts', async (request, reply) => {
+    authenticate(request);
+    const query = listQuerySchema.parse(request.query);
+    const account = await actingAccount(request);
+    const { page, hasMore } = await paginate(
+      query,
+      async (limit, offset) => {
+        const rows = await storage.transfers.list({ limit, offset });
+        const payouts = rows.items.filter(
+          (row) =>
+            row.provider === PROVIDER &&
+            row.destinationSubaccountId === null &&
+            row.sourceSubaccountId === (account?.id ?? null),
+        );
+        return { items: payouts, total: payouts.length };
+      },
+      (payout) => stripeId('po', payout.id),
+    );
+    return reply.send(list(page.map(serializePayout), '/v1/payouts', hasMore));
+  });
 
   /* ---------------------------------------------------------------- *
    * Connect: application fees

@@ -22,6 +22,7 @@ const HTTP_STATUS: Partial<Record<ErrorCode, number>> = {
   // nothing was attempted. Declines never reach here -- they settle the
   // payment as failed and return 200 with the failure on the transaction.
   insufficient_funds: 400,
+  balance_insufficient: 400,
   unsupported_operation: 501,
   rate_limited: 429,
   safety_violation: 403,

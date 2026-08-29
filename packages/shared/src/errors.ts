@@ -17,6 +17,11 @@ export const ERROR_CODES = [
   'invalid_state_transition',
   'refund_exceeds_amount',
   'insufficient_funds',
+  // Distinct from insufficient_funds, which is a *card* decline. This is the
+  // merchant's own balance being too small to cover a payout or a transfer --
+  // a different failure, reported differently by both providers, and one no
+  // customer can fix.
+  'balance_insufficient',
   'card_declined',
   'expired_card',
   'authentication_required',

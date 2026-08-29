@@ -62,6 +62,11 @@ export interface TransferRow {
   recipient_bank_code: string | null;
   reason: string | null;
   failure_reason: string | null;
+  source_subaccount_id: string | null;
+  destination_subaccount_id: string | null;
+  source_payment_id: string | null;
+  transfer_group: string | null;
+  amount_reversed: number;
   metadata: string;
   created_at: string;
   updated_at: string;

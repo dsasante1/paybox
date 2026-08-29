@@ -226,6 +226,11 @@ export const toTransfer = (row: TransferRow): Transfer => ({
   recipientBankCode: row.recipient_bank_code,
   reason: row.reason,
   failureReason: row.failure_reason,
+  sourceSubaccountId: row.source_subaccount_id,
+  destinationSubaccountId: row.destination_subaccount_id,
+  sourcePaymentId: row.source_payment_id,
+  transferGroup: row.transfer_group,
+  amountReversed: row.amount_reversed,
   metadata: readJson(row.metadata),
   createdAt: row.created_at,
   updatedAt: row.updated_at,
@@ -245,6 +250,11 @@ export const fromTransfer = (transfer: Transfer): TransferRow => ({
   recipient_bank_code: transfer.recipientBankCode,
   reason: transfer.reason,
   failure_reason: transfer.failureReason,
+  source_subaccount_id: transfer.sourceSubaccountId,
+  destination_subaccount_id: transfer.destinationSubaccountId,
+  source_payment_id: transfer.sourcePaymentId,
+  transfer_group: transfer.transferGroup,
+  amount_reversed: transfer.amountReversed,
   metadata: writeJson(transfer.metadata),
   created_at: transfer.createdAt,
   updated_at: transfer.updatedAt,
@@ -255,6 +265,8 @@ export function transferPatch(patch: Partial<Transfer>): Partial<TransferRow> {
   if (patch.status !== undefined) out.status = patch.status;
   if (patch.providerStatus !== undefined) out.provider_status = patch.providerStatus;
   if (patch.failureReason !== undefined) out.failure_reason = patch.failureReason;
+  if (patch.amountReversed !== undefined) out.amount_reversed = patch.amountReversed;
+  if (patch.transferGroup !== undefined) out.transfer_group = patch.transferGroup;
   if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
   if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
   return out;
