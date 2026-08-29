@@ -3,3 +3,8 @@ dist/
 data/
 *.tsbuildinfo
 .env
+
+# The design brief that drove this build. Kept locally and cited by source
+# comments as `spec §N`, but not published: it is a working document, not
+# documentation. docs/spec-references.md indexes the sections the code cites.
+idea.txt

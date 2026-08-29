@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **paybox** is a local payment-infrastructure emulator: a developer points an existing Paystack/Stripe/Flutterwave/Kora integration at localhost and exercises realistic payment flows — pending mobile-money authorization, webhook retries, duplicate deliveries, timeouts, refunds, idempotency — deterministically, with no provider sandbox.
 
-`idea.txt` is the full product spec. Source comments cite it as "spec §N" (e.g. `spec §18` = refunds). Read the relevant section before changing behaviour it describes.
+`idea.txt` is the full product spec. It is **kept locally and not committed** — it is a working brief rather than documentation, and the repository is public. Source comments cite it as "spec §N" (e.g. `spec §18` = refunds); `docs/spec-references.md` indexes every section the code cites, for anyone without the file. If you have `idea.txt`, read the relevant section before changing behaviour it describes.
 
 `docs/architecture.md` explains the three decisions everything follows from (virtual time, the job table, the event log). `docs/paystack.md` is the coverage contract. `CONTRIBUTING.md` lists the non-negotiables.
 
