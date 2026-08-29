@@ -4,6 +4,7 @@ import { stripePlugin } from '@paybox/stripe';
 import { flutterwavePlugin, flutterwaveV4Plugin } from '@paybox/flutterwave';
 import { koraPlugin } from '@paybox/kora';
 import { wewirePlugin } from '@paybox/wewire';
+import { wisePlugin } from '@paybox/wise';
 import { paystackPlugin, fail } from '@paybox/paystack';
 import type { PayboxContext } from './context.js';
 import { controlApiPlugin } from './control-api.js';
@@ -305,6 +306,44 @@ export async function buildApp(context: PayboxContext): Promise<FastifyInstance>
         });
       },
       { prefix: '/wewire' },
+    );
+  }
+
+  if (context.config.providers.wise?.enabled !== false) {
+    await app.register(
+      async (scope) => {
+        await scope.register(networkPlugin, {
+          simulator: context.network,
+          // Wise's envelope: a timestamp and an array of coded errors.
+          errorBody: (status) => ({
+            timestamp: context.clock.nowISO(),
+            errors: [
+              {
+                code: status === 429 ? 'TOO_MANY_REQUESTS' : 'unexpected.error',
+                message:
+                  status === 429
+                    ? 'Too many requests'
+                    : 'The provider is temporarily unavailable (simulated by paybox).',
+              },
+            ],
+          }),
+        });
+        // No `idempotencyPlugin`: Wise's idempotency key is
+        // `customerTransactionId`, a body field on `POST /transfers` alone,
+        // so the adapter handles it. Same reasoning as WeWire.
+        await scope.register(wisePlugin, {
+          engine: context.engine,
+          storage: context.storage,
+          clock: context.clock,
+          ids: context.ids,
+          baseUrl: context.baseUrl,
+          basePath: '/wise',
+          allowAnyKey: context.config.security.allowAnyKey,
+          autoAdvance: context.config.simulation.autoAdvance,
+          autoAdvanceDelayMs: context.config.simulation.autoAdvanceDelayMs,
+        });
+      },
+      { prefix: '/wise' },
     );
   }
 

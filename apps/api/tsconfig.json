@@ -37,6 +37,9 @@
     },
     {
       "path": "../../packages/providers/wewire"
+    },
+    {
+      "path": "../../packages/providers/wise"
     }
   ]
 }

@@ -13,7 +13,7 @@ export function printBanner(options: {
   sourcePath: string | null;
 }): void {
   const { context, warnings, sourcePath } = options;
-  const { config, baseUrl, keys, stripeKeys, flutterwaveKeys, koraKeys, wewireKeys } = context;
+  const { config, baseUrl, keys, stripeKeys, flutterwaveKeys, koraKeys, wewireKeys, wiseKeys } = context;
   const out = (line = '') => process.stdout.write(`${line}\n`);
 
   out();
@@ -31,6 +31,7 @@ export function printBanner(options: {
   out(`    Flutterwave ${baseUrl}/flutterwave partial — see docs/flutterwave.md`);
   out(`    Kora       ${baseUrl}/kora        partial — see docs/kora.md`);
   out(`    WeWire     ${baseUrl}/wewire      partial — see docs/wewire.md`);
+  out(`    Wise       ${baseUrl}/wise        partial — see docs/wise.md`);
   for (const id of [] as string[]) {
     out(`    ${id.padEnd(10)} not implemented yet`);
   }
@@ -42,6 +43,7 @@ export function printBanner(options: {
   out(`    Flutterwave encryption key ${flutterwaveKeys.encryptionKey}`);
   out(`    Kora       ${koraKeys.secretKey}`);
   out(`    WeWire     ${wewireKeys.secretKey}`);
+  out(`    Wise       ${wiseKeys.apiToken}`);
   out();
   out('  Point your app at the emulator:');
   out(`    PAYSTACK_BASE_URL=${baseUrl}/paystack`);
@@ -49,6 +51,7 @@ export function printBanner(options: {
   out(`    FLW_BASE_URL=${baseUrl}/flutterwave`);
   out(`    KORA_BASE_URL=${baseUrl}/kora`);
   out(`    WEWIRE_BASE_URL=${baseUrl}/wewire`);
+  out(`    WISE_API_BASE=${baseUrl}/wise`);
   out();
 
   if (config.freezeClock) {

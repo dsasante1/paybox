@@ -20,6 +20,7 @@ import {
 } from '@paybox/flutterwave';
 import { KORA_COVERAGE, registerKora } from '@paybox/kora';
 import { WEWIRE_COVERAGE, registerWewire } from '@paybox/wewire';
+import { WISE_COVERAGE, registerWise } from '@paybox/wise';
 
 /**
  * The coverage contract, enforced.
@@ -150,6 +151,10 @@ beforeAll(async () => {
       registerWewire(app, { ...common, basePath: '/wewire', random: context.random }),
     ),
   });
+  subjects.push({
+    manifest: WISE_COVERAGE,
+    routes: await routesOf('/wise', (app) => registerWise(app, { ...common, basePath: '/wise' })),
+  });
 });
 
 afterAll(async () => {
@@ -157,7 +162,7 @@ afterAll(async () => {
 });
 
 describe('every route is declared', () => {
-  it.each(['paystack', 'stripe', 'flutterwave-v3', 'flutterwave-v4', 'kora', 'wewire'])(
+  it.each(['paystack', 'stripe', 'flutterwave-v3', 'flutterwave-v4', 'kora', 'wewire', 'wise'])(
     '%s serves nothing it has not declared',
     (id) => {
       const subject = subjects.find((s) => s.manifest.id === id)!;
@@ -176,7 +181,7 @@ describe('every route is declared', () => {
 });
 
 describe('every declaration is real', () => {
-  it.each(['paystack', 'stripe', 'flutterwave-v3', 'flutterwave-v4', 'kora', 'wewire'])(
+  it.each(['paystack', 'stripe', 'flutterwave-v3', 'flutterwave-v4', 'kora', 'wewire', 'wise'])(
     '%s declares nothing it does not serve',
     (id) => {
       const subject = subjects.find((s) => s.manifest.id === id)!;
@@ -196,7 +201,7 @@ describe('every declaration is real', () => {
 });
 
 describe('every declaration is documented', () => {
-  it.each(['paystack', 'stripe', 'flutterwave-v3', 'flutterwave-v4', 'kora', 'wewire'])(
+  it.each(['paystack', 'stripe', 'flutterwave-v3', 'flutterwave-v4', 'kora', 'wewire', 'wise'])(
     '%s has a documentation row for each entry',
     (id) => {
       const subject = subjects.find((s) => s.manifest.id === id)!;
@@ -283,9 +288,9 @@ describe('the published table', () => {
 
 describe('what the manifests report', () => {
   it('covers every adapter the app serves', () => {
-    // Six adapters across five providers: Flutterwave serves two API
+    // Seven adapters across six providers: Flutterwave serves two API
     // versions that share nothing.
-    expect(subjects).toHaveLength(6);
+    expect(subjects).toHaveLength(7);
     expect(subjects.map((s) => s.manifest.id).sort()).toEqual([
       'flutterwave-v3',
       'flutterwave-v4',
@@ -293,6 +298,7 @@ describe('what the manifests report', () => {
       'paystack',
       'stripe',
       'wewire',
+      'wise',
     ]);
   });
 

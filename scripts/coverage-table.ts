@@ -17,6 +17,7 @@ import { STRIPE_COVERAGE } from '@paybox/stripe';
 import { FLUTTERWAVE_V3_COVERAGE, FLUTTERWAVE_V4_COVERAGE } from '@paybox/flutterwave';
 import { KORA_COVERAGE } from '@paybox/kora';
 import { WEWIRE_COVERAGE } from '@paybox/wewire';
+import { WISE_COVERAGE } from '@paybox/wise';
 
 export const MANIFESTS: readonly CoverageManifest[] = [
   PAYSTACK_COVERAGE,
@@ -25,6 +26,7 @@ export const MANIFESTS: readonly CoverageManifest[] = [
   FLUTTERWAVE_V4_COVERAGE,
   KORA_COVERAGE,
   WEWIRE_COVERAGE,
+  WISE_COVERAGE,
 ];
 
 /** The markers the generated block sits between. */

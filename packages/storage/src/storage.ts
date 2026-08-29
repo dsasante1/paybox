@@ -23,6 +23,7 @@ import type {
   JobRepository,
   ListOptions,
   Page,
+  ProviderStateRepository,
   PaymentFilter,
   PaymentRepository,
   RecipientRepository,
@@ -89,6 +90,7 @@ class SqliteStorage implements Storage {
       'events',
       'event_sequences',
       'idempotency_keys',
+      'provider_state',
       'refunds',
       'transfers',
       'transfer_recipients',
@@ -1335,7 +1337,18 @@ class SqliteStorage implements Storage {
 
   readonly ledger: LedgerRepository = {
     append: async (entry) => {
-      await this.#db.insertInto('balance_ledger').values(map.fromLedgerEntry(entry)).execute();
+      // Assigned here, monotonic across the table, so a running balance folds
+      // in append order rather than in whatever order two entries sharing a
+      // frozen-clock timestamp happen to come back in (migration 0020).
+      const highest = await this.#db
+        .selectFrom('balance_ledger')
+        .select(({ fn }) => fn.max<number>('sequence').as('highest'))
+        .executeTakeFirst();
+      const sequence = Number(highest?.highest ?? 0) + 1;
+      await this.#db
+        .insertInto('balance_ledger')
+        .values(map.fromLedgerEntry(entry, sequence))
+        .execute();
       return entry;
     },
     net: async (provider, currency, subaccountId) => {
@@ -1382,7 +1395,9 @@ class SqliteStorage implements Storage {
       }
       const rows = await query
         .orderBy('created_at', 'desc')
-        .orderBy('id', 'desc')
+        // Append order, not id order: `id` is a token from the seeded random
+        // stream and says nothing about when a row was written.
+        .orderBy('sequence', 'desc')
         .limit(limit)
         .offset(offset)
         .execute();
@@ -1520,6 +1535,17 @@ class SqliteStorage implements Storage {
         .where('provider_recipient_id', '=', id)
         .executeTakeFirst();
       return row ? map.toRecipient(row) : null;
+    },
+    update: async (id, patch) => {
+      const existing = await this.recipients.byId(id);
+      if (!existing) throw new PayboxError('not_found', `No recipient with id ${id}.`);
+      const merged = { ...existing, ...patch, id };
+      await this.#db
+        .updateTable('transfer_recipients')
+        .set(map.fromRecipient(merged))
+        .where('id', '=', id)
+        .execute();
+      return merged;
     },
     list: async (filter) => {
       const { limit, offset } = page(filter);
@@ -1890,6 +1916,51 @@ class SqliteStorage implements Storage {
           created_at: record.createdAt,
         })
         .execute();
+    },
+  };
+
+  /**
+   * Adapter scratch space (migration 0019).
+   *
+   * Upserts, unlike `idempotency`, which must not. See the port for why the
+   * two are separate.
+   */
+  readonly providerState: ProviderStateRepository = {
+    get: async (provider: ProviderId, key: string) => {
+      const row = await this.#db
+        .selectFrom('provider_state')
+        .select('value')
+        .where('provider', '=', provider)
+        .where('key', '=', key)
+        .executeTakeFirst();
+      return row?.value ?? null;
+    },
+    put: async (provider: ProviderId, key: string, value: string, now: string) => {
+      await this.#db
+        .insertInto('provider_state')
+        .values({ provider, key, value, created_at: now, updated_at: now })
+        .onConflict((oc) =>
+          oc.columns(['provider', 'key']).doUpdateSet({ value, updated_at: now }),
+        )
+        .execute();
+    },
+    delete: async (provider: ProviderId, key: string) => {
+      await this.#db
+        .deleteFrom('provider_state')
+        .where('provider', '=', provider)
+        .where('key', '=', key)
+        .execute();
+    },
+    listByPrefix: async (provider: ProviderId, prefix: string) => {
+      const rows = await this.#db
+        .selectFrom('provider_state')
+        .select(['key', 'value'])
+        .where('provider', '=', provider)
+        .where('key', 'like', `${prefix}%`)
+        .orderBy('created_at', 'asc')
+        .orderBy('key', 'asc')
+        .execute();
+      return rows.map((row) => ({ key: row.key, value: row.value }));
     },
   };
 }

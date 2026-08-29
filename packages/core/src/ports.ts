@@ -203,6 +203,7 @@ export interface TransferRepository {
 
 export interface RecipientRepository {
   insert(recipient: TransferRecipient): Promise<TransferRecipient>;
+  update(id: string, patch: Partial<TransferRecipient>): Promise<TransferRecipient>;
   byId(id: string): Promise<TransferRecipient | null>;
   byProviderRecipientId(provider: ProviderId, id: string): Promise<TransferRecipient | null>;
   list(filter?: ListOptions): Promise<Page<TransferRecipient>>;
@@ -475,6 +476,30 @@ export interface IdempotencyRepository {
 }
 
 /**
+ * Adapter scratch space (spec §30).
+ *
+ * Short-lived provider state that the engine has no concept of: Wise's quote
+ * is the motivating case -- 30 minutes long, consumed once, carrying the rate
+ * a transfer is built from, and with no counterpart in the domain model.
+ *
+ * Deliberately a dumb key/value store, and deliberately **not** the
+ * idempotency store: `IdempotencyRepository.put` is an insert, because a
+ * genuine replay must never overwrite the response it returns. This one
+ * upserts.
+ *
+ * Nothing in `packages/core` reads it. An adapter owning its own short-lived
+ * state is the same principle as an adapter owning its own status vocabulary.
+ */
+export interface ProviderStateRepository {
+  get(provider: ProviderId, key: string): Promise<string | null>;
+  /** Insert or overwrite. */
+  put(provider: ProviderId, key: string, value: string, now: string): Promise<void>;
+  delete(provider: ProviderId, key: string): Promise<void>;
+  /** Every value whose key starts with `prefix`, oldest first. */
+  listByPrefix(provider: ProviderId, prefix: string): Promise<{ key: string; value: string }[]>;
+}
+
+/**
  * The storage port. `transaction` hands back a Storage bound to the open
  * transaction, so the engine can append an event and update the payment
  * projection atomically -- the invariant the whole event-log design rests on.
@@ -502,6 +527,7 @@ export interface Storage {
   readonly webhooks: WebhookRepository;
   readonly jobs: JobRepository;
   readonly idempotency: IdempotencyRepository;
+  readonly providerState: ProviderStateRepository;
   transaction<T>(fn: (tx: Storage) => Promise<T>): Promise<T>;
   /** Drop all rows but keep the schema (spec §27 `paybox reset`). */
   reset(): Promise<void>;

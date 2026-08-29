@@ -33,6 +33,8 @@ export const ID_PREFIXES = [
   'run', // scenario run
   'req', // request log entry
   'ben', // beneficiary payout account (WeWire)
+  'qte', // FX quote (Wise)
+  'bal', // named balance account (Wise)
 ] as const;
 
 export type IdPrefix = (typeof ID_PREFIXES)[number];

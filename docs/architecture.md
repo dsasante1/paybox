@@ -330,3 +330,105 @@ published sandbox number at request time and writes the answer into the job
 payload. A `paybox time advance` therefore delivers a result that was already
 determined, which is what keeps the whole thing reproducible under a fixed
 seed.
+
+## Two seams Wise needed, and why they are general
+
+Flutterwave, Kora and WeWire each slotted into the existing design without
+changing `packages/core` at all. Wise did not, and the two things it needed are
+worth recording because both turned out to be general rather than
+Wise-specific.
+
+### `createTransfer({ reserve: false })`
+
+paybox reserves a transfer's amount when the transfer is **created**, not when
+it settles. That is deliberate and documented: a queued payout has already
+committed the funds, and waiting would let two queued payouts spend the same
+money.
+
+Wise does not work that way. `POST /transfers` produces an intent — it commits
+nothing — and a separate `POST /…/payments` call is what debits the balance.
+Reserving at creation would make an unfunded Wise transfer hold money a real
+one does not, which is exactly the sort of quiet infidelity this project is
+supposed to catch rather than commit.
+
+So `reserve` is an option on `createTransfer`, defaulting to true. It does
+three things, all in core:
+
+- skips the balance check at creation,
+- skips the ledger debit at creation,
+- records `paybox_reserved: false` on the transfer, so the release-on-failure
+  path knows not to credit back money that was never given up.
+
+The Wise adapter passes `false` and calls `debitBalance` at funding, flipping
+the flag as it goes. Nothing about Wise reached the engine: the flag describes
+*when money is committed*, which is a property several providers could
+plausibly differ on.
+
+### `provider_state` (migration 0019)
+
+A Wise quote lives 30 minutes, is consumed exactly once, carries the rate a
+transfer is built from, and has no counterpart in `shared/src/model.ts`. It
+needed somewhere to live, and two obvious homes both failed for instructive
+reasons:
+
+- **The idempotency store.** `IdempotencyRepository.put` is an insert, not an
+  upsert — correctly, because a genuine replay must never overwrite the
+  response it returns. A quote is mutable (`PATCH` attaches a recipient;
+  creating a transfer marks it consumed), so it needs an upsert. Making the
+  idempotency store upsert to accommodate it would have broken idempotency for
+  every other provider.
+- **A canonical `Quote` model.** The engine would gain a concept it never uses.
+  New canonical resources earn their place by being shared across providers and
+  driven by engine logic; a Wise quote is neither.
+
+So `provider_state` is a provider-scoped key/value table with an upsert, read
+by nothing in `packages/core`. An adapter owning its own short-lived state is
+the same principle as an adapter owning its own status vocabulary.
+
+## RSA webhook signatures
+
+Wise is the only provider here that signs asymmetrically. Every other adapter
+shares one secret with the subscriber, so signing and verifying are the same
+operation with the same input. Wise holds a private key, publishes the public
+one, and the subscriber holds nothing secret at all.
+
+That needed no new seam — `WebhookFormatter.sign` already receives the raw body
+and returns headers, and what it does in between was never constrained. But it
+did surface a distinction worth naming: `resignsPerAttempt` is about **what a
+signature covers**, not how it is computed. Wise's RSA signature covers the
+body alone, so it is identical on every retry and stored headers can be
+replayed. WeWire's HMAC covers a timestamp, so it must be recomputed. The
+asymmetric one is the *less* attempt-dependent of the two.
+
+paybox's Wise keypair is embedded in the adapter with its private key in plain
+sight. That is not an oversight:
+
+- It is not Wise's key. paybox cannot sign as Wise and does not try.
+- Because the private key is published, a paybox signature proves nothing —
+  which is the same bargain as every `sk_test_local_` secret in the project.
+- It is embedded rather than generated at boot because `generateKeyPairSync`
+  cannot be seeded, and a fresh key per run would make signatures differ
+  between two runs at the same seed.
+
+The public key is served from `GET /wise/paybox/webhook-public-key`, and a
+signature from the emulator verifies under plain `openssl dgst -verify`.
+
+## The ledger needed a sequence too
+
+Migration 0018 gave `jobs` an explicit `sequence` because ordering by `run_at`
+alone was nondeterministic under a frozen clock. Migration 0020 does the same
+for `balance_ledger`, for the same reason and with a sharper symptom.
+
+`ledger.list` ordered by `created_at` then `id`. Under a frozen clock every
+entry written in one request shares a `created_at`, so the tie fell to `id` — a
+token from the seeded random stream, deterministic but unrelated to insertion
+order.
+
+For a **balance** that is invisible: a sum does not care about order. For a
+**running** balance it is not. WeWire puts `balanceBefore` and `balanceAfter`
+on every wallet transaction, and those are a fold — so a payout could report
+the balance from before the top-up that funded it. `tests/ledger-ordering.test.ts`
+pins it, and fails if the tiebreak is removed.
+
+The general lesson, now twice learned: in an append-only table under a frozen
+clock, a timestamp is not an ordering and an id is not a sequence.

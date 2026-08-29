@@ -16,7 +16,7 @@ All packages are implemented and the vertical slice runs end to end: `shared`, `
 
 **All four providers are implemented**, each partially: Paystack, Stripe, Flutterwave and Kora. Flutterwave ships two live APIs — v3 (`FLWSECK_TEST-` keys, `{status:"success",…}`) and v4 (OAuth2, `{status:"failed", error:{…}}`) — with different authentication, envelopes and webhook signatures, so they are **two adapters** at `/flutterwave/v3` and `/flutterwave/v4` rather than one with a flag.
 
-Coverage for each is documented honestly in `docs/paystack.md`, `docs/stripe.md`, `docs/flutterwave.md`, `docs/kora.md` and `docs/wewire.md` — those files are contracts, not marketing. If something is missing from one, assume it is not implemented.
+Coverage for each is documented honestly in `docs/paystack.md`, `docs/stripe.md`, `docs/flutterwave.md`, `docs/kora.md`, `docs/wewire.md` and `docs/wise.md` — those files are contracts, not marketing. If something is missing from one, assume it is not implemented.
 
 **The contract is enforced, not just written.** Each adapter declares what it serves in a `coverage.ts` manifest, and `tests/coverage-drift.test.ts` fails if the manifest and the router disagree in either direction, or if an entry has nothing in the provider's docs file. The README's endpoint table is generated from the same manifests (`npm run coverage:table`) and a test fails if it is stale, so the counts on the repo's front page cannot overstate what the emulator serves. `paybox coverage` prints the same figures; `paybox coverage <provider>` breaks one down.
 
@@ -45,6 +45,10 @@ Provider-specific facts worth knowing before touching an adapter:
 - Card payloads arrive encrypted: Flutterwave v3 uses **3DES-ECB** in `client`, Kora uses **AES-256-GCM** in `charge_data`. Both are decrypted at the boundary so a developer's existing client works unmodified.
 - **WeWire is the only adapter that does not roll its own webhook scheme**: it implements [Standard Webhooks](https://www.standardwebhooks.com) — three headers, `{id}.{timestamp}.{body}` signed, and the HMAC key is the *base64-decoded* portion after `whsec_`, not the literal secret. It is also the only one whose event *name* depends on the corridor rather than the resource: one canonical `transfer.successful` is `disbursement.completed` on the Ghana rail and `transaction.status_updated` offshore.
 - **WeWire takes its idempotency key as a body field**, on three endpoints only, so the shared `idempotencyPlugin` (which reads a header) is deliberately not registered for it. The quirk stays in the adapter that has it.
+- **Wise signs webhooks with RSA, not HMAC** -- the only asymmetric scheme here. It holds a private key and publishes the public one, so a subscriber verifies without holding any secret. paybox's keypair is embedded in `providers/wise/src/signature.ts`, **private key included and deliberately so**: it is published, proves nothing, and exists only so a developer's verifier can be exercised. It is embedded rather than generated because `generateKeyPairSync` cannot be seeded.
+- **Wise's flow is the strictest here**: profile → quote → recipient → transfer → fund. A transfer needs a quote, a quote is single-use and expires in 30 minutes, and creating a transfer reserves nothing -- a separate funding call debits the balance. A funding *rejection* is a `201` with `status: REJECTED`, not an HTTP error.
+- **Wise ships its own sandbox simulation endpoints** (`GET /simulation/transfers/{id}/{status}`, `POST /simulation/balance/topup`), which is the same idea as `paybox simulate`. They are implemented as published, so an existing Wise sandbox script drives the emulator unchanged -- and Wise needs no emulator-only funding endpoint, unlike WeWire.
+- **Wise's `reference` is statement text, not an identifier.** Two payouts to the same vendor routinely share one, so the adapter stores `customerTransactionId` (unique by contract) as paybox's `Transfer.reference` and keeps the display reference on metadata.
 - **WeWire is FX-centric, and the "no FX conversion" invariant still holds.** The rate lives in `providers/wewire/src/rates.ts` — a fixed table, because a moving rate would break determinism — and a cross-currency payout is stored as integer minor units in the source currency with the destination amount and rate as metadata. The adapter quotes; core only records what was quoted, and `getBalance` still folds per currency.
 
 The default branch is `main`. `feat/paystack-coverage` carries the six-phase Paystack build-out described above.
@@ -70,14 +74,15 @@ Dependency direction is strict and one-way:
 ```
 shared ──> core ──> (storage, webhooks, simulator) ──> providers/* ──> apps/api ──> apps/cli
 
-providers/ now holds five packages and six adapters (Flutterwave serves two
+providers/ now holds six packages and seven adapters (Flutterwave serves two
 API versions). Anything a provider needs from core reaches it as an injected
 function -- ProviderStatusResolver, AuthorizationMinter, InstrumentResolver,
 SetupAuthorizationMinter -- never an import. Adding Stripe was the first test
 of that and needed three new seams; Flutterwave, Kora and WeWire needed none
-at all, which is the strongest evidence the design holds. WeWire is the
-sharpest case: an FX payout provider with wallets, corridors and conversions,
-added with one new job kind and no migration. See docs/architecture.md.
+at all. Wise needed two, both narrow and both general: a `reserve` flag on
+createTransfer (a Wise transfer commits nothing until a separate funding
+call) and a provider-scoped key/value store for short-lived state the engine
+has no concept of. See docs/architecture.md.
 ```
 
 - **`packages/shared`** — types and pure helpers with no runtime deps: canonical statuses, the domain model, seeded `Random`, `IdFactory`, the `Clock` *port* (interface only), currency, and the `PayboxError` taxonomy.
@@ -100,7 +105,7 @@ added with one new job kind and no migration. See docs/architecture.md.
 
 **Amounts are integer minor units, always.** No FX conversion ever happens; `formatAmount` is display-only.
 
-**The balance is a fold over an append-only ledger** (`balance_ledger`), never a stored mutable number — the same reasoning as the event log. A transfer *reserves* its amount when queued, not when it settles, so two queued payouts cannot spend the same money; a failed or reversed transfer credits the reservation back. The opening test float is a config value, deliberately **not** a ledger row, so `paybox reset` cannot wipe it.
+**The balance is a fold over an append-only ledger** (with an explicit `sequence`, migration 0020 — a *running* balance is order-sensitive and a frozen clock ties every `created_at`) (`balance_ledger`), never a stored mutable number — the same reasoning as the event log. A transfer *reserves* its amount when queued, not when it settles, so two queued payouts cannot spend the same money; a failed or reversed transfer credits the reservation back. The opening test float is a config value, deliberately **not** a ledger row, so `paybox reset` cannot wipe it.
 
 **Recurring billing uses no new scheduler primitive.** A `subscription.charge` handler enqueues its own next occurrence, exactly the way a failed webhook schedules its retry. This is the single most load-bearing consequence of `VirtualClock#at`: because the scheduler runs each job at the instant it was *due*, one `time advance 1y` on a monthly plan yields twelve renewals with twelve correct dates. Billing periods use **calendar arithmetic** with day-of-month clamping (`core/src/time/recurrence.ts`), never a fixed 30 days.
 
@@ -147,7 +152,7 @@ The engine only raises `PayboxError` with a code from the `ERROR_CODES` list. Ea
 
 ## Testing
 
-38 suites, 657 tests. The load-bearing one is in `tests/paystack-subscriptions.test.ts`: a monthly subscription plus a single `advance` must yield twelve invoices one calendar month apart, each payment stamped at its own period start. If that breaks, `VirtualClock#at` has broken.
+40 suites, 706 tests. The load-bearing one is in `tests/paystack-subscriptions.test.ts`: a monthly subscription plus a single `advance` must yield twelve invoices one calendar month apart, each payment stamped at its own period start. If that breaks, `VirtualClock#at` has broken.
 
 `tests/helpers.ts` exposes `createHarness()` — in-memory SQLite, clock frozen at a fixed instant, fixed seed. Assertions can therefore be exact (literal ids, exact timestamps, gapless sequence numbers) rather than approximate. Prefer it over ad-hoc setup.
 
