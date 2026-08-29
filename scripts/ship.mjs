@@ -72,17 +72,32 @@ if (checks.length === 0) {
   );
 }
 
+/**
+ * The first of these that is actually set.
+ *
+ * `??` is not enough: a check run that is still going reports `conclusion` as
+ * an **empty string**, not null, so `conclusion ?? status` returns `''` and a
+ * running check gets reported as failed. Refusing to merge either way is the
+ * safe direction, but telling someone their CI failed when it is merely still
+ * running sends them to read a log that does not exist yet.
+ */
+const firstSet = (...values) =>
+  values.find((value) => value !== null && value !== undefined && value !== '');
+
+const PASSING = ['SUCCESS', 'NEUTRAL', 'SKIPPED'];
+const RUNNING = ['PENDING', 'IN_PROGRESS', 'QUEUED', 'EXPECTED', 'WAITING', 'REQUESTED'];
+
 const failed = [];
 const pending = [];
 for (const check of checks) {
-  const name = check.name ?? check.context ?? 'check';
-  const verdict = check.conclusion ?? check.state ?? check.status ?? 'UNKNOWN';
-  const ok = ['SUCCESS', 'NEUTRAL', 'SKIPPED'].includes(String(verdict).toUpperCase());
-  const waiting = ['PENDING', 'IN_PROGRESS', 'QUEUED', 'EXPECTED'].includes(
-    String(verdict).toUpperCase(),
-  );
+  const name = firstSet(check.name, check.context) ?? 'check';
+  const verdict = String(
+    firstSet(check.conclusion, check.state, check.status) ?? 'UNKNOWN',
+  ).toUpperCase();
+  const ok = PASSING.includes(verdict);
+  const waiting = RUNNING.includes(verdict);
   const mark = ok ? '✓' : waiting ? '…' : '✗';
-  process.stdout.write(`    ${mark} ${name}  ${String(verdict).toLowerCase()}\n`);
+  process.stdout.write(`    ${mark} ${name}  ${verdict.toLowerCase()}\n`);
   if (waiting) pending.push(name);
   else if (!ok) failed.push(name);
 }
