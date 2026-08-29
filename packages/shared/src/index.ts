@@ -6,3 +6,5 @@ export * from './errors.js';
 export * from './clock.js';
 export * from './model.js';
 export * from './hosted-page.js';
+export * from './coverage.js';
+export * from './coverage-report.js';

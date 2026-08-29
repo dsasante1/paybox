@@ -103,3 +103,5 @@ export {
   type V4EnvelopeStatus,
   type V4NextAction,
 } from './v4/serializers.js';
+export { FLUTTERWAVE_V3_COVERAGE } from './coverage.js';
+export { FLUTTERWAVE_V4_COVERAGE } from './v4/coverage.js';

@@ -18,6 +18,10 @@ All packages are implemented and the vertical slice runs end to end: `shared`, `
 
 Coverage for each is documented honestly in `docs/paystack.md`, `docs/stripe.md`, `docs/flutterwave.md` and `docs/kora.md` — those files are contracts, not marketing. If something is missing from one, assume it is not implemented.
 
+**The contract is enforced, not just written.** Each adapter declares what it serves in a `coverage.ts` manifest, and `tests/coverage-drift.test.ts` fails if the manifest and the router disagree in either direction, or if an entry has nothing in the provider's docs file. The README's endpoint table is generated from the same manifests (`npm run coverage:table`) and a test fails if it is stale, so the counts on the repo's front page cannot overstate what the emulator serves. `paybox coverage` prints the same figures; `paybox coverage <provider>` breaks one down.
+
+**Adding a route therefore means adding a manifest entry** — the build will tell you if you forget.
+
 Adding Stripe was the test of the injection design, and it needed three new seams rather than a rewrite: a `retry` transition flag (Stripe's PaymentIntent has no terminal failure), a clock-aware webhook signature with per-attempt re-signing, and webhook fan-out (one canonical event can be several provider events). All three are in `docs/architecture.md`.
 
 Paystack coverage is now broad: transactions, all five documented `/charge` channels, stored authorizations (`charge_authorization`, the PIN/OTP loop), plans/subscriptions/invoices, subaccounts and splits, a balance ledger, disputes, dedicated virtual accounts, and reporting endpoints. **The authoritative source is Paystack's official OpenAPI spec** — `PaystackOSS/openapi`, `dist/paystack.yaml`, pinned at blob `efa5c8d25611a60f01fd8ce59352fb38b7edfbfb` — because `paystack.com/docs` returns HTTP 403 to automated fetches. Cite the `operationId` and that SHA next to anything derived from it. Where the spec types a response generically (every `/charge` envelope; all of `/settlement`), `docs/paystack.md` says so rather than inventing a shape.

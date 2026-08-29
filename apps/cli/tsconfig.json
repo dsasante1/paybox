@@ -16,6 +16,18 @@
     },
     {
       "path": "../api"
+    },
+    {
+      "path": "../../packages/providers/paystack"
+    },
+    {
+      "path": "../../packages/providers/stripe"
+    },
+    {
+      "path": "../../packages/providers/flutterwave"
+    },
+    {
+      "path": "../../packages/providers/kora"
     }
   ]
 }

@@ -12,6 +12,16 @@ import type {
   Subscription,
 } from '@paybox/shared';
 import type { Job, WebhookDelivery, WebhookEndpoint } from '@paybox/core';
+import {
+  entriesByStatus,
+  renderSummaryLine,
+  toRows,
+  type CoverageManifest,
+} from '@paybox/shared';
+import { PAYSTACK_COVERAGE } from '@paybox/paystack';
+import { STRIPE_COVERAGE } from '@paybox/stripe';
+import { FLUTTERWAVE_V3_COVERAGE, FLUTTERWAVE_V4_COVERAGE } from '@paybox/flutterwave';
+import { KORA_COVERAGE } from '@paybox/kora';
 import { CliError, PayboxClient } from './client.js';
 import {
   heading,
@@ -113,6 +123,71 @@ program
           ['pending', pc.yellow(String(overview.webhooks.pending))],
         ]),
       ].join('\n'),
+    );
+  });
+
+/**
+ * Every adapter's manifest, in the order the banner lists them.
+ *
+ * These are the same objects `tests/coverage-drift.test.ts` checks against the
+ * router, so what this command prints cannot disagree with what the emulator
+ * actually serves.
+ */
+const MANIFESTS: readonly CoverageManifest[] = [
+  PAYSTACK_COVERAGE,
+  STRIPE_COVERAGE,
+  FLUTTERWAVE_V3_COVERAGE,
+  FLUTTERWAVE_V4_COVERAGE,
+  KORA_COVERAGE,
+];
+
+program
+  .command('coverage')
+  .description('What each provider adapter actually implements')
+  .argument('[provider]', 'show every endpoint for one adapter, e.g. kora')
+  .option('--json', 'machine-readable output', false)
+  .action((provider: string | undefined, options: { json: boolean }) => {
+    if (options.json) {
+      process.stdout.write(`${JSON.stringify(toRows(MANIFESTS), null, 2)}\n`);
+      return;
+    }
+
+    if (!provider) {
+      process.stdout.write(heading('Coverage'));
+      for (const row of toRows(MANIFESTS)) {
+        process.stdout.write(`  ${renderSummaryLine(row)}\n`);
+      }
+      process.stdout.write(
+        `\n  ${pc.dim('Every adapter is partial. Run')} paybox coverage <provider> ` +
+          `${pc.dim('for the detail,')}\n  ${pc.dim('or read the file each one names for why.')}\n`,
+      );
+      return;
+    }
+
+    const manifest = MANIFESTS.find(
+      (candidate) => candidate.id === provider || candidate.id.startsWith(`${provider}-`),
+    );
+    if (!manifest) {
+      throw new CliError(
+        `Unknown provider "${provider}". Known: ${MANIFESTS.map((m) => m.id).join(', ')}.`,
+      );
+    }
+
+    process.stdout.write(heading(`${manifest.label} — ${manifest.docs}`));
+    for (const status of ['compatible', 'partial', 'emulator-only'] as const) {
+      const entries = entriesByStatus(manifest, status);
+      if (entries.length === 0) continue;
+      const colour =
+        status === 'compatible' ? pc.green : status === 'partial' ? pc.yellow : pc.cyan;
+      process.stdout.write(`\n  ${colour(status)} (${entries.length})\n`);
+      for (const entry of entries) {
+        process.stdout.write(
+          `    ${entry.endpoint}${entry.note ? pc.dim(`  — ${entry.note}`) : ''}\n`,
+        );
+      }
+    }
+    process.stdout.write(
+      `\n  ${pc.dim(`Why each one is partial is in ${manifest.docs}.`)}\n`,
     );
   });
 

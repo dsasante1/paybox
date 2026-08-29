@@ -41,3 +41,4 @@ export {
   destinationForRecipientType,
   type TransferDestination,
 } from './fees.js';
+export { PAYSTACK_COVERAGE } from './coverage.js';
