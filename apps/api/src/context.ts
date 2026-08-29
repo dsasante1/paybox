@@ -43,6 +43,10 @@ import {
   stripeSetupAuthorizationMinter,
   toStripeStatus,
 } from '@paybox/stripe';
+import {
+  FlutterwaveWebhookFormatter,
+  generateFlutterwaveKeys,
+} from '@paybox/flutterwave';
 import type { PayboxConfig } from './config.js';
 import { PayboxLogger, type LogEntry } from './logger.js';
 import { NetworkSimulator } from './network.js';
@@ -65,6 +69,11 @@ export interface PayboxContext {
   keys: { secretKey: string; publicKey: string };
   /** Per-provider local test credentials (spec §29). */
   stripeKeys: { secretKey: string; publishableKey: string };
+  /**
+   * Flutterwave issues three keys, not two: the extra one is the 3DES
+   * encryption key a direct card charge's payload is encrypted with.
+   */
+  flutterwaveKeys: { secretKey: string; publicKey: string; encryptionKey: string };
   baseUrl: string;
   shutdown(): Promise<void>;
 }
@@ -187,6 +196,7 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
   });
   dispatcher.register(new PaystackWebhookFormatter());
   dispatcher.register(new StripeWebhookFormatter({ basePath: '/stripe' }));
+  dispatcher.register(new FlutterwaveWebhookFormatter({ version: 'v3' }));
   dispatcher.attachTo(bus);
 
   // Structured event log (spec §42) and a bus-level error boundary, so a
@@ -283,6 +293,7 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
 
   const keys = generateLocalKeys(ids.token(20));
   const stripeKeys = generateStripeKeys(ids.token(20));
+  const flutterwaveKeys = generateFlutterwaveKeys(ids.token(20));
 
   return {
     config,
@@ -301,6 +312,7 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
     logger,
     keys,
     stripeKeys,
+    flutterwaveKeys,
     baseUrl,
     async shutdown() {
       await scheduler.stop();

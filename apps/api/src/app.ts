@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import { stripePlugin } from '@paybox/stripe';
+import { flutterwavePlugin } from '@paybox/flutterwave';
 import { paystackPlugin, fail } from '@paybox/paystack';
 import type { PayboxContext } from './context.js';
 import { controlApiPlugin } from './control-api.js';
@@ -140,6 +141,47 @@ export async function buildApp(context: PayboxContext): Promise<FastifyInstance>
         });
       },
       { prefix: '/stripe' },
+    );
+  }
+
+  if (context.config.providers.flutterwave?.enabled !== false) {
+    await app.register(
+      async (scope) => {
+        await scope.register(networkPlugin, {
+          simulator: context.network,
+          // Flutterwave's envelope, not another provider's. Answering a
+          // Flutterwave client in the wrong shape is exactly the confusion
+          // this encapsulation prevents.
+          errorBody: (status) => ({
+            status: 'error',
+            message:
+              status === 429
+                ? 'Too many requests'
+                : 'The provider is temporarily unavailable (simulated by paybox).',
+            data: null,
+          }),
+        });
+        await scope.register(idempotencyPlugin, {
+          storage: context.storage,
+          clock: context.clock,
+          provider: 'flutterwave',
+        });
+        await scope.register(flutterwavePlugin, {
+          engine: context.engine,
+          simulator: context.simulator,
+          subscriptions: context.subscriptions,
+          storage: context.storage,
+          clock: context.clock,
+          ids: context.ids,
+          baseUrl: context.baseUrl,
+          basePath: '/flutterwave',
+          encryptionKey: context.flutterwaveKeys.encryptionKey,
+          allowAnyKey: context.config.security.allowAnyKey,
+          autoAdvance: context.config.simulation.autoAdvance,
+          autoAdvanceDelayMs: context.config.simulation.autoAdvanceDelayMs,
+        });
+      },
+      { prefix: '/flutterwave' },
     );
   }
 
