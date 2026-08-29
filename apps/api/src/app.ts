@@ -1,7 +1,7 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import { stripePlugin } from '@paybox/stripe';
-import { flutterwavePlugin } from '@paybox/flutterwave';
+import { flutterwavePlugin, flutterwaveV4Plugin } from '@paybox/flutterwave';
 import { koraPlugin } from '@paybox/kora';
 import { paystackPlugin, fail } from '@paybox/paystack';
 import type { PayboxContext } from './context.js';
@@ -183,6 +183,47 @@ export async function buildApp(context: PayboxContext): Promise<FastifyInstance>
         });
       },
       { prefix: '/flutterwave' },
+    );
+  }
+
+  if (context.config.providers.flutterwave?.enabled !== false) {
+    // v4 is a second, genuinely different API from the same provider, so it
+    // gets its own encapsulated scope: OAuth instead of API keys, a different
+    // error envelope, and its own not-found handler.
+    await app.register(
+      async (scope) => {
+        await scope.register(networkPlugin, {
+          simulator: context.network,
+          errorBody: (status) => ({
+            status: 'failed',
+            error: {
+              type: status === 429 ? 'TOO_MANY_REQUESTS' : 'SERVER_ERROR',
+              code: status === 429 ? '10429' : '10500',
+              message:
+                status === 429
+                  ? 'Too many requests'
+                  : 'The provider is temporarily unavailable (simulated by paybox).',
+            },
+          }),
+        });
+        await scope.register(idempotencyPlugin, {
+          storage: context.storage,
+          clock: context.clock,
+          provider: 'flutterwave',
+        });
+        await scope.register(flutterwaveV4Plugin, {
+          engine: context.engine,
+          simulator: context.simulator,
+          storage: context.storage,
+          clock: context.clock,
+          ids: context.ids,
+          baseUrl: context.baseUrl,
+          basePath: '/flutterwave/v4',
+          credentials: context.flutterwaveV4,
+          allowAnyKey: context.config.security.allowAnyKey,
+        });
+      },
+      { prefix: '/flutterwave/v4' },
     );
   }
 

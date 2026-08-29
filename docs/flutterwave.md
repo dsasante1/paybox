@@ -7,18 +7,18 @@ something is missing from here, assume it is not implemented.
 ## Which API
 
 Flutterwave ships **two live APIs** with different authentication, envelopes
-and webhook signatures. paybox implements **v3** today — the one the
-overwhelming majority of deployed integrations use, and the one paybox's
-premise (point an *existing* integration at localhost) is about. v4 support is
-partial: its webhook signature scheme is implemented and tested, the rest is
-not.
+and webhook signatures. paybox implements **both**, as two separately mounted adapters — they share
+almost nothing, so they are two plugins rather than one with a flag.
 
-|              | v3 (implemented)                        | v4 (partial)                          |
-| ------------ | --------------------------------------- | ------------------------------------- |
-| Base path    | `/flutterwave/v3`                       | not served                            |
-| Auth         | `Bearer FLWSECK_TEST-…`                 | OAuth2 client credentials             |
-| Envelope     | `{status:"success", message, data}`     | `{status:"failed", error:{…}}`        |
-| Webhook      | `verif-hash` — the secret verbatim      | `flutterwave-signature` — base64 HMAC |
+|              | v3                                      | v4                                      |
+| ------------ | --------------------------------------- | --------------------------------------- |
+| Base path    | `/flutterwave/v3`                       | `/flutterwave/v4`                       |
+| Auth         | `Bearer FLWSECK_TEST-…`                 | OAuth2 client credentials, 10-min tokens |
+| Envelope     | `{status:"success", message, data}`     | `{status:"success"\|"pending"\|"failed", message, data}` |
+| Errors       | `{status:"error", message, data}`       | `{status:"failed", error:{type,code,message}}` |
+| Ids          | integers (`1254647`)                    | prefixed strings (`chg_VoUhmFMhmF`)     |
+| Test control | published card table                    | `X-Scenario-Key` header                 |
+| Webhook      | `verif-hash` — the secret verbatim      | `flutterwave-signature` — base64 HMAC   |
 
 Every shape below was verified against `developer.flutterwave.com/v3.0.0/docs`,
 read **2026-08-29**. Where a page is cited, that is the page the behaviour
@@ -110,6 +110,49 @@ from the testing page: thirteen cards, the special OTPs `5548` (wrong) and
    states: Flutterwave notifies on completion, not on progress, and a developer
    waiting for a `charge.processing` that never arrives would be debugging the
    emulator's invention.
+
+## v4 specifics
+
+| Endpoint | Status | Notes |
+| --- | --- | --- |
+| `POST /v4/oauth/token` | **Partially compatible** | Served here, not on a separate IdP host; see below. |
+| `POST /v4/customers`, `GET /v4/customers/{id}` | **Partially compatible** | No update, list or delete. |
+| `POST /v4/payment-methods`, `GET /v4/payment-methods/{id}` | **Partially compatible** | `type: card` only. |
+| `POST /v4/charges` | **Compatible** | Driven by `X-Scenario-Key`. |
+| `PUT /v4/charges/{id}` | **Compatible** | Supplies the authorization. |
+| `GET /v4/charges/{id}` | **Compatible** | |
+| `POST /v4/charges/{id}/refund` | **Compatible** | |
+| `POST /v4/transfers` | **Partially compatible** | Scenario-driven; no destination resolution. |
+| `GET /flutterwave/v4/redirect/{ref}` | **Emulator-only** | The page `next_action.redirect_url` points at. |
+
+**`X-Scenario-Key` is implemented in full.** v4 replaces v3's test-card table
+with a header naming the flow and the issuer's answer:
+`scenario:auth_pin&issuer:insufficient_funds`. All four card scenarios
+(`auth_pin`, `auth_pin_3ds`, `auth_3ds`, `auth_avs`), all 45 published issuer
+responses, and all five transfer scenarios are honoured. `auth_pin_3ds` steps
+up **twice** — a PIN, then a redirect — because that failover is the case the
+scenario exists to test. An unrecognised key parks the charge at `pending`,
+which is what Flutterwave documents, rather than being treated as approved: a
+typo must not turn a failure test into a false pass.
+
+**Token expiry is real.** v4 tokens live 600 seconds, and paybox enforces it
+against virtual time — so `time advance 11m` invalidates one. This is a failure
+mode v3 integrations never had, and one better met under a time advance than
+ten minutes after a deploy. Tokens are held in memory and do not survive a
+restart, because a token is a session, not a record.
+
+Four differences from v4 specifically:
+
+1. **The token endpoint is served under the same base**, not on
+   `idp.flutterwave.com`, so a client changes one URL rather than two.
+2. **The access token is deterministic**, derived from the credentials and the
+   issue instant so a fixed seed reproduces it. It is opaque, like a real one,
+   but it is not a JWT and is not a credential.
+3. **Per-field card encryption is optional.** v4 encrypts card numbers and PINs
+   with a nonce; paybox accepts the plain field too, so a developer exploring
+   with curl need not hand-encrypt. Only masked fragments are ever stored.
+4. **No customer list, update or delete**, and no destination resolution on
+   transfers.
 
 ## Safety
 

@@ -46,6 +46,7 @@ import {
 import {
   FlutterwaveWebhookFormatter,
   generateFlutterwaveKeys,
+  generateV4Credentials,
 } from '@paybox/flutterwave';
 import { KoraWebhookFormatter, generateKoraKeys } from '@paybox/kora';
 import type { PayboxConfig } from './config.js';
@@ -75,6 +76,8 @@ export interface PayboxContext {
    * encryption key a direct card charge's payload is encrypted with.
    */
   flutterwaveKeys: { secretKey: string; publicKey: string; encryptionKey: string };
+  /** v4 takes OAuth 2.0 client credentials, not an API key. */
+  flutterwaveV4: { clientId: string; clientSecret: string };
   /** Kora's secret key doubles as the card-payload encryption key. */
   koraKeys: { secretKey: string; publicKey: string };
   baseUrl: string;
@@ -299,6 +302,7 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
   const stripeKeys = generateStripeKeys(ids.token(20));
   const flutterwaveKeys = generateFlutterwaveKeys(ids.token(20));
   const koraKeys = generateKoraKeys(ids.token(20));
+  const flutterwaveV4 = generateV4Credentials(ids.token(20));
 
   return {
     config,
@@ -318,6 +322,7 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
     keys,
     stripeKeys,
     flutterwaveKeys,
+    flutterwaveV4,
     koraKeys,
     baseUrl,
     async shutdown() {

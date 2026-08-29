@@ -64,3 +64,41 @@ export {
   registerFlutterwave,
   type FlutterwavePluginOptions,
 } from './routes.js';
+
+/* ------------------------------ v4 ------------------------------ */
+export {
+  flutterwaveV4Plugin,
+  registerFlutterwaveV4,
+  type FlutterwaveV4PluginOptions,
+} from './v4/routes.js';
+export {
+  generateV4Credentials,
+  mintAccessToken,
+  assertV4AccessToken,
+  assertV4TokenRequest,
+  V4_TOKEN_LIFETIME_SECONDS,
+  type V4Credentials,
+} from './v4/auth.js';
+export { toV4Error, type V4ErrorResponse } from './v4/errors.js';
+export {
+  parseScenarioKey,
+  outcomeForIssuer,
+  nextActionFor,
+  fallsOverTo3ds,
+  ISSUER_RESPONSES,
+  TRANSFER_SCENARIOS,
+  V4_MOCK_PIN,
+  V4_MOCK_OTP,
+  type CardScenario,
+  type ScenarioKey,
+} from './v4/scenarios.js';
+export {
+  v4Ok,
+  serializeV4Charge,
+  serializeV4Customer,
+  serializeV4PaymentMethod,
+  serializeV4Refund,
+  serializeV4Transfer,
+  type V4EnvelopeStatus,
+  type V4NextAction,
+} from './v4/serializers.js';
