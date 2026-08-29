@@ -87,8 +87,9 @@ jobs:
       - name: Package smoke test
         run: npm run smoke:package
 
+      # `--pack-destination` does not create the directory.
       - name: Pack
-        run: npm pack --workspace apps/paybox --pack-destination release
+        run: mkdir -p release && npm pack --workspace apps/paybox --pack-destination release
 
       - uses: actions/upload-artifact@v4
         with:
