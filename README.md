@@ -178,6 +178,13 @@ Everything reads from an injected `Clock` and a seeded `Random`. That is what
 makes `time advance` work and what makes `PAYBOX_SEED=x` reproduce a run
 byte for byte.
 
+## Design notes
+
+Source comments cite design decisions as `spec §N`. Those refer to a build
+brief that is not published with the code; [docs/spec-references.md](docs/spec-references.md)
+indexes every section the code cites, and `docs/architecture.md` explains the
+three decisions everything else follows from.
+
 ## Licence
 
 MIT. Not affiliated with, endorsed by, or connected to Paystack, Stripe,
