@@ -14,9 +14,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 All packages are implemented and the vertical slice runs end to end: `shared`, `core`, `storage`, `webhooks`, `simulator`, `providers/paystack`, `apps/api`, `apps/cli`. `npm start` serves the API, dashboard and OpenAPI docs; `npm run cli -- …` drives it.
 
-**Paystack and Stripe are the implemented adapters.** Flutterwave and Kora are not.
+**All four providers are implemented**, each partially: Paystack, Stripe, Flutterwave and Kora. Flutterwave ships two live APIs — v3 (`FLWSECK_TEST-` keys, `{status:"success",…}`) and v4 (OAuth2, `{status:"failed", error:{…}}`) — with different authentication, envelopes and webhook signatures, so they are **two adapters** at `/flutterwave/v3` and `/flutterwave/v4` rather than one with a flag.
 
-Flutterwave and Kora are unimplemented and reported as such by `paybox provider` and the startup banner. Coverage for each implemented adapter is documented honestly in `docs/paystack.md` and `docs/stripe.md` — those files are contracts, not marketing.
+Coverage for each is documented honestly in `docs/paystack.md`, `docs/stripe.md`, `docs/flutterwave.md` and `docs/kora.md` — those files are contracts, not marketing. If something is missing from one, assume it is not implemented.
 
 Adding Stripe was the test of the injection design, and it needed three new seams rather than a rewrite: a `retry` transition flag (Stripe's PaymentIntent has no terminal failure), a clock-aware webhook signature with per-attempt re-signing, and webhook fan-out (one canonical event can be several provider events). All three are in `docs/architecture.md`.
 
@@ -27,6 +27,14 @@ Three endpoints are **emulator-only** and must never be presented as Paystack su
 The dashboard is a single self-contained HTML document served from `apps/api/src/dashboard.ts`, not a React/Vite app. That was a deliberate trade to keep `npm install -g` free of build artifacts; a React dashboard is the intended upgrade.
 
 Not built yet: transport interception for SDKs with a hardcoded host, the Postgres dialect, `paybox stop` (start runs in the foreground), and settlements — the OpenAPI spec gives `/settlement` no response schema at all, so there is nothing to emulate faithfully.
+
+Provider-specific facts worth knowing before touching an adapter:
+
+- **Flutterwave v3's webhook "signature" is not one.** `verif-hash` is the merchant's secret sent verbatim; the body is not signed and tampering is undetectable. Reproduced faithfully rather than improved on — see `packages/providers/flutterwave/src/signature.ts`.
+- **Kora signs only the `data` object**, so the `event` name sits outside the signature. Also reproduced deliberately, with a test pinning it.
+- **Flutterwave sends `charge.completed` for failures too**; Kora has separate `charge.success` / `charge.failed`. The difference between two providers in one market is preserved, not smoothed over.
+- **v4's `X-Scenario-Key`** is Flutterwave's own outcome-simulation header (`scenario:auth_pin&issuer:insufficient_funds`). All four card scenarios, 45 issuer responses and five transfer scenarios are honoured.
+- Card payloads arrive encrypted: Flutterwave v3 uses **3DES-ECB** in `client`, Kora uses **AES-256-GCM** in `charge_data`. Both are decrypted at the boundary so a developer's existing client works unmodified.
 
 The default branch is `main`. `feat/paystack-coverage` carries the six-phase Paystack build-out described above.
 
@@ -51,10 +59,13 @@ Dependency direction is strict and one-way:
 ```
 shared ──> core ──> (storage, webhooks, simulator) ──> providers/* ──> apps/api ──> apps/cli
 
-providers/ now holds two adapters. Anything a provider needs from core reaches
-it as an injected function -- ProviderStatusResolver, AuthorizationMinter,
-InstrumentResolver -- never an import. Adding Stripe was the test of that, and
-it needed three new seams rather than a rewrite: see docs/architecture.md.
+providers/ now holds four packages and five adapters (Flutterwave serves two
+API versions). Anything a provider needs from core reaches it as an injected
+function -- ProviderStatusResolver, AuthorizationMinter, InstrumentResolver,
+SetupAuthorizationMinter -- never an import. Adding Stripe was the first test
+of that and needed three new seams; adding Flutterwave and Kora needed none at
+all, which is the strongest evidence the design holds. See
+docs/architecture.md.
 ```
 
 - **`packages/shared`** — types and pure helpers with no runtime deps: canonical statuses, the domain model, seeded `Random`, `IdFactory`, the `Clock` *port* (interface only), currency, and the `PayboxError` taxonomy.
