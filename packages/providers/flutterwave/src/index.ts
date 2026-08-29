@@ -42,6 +42,7 @@ export {
   momoFails,
   type FlutterwaveCard,
 } from './instruments.js';
+export { flutterwaveAuthorizationMinter } from './authorization.js';
 export { FlutterwaveWebhookFormatter, type FlutterwaveApiVersion } from './webhook.js';
 export {
   ok,

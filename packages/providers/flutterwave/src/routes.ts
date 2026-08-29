@@ -28,16 +28,24 @@ import { fromFlutterwaveChargeType, type FlutterwaveAuthMode } from './status.js
 import {
   authorizationMeta,
   flwRef,
+  major,
   numericId,
   ok,
   serializeCustomer,
   serializeRefund,
   serializeTransaction,
   serializeTransfer,
+  serializePlan,
+  serializeSubaccount,
 } from './serializers.js';
 import {
   cardChargeSchema,
   checkoutPaySchema,
+  flwPaymentPlanSchema,
+  flwPaymentPlanUpdateSchema,
+  flwSubaccountSchema,
+  flwVirtualAccountSchema,
+  tokenizedChargeSchema,
   encryptedChargeSchema,
   listQuerySchema,
   paymentsInitiateSchema,
@@ -179,6 +187,15 @@ export const flutterwavePlugin: FastifyPluginAsync<FlutterwavePluginOptions> = a
       createdAt: clock.nowISO(),
       updatedAt: clock.nowISO(),
     });
+  }
+
+  async function assertUniqueReference(reference: string): Promise<void> {
+    if (await storage.payments.byReference(PROVIDER, reference)) {
+      throw new PayboxError(
+        'duplicate_reference',
+        `Transaction reference "${reference}" has already been used.`,
+      );
+    }
   }
 
   function assertCurrency(code: string): string {
@@ -634,6 +651,300 @@ export const flutterwavePlugin: FastifyPluginAsync<FlutterwavePluginOptions> = a
     authenticate(request);
     const { items } = await storage.customers.list({ provider: PROVIDER, limit: 100 });
     return reply.send(ok('Customers fetched', items.map(serializeCustomer)));
+  });
+
+  /* ---------------------------------------------------------------- *
+   * Payment plans
+   *
+   * A canonical Plan. Flutterwave's interval vocabulary is wider than the
+   * canonical one, so the two that have no equivalent are refused rather than
+   * silently billed on a cadence the engine cannot represent.
+   * ---------------------------------------------------------------- */
+
+  /** Flutterwave's interval names -> the canonical ones. */
+  const PLAN_INTERVALS: Record<string, 'daily' | 'weekly' | 'monthly' | 'biannually' | 'annually'> = {
+    daily: 'daily',
+    weekly: 'weekly',
+    monthly: 'monthly',
+    'bi-annually': 'biannually',
+    yearly: 'annually',
+  };
+
+  fastify.post('/v3/payment-plans', async (request, reply) => {
+    authenticate(request);
+    const body = flwPaymentPlanSchema.parse(request.body);
+    const interval = PLAN_INTERVALS[body.interval];
+    if (!interval) {
+      // `quarterly` is the one Flutterwave documents that the canonical
+      // vocabulary has no member for. Refusing beats rounding it to monthly.
+      throw new PayboxError(
+        'unsupported_operation',
+        `paybox does not model the "${body.interval}" interval. Supported: ` +
+          `${Object.keys(PLAN_INTERVALS).join(', ')}.`,
+      );
+    }
+
+    const plan = await engine.createPlan({
+      provider: PROVIDER,
+      name: body.name,
+      amount: body.amount,
+      currency: assertCurrency(body.currency ?? 'NGN'),
+      interval,
+      invoiceLimit: Number(body.duration ?? 0) || 0,
+    });
+    return reply.send(ok('Payment plan created', serializePlan(plan)));
+  });
+
+  async function loadPlan(handle: string) {
+    const { items } = await storage.plans.list({ provider: PROVIDER, limit: 500 });
+    const plan = items.find(
+      (row) => String(numericId(row.id)) === handle || row.providerPlanCode === handle || row.id === handle,
+    );
+    if (!plan) throw new PayboxError('not_found', `No payment plan found for "${handle}".`);
+    return plan;
+  }
+
+  fastify.get<{ Params: { id: string } }>('/v3/payment-plans/:id', async (request, reply) => {
+    authenticate(request);
+    return reply.send(ok('Payment plan fetched', serializePlan(await loadPlan(request.params.id))));
+  });
+
+  fastify.get('/v3/payment-plans', async (request, reply) => {
+    authenticate(request);
+    const { items } = await storage.plans.list({ provider: PROVIDER, limit: 100 });
+    return reply.send(ok('Payment plans fetched', items.map(serializePlan)));
+  });
+
+  fastify.put<{ Params: { id: string } }>('/v3/payment-plans/:id', async (request, reply) => {
+    authenticate(request);
+    const body = flwPaymentPlanUpdateSchema.parse(request.body ?? {});
+    const plan = await loadPlan(request.params.id);
+    const updated = await engine.updatePlan(plan.id, {
+      ...(body.name ? { name: body.name } : {}),
+      ...(body.status ? { active: body.status === 'active' } : {}),
+    });
+    return reply.send(ok('Payment plan updated', serializePlan(updated)));
+  });
+
+  /* ---------------------------------------------------------------- *
+   * Tokenized charges — Flutterwave's card-on-file
+   *
+   * A successful card charge leaves behind a token the merchant can debit
+   * again without the customer present. That is the canonical Authorization,
+   * which is why this needed no new concept: the engine already mints one on
+   * settlement through the injected minter.
+   * ---------------------------------------------------------------- */
+
+  fastify.post('/v3/tokenized-charges', async (request, reply) => {
+    authenticate(request);
+    const body = tokenizedChargeSchema.parse(request.body);
+    const currency = assertCurrency(body.currency ?? 'NGN');
+    await assertUniqueReference(body.tx_ref);
+
+    const authorization = await storage.authorizations.byCode(PROVIDER, body.token);
+    if (!authorization) {
+      throw new PayboxError('not_found', `No card token "${body.token}".`);
+    }
+    // Refuses a deactivated or non-reusable token, which is the failure a
+    // merchant needs to discover locally rather than in production.
+    engine.assertChargeable(authorization);
+
+    const customer = await upsertCustomer({ email: body.email });
+    const payment = await engine.createPayment({
+      provider: PROVIDER,
+      amount: body.amount,
+      currency,
+      reference: body.tx_ref,
+      customerId: customer.id,
+      paymentMethod: authorization.channel,
+      paymentMethodDetails: {
+        bin: authorization.bin,
+        last4: authorization.last4,
+        exp_month: authorization.expMonth,
+        exp_year: authorization.expYear,
+        brand: authorization.brand,
+      },
+      metadata: {
+        ...(body.meta ?? {}),
+        email: body.email,
+        ...(body.narration ? { narration: body.narration } : {}),
+        token: body.token,
+      },
+      status: 'pending',
+    });
+
+    // A stored token charges without a step-up -- that is the whole point of
+    // having one.
+    const settled = await simulator.apply(payment.id, 'success');
+    return reply.send(ok('Charge successful', await decorate(settled)));
+  });
+
+  /* ---------------------------------------------------------------- *
+   * Subaccounts — the marketplace split
+   * ---------------------------------------------------------------- */
+
+  fastify.post('/v3/subaccounts', async (request, reply) => {
+    authenticate(request);
+    const body = flwSubaccountSchema.parse(request.body);
+    const share = Number(body.split_value ?? 0);
+
+    const subaccount = await engine.createSubaccount({
+      provider: PROVIDER,
+      businessName: body.business_name,
+      settlementBank: body.account_bank,
+      accountNumber: body.account_number,
+      // Flutterwave expresses a percentage split as a fraction (0.2 = 20%),
+      // where the canonical field is a percentage. Converting here keeps the
+      // provider's spelling out of the engine.
+      percentageCharge: body.split_type === 'flat' ? 0 : Math.round(share * 100),
+      currency: 'NGN',
+      countryCode: (body.country ?? 'NG').toUpperCase(),
+      primaryContactEmail: body.business_email ?? null,
+      primaryContactName: body.business_contact ?? null,
+      primaryContactPhone: body.business_contact_mobile ?? body.business_mobile ?? null,
+      // Flutterwave subaccounts are usable at once; only Stripe Connect has an
+      // onboarding gate.
+      onboarded: true,
+      metadata: {
+        split_type: body.split_type ?? 'percentage',
+        split_value: share,
+      },
+    });
+
+    return reply.status(200).send(ok('Subaccount created', serializeSubaccount(subaccount)));
+  });
+
+  fastify.get('/v3/subaccounts', async (request, reply) => {
+    authenticate(request);
+    const { items } = await storage.subaccounts.list({ provider: PROVIDER, limit: 100 });
+    return reply.send(ok('Subaccounts fetched', items.map(serializeSubaccount)));
+  });
+
+  fastify.get<{ Params: { id: string } }>('/v3/subaccounts/:id', async (request, reply) => {
+    authenticate(request);
+    const { items } = await storage.subaccounts.list({ provider: PROVIDER, limit: 500 });
+    const subaccount = items.find(
+      (row) =>
+        String(numericId(row.id)) === request.params.id ||
+        row.providerSubaccountCode === request.params.id,
+    );
+    if (!subaccount) {
+      throw new PayboxError('not_found', `No subaccount found for "${request.params.id}".`);
+    }
+    return reply.send(ok('Subaccount fetched', serializeSubaccount(subaccount)));
+  });
+
+  /* ---------------------------------------------------------------- *
+   * Virtual account numbers
+   *
+   * A canonical DedicatedAccount: an inbound rail bound to a customer. The
+   * number is synthetic and belongs to no bank (spec §29).
+   * ---------------------------------------------------------------- */
+
+  fastify.post('/v3/virtual-account-numbers', async (request, reply) => {
+    authenticate(request);
+    const body = flwVirtualAccountSchema.parse(request.body);
+    const customer = await upsertCustomer({
+      email: body.email,
+      name: [body.firstname, body.lastname].filter(Boolean).join(' ') || undefined,
+      phone: body.phonenumber,
+    });
+
+    const account = await engine.createDedicatedAccount({
+      provider: PROVIDER,
+      customerId: customer.id,
+      accountNumber: ids.token(10).replace(/\D/g, '').padEnd(10, '0').slice(0, 10),
+      accountName: [body.firstname, body.lastname].filter(Boolean).join(' ') || body.email,
+      bankName: 'PAYBOX TEST BANK',
+      bankSlug: 'paybox-test-bank',
+      currency: 'NGN',
+      metadata: {
+        is_permanent: body.is_permanent ?? false,
+        ...(body.tx_ref ? { tx_ref: body.tx_ref } : {}),
+      },
+    });
+
+    return reply.send(
+      ok('Virtual account created', {
+        response_code: '02',
+        response_message: 'Transaction in progress',
+        flw_ref: flwRef(account.id, 'VAN'),
+        order_ref: String(account.metadata.tx_ref ?? account.providerAccountId),
+        account_number: account.accountNumber,
+        frequency: body.is_permanent ? 'N/A' : '1',
+        bank_name: account.bankName,
+        created_at: account.createdAt,
+        expiry_date: body.is_permanent ? 'N/A' : null,
+        note: `Please make a bank transfer to ${account.accountName}`,
+        amount: body.amount != null ? major(body.amount) : null,
+      }),
+    );
+  });
+
+  fastify.get<{ Params: { ref: string } }>(
+    '/v3/virtual-account-numbers/:ref',
+    async (request, reply) => {
+      authenticate(request);
+      const { items } = await storage.dedicatedAccounts.list({ provider: PROVIDER, limit: 500 });
+      const account = items.find(
+        (row) =>
+          row.accountNumber === request.params.ref ||
+          flwRef(row.id, 'VAN') === request.params.ref ||
+          row.metadata.tx_ref === request.params.ref,
+      );
+      if (!account) {
+        throw new PayboxError('not_found', `No virtual account for "${request.params.ref}".`);
+      }
+      return reply.send(
+        ok('Virtual account fetched', {
+          account_number: account.accountNumber,
+          bank_name: account.bankName,
+          flw_ref: flwRef(account.id, 'VAN'),
+          created_at: account.createdAt,
+        }),
+      );
+    },
+  );
+
+  /* ---------------------------------------------------------------- *
+   * Banks
+   * ---------------------------------------------------------------- */
+
+  /**
+   * A small, fixed list.
+   *
+   * These are real Nigerian bank codes, which is what makes a transfer payload
+   * copied from a developer's own code work here. Nothing is resolved against
+   * a real institution (spec §29).
+   */
+  const BANKS: Record<string, { id: number; code: string; name: string }[]> = {
+    NG: [
+      { id: 1, code: '044', name: 'Access Bank' },
+      { id: 2, code: '058', name: 'Guaranty Trust Bank' },
+      { id: 3, code: '057', name: 'Zenith Bank' },
+      { id: 4, code: '011', name: 'First Bank of Nigeria' },
+      { id: 5, code: '033', name: 'United Bank for Africa' },
+      { id: 6, code: '232', name: 'Sterling Bank' },
+      { id: 7, code: '070', name: 'Fidelity Bank' },
+    ],
+    GH: [
+      { id: 20, code: 'GH010100', name: 'Ghana Commercial Bank' },
+      { id: 21, code: 'GH020100', name: 'Absa Bank Ghana' },
+    ],
+    KE: [{ id: 30, code: '01', name: 'Kenya Commercial Bank' }],
+  };
+
+  fastify.get<{ Params: { country: string } }>('/v3/banks/:country', async (request, reply) => {
+    authenticate(request);
+    const banks = BANKS[request.params.country.toUpperCase()];
+    if (!banks) {
+      throw new PayboxError(
+        'not_found',
+        `paybox has no bank list for "${request.params.country}". ` +
+          `Available: ${Object.keys(BANKS).join(', ')}.`,
+      );
+    }
+    return reply.send(ok('Banks fetched', banks));
   });
 
   /* ---------------------------------------------------------------- *

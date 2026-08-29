@@ -45,6 +45,7 @@ import {
 } from '@paybox/stripe';
 import {
   FlutterwaveWebhookFormatter,
+  flutterwaveAuthorizationMinter,
   generateFlutterwaveKeys,
   generateV4Credentials,
 } from '@paybox/flutterwave';
@@ -135,6 +136,7 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
   const mintAuthorization = (payment: Parameters<typeof paystackAuthorizationMinter>[0]) => {
     if (payment.provider === 'paystack') return paystackAuthorizationMinter(payment);
     if (payment.provider === 'stripe') return stripeAuthorizationMinter(payment);
+    if (payment.provider === 'flutterwave') return flutterwaveAuthorizationMinter(payment);
     return null;
   };
 

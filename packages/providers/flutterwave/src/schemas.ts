@@ -183,3 +183,73 @@ export const checkoutPaySchema = z.object({
   exp_month: z.string().optional(),
   exp_year: z.string().optional(),
 });
+
+/* ---------------------------------------------------------------- *
+ * Depth: plans, tokenized charges, subaccounts, virtual accounts
+ * ---------------------------------------------------------------- */
+
+/**
+ * Flutterwave's payment-plan intervals.
+ *
+ * Their documented set is wider than the canonical one, so the adapter maps
+ * what it can and refuses the rest rather than silently billing on a cadence
+ * the engine cannot represent.
+ */
+export const planIntervalSchema = z.enum([
+  'daily',
+  'weekly',
+  'monthly',
+  'quarterly',
+  'bi-annually',
+  'yearly',
+]);
+
+export const flwPaymentPlanSchema = z.object({
+  amount: majorAmount,
+  name: z.string().min(1),
+  interval: planIntervalSchema,
+  duration: z.union([z.number(), z.string()]).optional(),
+  currency: currency.optional(),
+});
+
+export const flwPaymentPlanUpdateSchema = z.object({
+  name: z.string().optional(),
+  status: z.enum(['active', 'cancelled']).optional(),
+});
+
+/** A charge against a stored card token. Flutterwave's card-on-file. */
+export const tokenizedChargeSchema = z.object({
+  token: z.string().min(1),
+  currency: currency.optional(),
+  amount: majorAmount,
+  email: z.string().email(),
+  tx_ref: z.string().min(1),
+  narration: z.string().optional(),
+  country: z.string().optional(),
+  meta: metadata,
+});
+
+export const flwSubaccountSchema = z.object({
+  account_bank: z.string().min(1),
+  account_number: z.string().min(1),
+  business_name: z.string().min(1),
+  business_email: z.string().email().optional(),
+  business_contact: z.string().optional(),
+  business_contact_mobile: z.string().optional(),
+  business_mobile: z.string().optional(),
+  country: z.string().optional(),
+  split_type: z.enum(['percentage', 'flat']).optional(),
+  split_value: z.union([z.number(), z.string()]).optional(),
+});
+
+export const flwVirtualAccountSchema = z.object({
+  email: z.string().email(),
+  is_permanent: z.boolean().optional(),
+  bvn: z.string().optional(),
+  tx_ref: z.string().optional(),
+  phonenumber: z.string().optional(),
+  firstname: z.string().optional(),
+  lastname: z.string().optional(),
+  narration: z.string().optional(),
+  amount: majorAmount.optional(),
+});

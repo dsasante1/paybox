@@ -43,7 +43,12 @@ comes from.
 | `GET /v3/customers` | **Partially compatible** | List only. |
 | `GET /flutterwave/checkout/{tx_ref}` | **Emulator-only** | The hosted page; see below. |
 | `GET /flutterwave/3ds/{tx_ref}` | **Emulator-only** | The page `meta.authorization.redirect` points at. |
-| Payment plans, subscriptions, subaccounts, virtual accounts, chargebacks, bill payments, BVN, FX | **Not supported** | Serializers exist; routes do not. |
+| `POST /v3/payment-plans`, `GET`/`PUT /v3/payment-plans/{id}`, `GET /v3/payment-plans` | **Partially compatible** | `quarterly` is refused; see below. |
+| `POST /v3/tokenized-charges` | **Compatible** | Card-on-file; no step-up, as intended. |
+| `POST /v3/subaccounts`, `GET /v3/subaccounts`, `GET /v3/subaccounts/{id}` | **Partially compatible** | No update or delete. |
+| `POST /v3/virtual-account-numbers`, `GET /v3/virtual-account-numbers/{ref}` | **Partially compatible** | One account per customer; no BVN check. |
+| `GET /v3/banks/{country}` | **Partially compatible** | A fixed list for NG, GH and KE. |
+| Subscriptions, chargebacks, bill payments, BVN, FX, settlements, bulk transfers | **Not supported** | Some serializers exist; routes do not. |
 
 ## What is faithful, and deliberately so
 
@@ -105,7 +110,18 @@ from the testing page: thirteen cards, the special OTPs `5548` (wrong) and
    does not mint a dynamic account number and a `ussd` charge returns no dial
    string, because those shapes are not documented on the pages cited above.
    The charge itself is real and settles by test instrument.
-8. **Only `charge.completed`, `transfer.completed`, `subscription.cancelled`
+8. **`quarterly` payment plans are refused.** Flutterwave documents a wider
+   interval set than the canonical vocabulary carries, and rounding quarterly
+   to monthly would bill four times a year instead of once a quarter. The
+   other five map cleanly (`yearly` becomes `annually`).
+9. **A card token is derived from the instrument and the customer**, so the
+   same card yields the same token under a fixed seed, and two customers who
+   share a card get two tokens — a stored instrument belongs to a customer.
+   Only cards mint one; mobile money does not, because the customer has to
+   approve every prompt on their handset.
+10. **One virtual account per customer.** Asking twice returns the existing
+   one rather than minting a second, which is what a provider does.
+11. **Only `charge.completed`, `transfer.completed`, `subscription.cancelled`
    and `chargeback.created` are emitted.** Nothing is sent for in-flight
    states: Flutterwave notifies on completion, not on progress, and a developer
    waiting for a `charge.processing` that never arrives would be debugging the

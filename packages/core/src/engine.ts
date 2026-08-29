@@ -1117,8 +1117,13 @@ export class PaymentEngine {
    */
   assertChargeable(authorization: Authorization): void {
     if (!authorization.active) {
+      // `validation_failed`, not `authentication_failed`: the caller's
+      // credentials are fine, and the stored instrument is what is wrong. The
+      // difference is visible -- every adapter maps authentication failures to
+      // HTTP 401 -- and a 401 here would send a developer to check their API
+      // key when the problem is the token they passed.
       throw new PayboxError(
-        'authentication_failed',
+        'validation_failed',
         `Authorization ${authorization.providerAuthorizationCode} has been deactivated.`,
         { details: { authorizationId: authorization.id } },
       );
