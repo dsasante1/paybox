@@ -25,6 +25,8 @@ import {
 import {
   authorizeChargeSchema,
   bankTransferSchema,
+  bulkDisburseSchema,
+  koraListQuerySchema,
   cardChargeSchema,
   checkoutPaySchema,
   creditVirtualAccountSchema,
@@ -696,6 +698,328 @@ export const koraPlugin: FastifyPluginAsync<KoraPluginOptions> = async (fastify,
     );
   });
 
+  /* ---------------------------------------------------------------- *
+   * Cursor pagination
+   *
+   * Kora pages by an opaque `pointer` on each row rather than by offset:
+   * `starting_after` names the row to resume from. Implementing it properly
+   * matters because a client that stores a pointer and comes back later must
+   * find the same place -- so the pointer is derived from the row's canonical
+   * id, not from its position.
+   * ---------------------------------------------------------------- */
+
+  /** A stable, opaque cursor for one row. */
+  function pointerFor(id: string): string {
+    return koraRef('PTR', id).replace('KPY-PTR-', 'cur_');
+  }
+
+  function paginate<T extends { id: string }>(
+    rows: readonly T[],
+    query: { limit: number; starting_after?: string | undefined },
+  ): { page: T[]; hasMore: boolean } {
+    let start = 0;
+    if (query.starting_after) {
+      const at = rows.findIndex((row) => pointerFor(row.id) === query.starting_after);
+      // An unknown pointer starts from the beginning rather than erroring: a
+      // stale cursor should degrade, not break a client's sync loop.
+      if (at >= 0) start = at + 1;
+    }
+    const window = rows.slice(start);
+    return { page: window.slice(0, query.limit), hasMore: window.length > query.limit };
+  }
+
+  /* ------------------------------ listing ------------------------------ */
+
+  fastify.get<{ Querystring: Record<string, string> }>(`${API}/pay-ins`, async (request, reply) => {
+    authenticate(request);
+    const query = koraListQuerySchema.parse(request.query);
+    const { items } = await storage.payments.list({ provider: PROVIDER, limit: 1000 });
+    const { page, hasMore } = paginate(items, query);
+
+    const payins = await Promise.all(
+      page.map(async (payment) => ({
+        pointer: pointerFor(payment.id),
+        ...(await decorate(payment)),
+        date_created: payment.createdAt,
+      })),
+    );
+    return reply.send(ok('Transactions retrieved successfully', { has_more: hasMore, payins }));
+  });
+
+  fastify.get<{ Querystring: Record<string, string> }>(`${API}/payouts`, async (request, reply) => {
+    authenticate(request);
+    const query = koraListQuerySchema.parse(request.query);
+    const { items } = await storage.transfers.list({ limit: 1000 });
+    const mine = items.filter((row) => row.provider === PROVIDER);
+    const { page, hasMore } = paginate(mine, query);
+
+    return reply.send(
+      ok('Transactions retrieved successfully', {
+        has_more: hasMore,
+        payouts: page.map((transfer) => ({
+          pointer: pointerFor(transfer.id),
+          ...serializePayout(transfer),
+          payment_destination: String(transfer.metadata.type ?? 'bank_account'),
+          customer_name: transfer.recipientName,
+        })),
+      }),
+    );
+  });
+
+  /* ------------------------------ balances ------------------------------ */
+
+  /**
+   * Balances per currency.
+   *
+   * `pending_balance` is always 0: paybox settles instantly, so there is no
+   * window in which money is collected but unavailable. docs/kora.md says so
+   * rather than inventing a plausible pending figure a developer might build
+   * a "wait for funds" flow around.
+   */
+  fastify.get(`${API}/balances`, async (request, reply) => {
+    authenticate(request);
+    const currencies = await storage.ledger.currencies(PROVIDER, null);
+    const seen = currencies.length > 0 ? currencies : ['NGN'];
+
+    const data: Record<string, { pending_balance: number; available_balance: number }> = {};
+    for (const currency of [...new Set(seen)].sort()) {
+      data[currency] = {
+        pending_balance: 0,
+        available_balance: Number(
+          ((await engine.getBalance(PROVIDER, currency, null)) / 100).toFixed(2),
+        ),
+      };
+    }
+    return reply.send(ok('success', data));
+  });
+
+  /**
+   * Balance history.
+   *
+   * The append-only ledger, in Kora's shape. `balance_before` and
+   * `balance_after` are computed by folding forward from the opening float --
+   * the same fold the balance itself is, which is why the two can never
+   * disagree.
+   */
+  fastify.get<{ Querystring: Record<string, string> }>(
+    `${API}/balances/history`,
+    async (request, reply) => {
+      authenticate(request);
+      const query = koraListQuerySchema.parse(request.query);
+      const { items } = await storage.ledger.list({ provider: PROVIDER, limit: 1000 });
+
+      // The repository returns newest first; the running balance has to be
+      // computed oldest first, so it is folded and then reversed back.
+      const oldestFirst = [...items].reverse();
+      const opening = (await engine.getBalance(PROVIDER, 'NGN', null)) -
+        oldestFirst.reduce(
+          (sum, entry) => sum + (entry.direction === 'credit' ? entry.amount : -entry.amount),
+          0,
+        );
+
+      let running = opening;
+      const withBalances = oldestFirst.map((entry) => {
+        const before = running;
+        running += entry.direction === 'credit' ? entry.amount : -entry.amount;
+        return {
+          id: entry.id,
+          pointer: pointerFor(entry.id),
+          amount: majorString(entry.amount),
+          currency: entry.currency,
+          balance_before: majorString(before),
+          balance_after: majorString(running),
+          date: entry.createdAt,
+          description: entry.reason,
+          direction: entry.direction,
+          source: entry.reason,
+          source_reference: entry.resourceId,
+        };
+      });
+
+      const { page, hasMore } = paginate(withBalances.reverse(), query);
+      return reply.send(
+        ok('Balance history retrieved successfully', { has_more: hasMore, history: page }),
+      );
+    },
+  );
+
+  /* ---------------------------- bulk payouts ---------------------------- */
+
+  /**
+   * A batch of payouts under one reference.
+   *
+   * Each entry becomes a real transfer, so each reserves against the balance
+   * individually and each can fail on its own -- which is the behaviour a
+   * merchant has to handle. A batch is not an atomic unit at Kora and is not
+   * one here.
+   */
+  fastify.post(`${API}/transactions/disburse/bulk`, async (request, reply) => {
+    authenticate(request);
+    const body = bulkDisburseSchema.parse(request.body);
+    const currency = assertCurrency(body.currency ?? 'NGN');
+
+    let total = 0;
+    for (const payout of body.payouts) {
+      const isBank = payout.type === 'bank_account';
+      await engine.createTransfer({
+        provider: PROVIDER,
+        amount: payout.amount,
+        currency,
+        reference: payout.reference,
+        recipientAccount: isBank
+          ? (payout.bank_account?.account_number ?? payout.bank_account?.account ?? null)
+          : (payout.mobile_money?.mobile_number ?? null),
+        recipientBankCode: isBank
+          ? (payout.bank_account?.bank_code ?? payout.bank_account?.bank ?? null)
+          : (payout.mobile_money?.operator ?? null),
+        recipientName: payout.customer?.name ?? null,
+        reason: payout.narration ?? null,
+        status: 'processing',
+        metadata: {
+          type: payout.type,
+          batch_reference: body.batch_reference,
+          ...(payout.customer?.email ? { email: payout.customer.email } : {}),
+        },
+      });
+      total += payout.amount;
+    }
+
+    return reply.send(
+      ok('Bulk payout initiated successfully', {
+        status: 'pending',
+        total_chargeable_amount: Number((total / 100).toFixed(2)),
+        merchant_bears_cost: body.merchant_bears_cost ?? false,
+        currency,
+        reference: body.batch_reference,
+        description: body.description ?? null,
+        created_at: clock.nowISO(),
+      }),
+    );
+  });
+
+  async function batchTransfers(batchReference: string) {
+    const { items } = await storage.transfers.list({ limit: 1000 });
+    const batch = items.filter(
+      (row) => row.provider === PROVIDER && row.metadata.batch_reference === batchReference,
+    );
+    if (batch.length === 0) {
+      throw new PayboxError('not_found', `No bulk payout batch "${batchReference}".`);
+    }
+    return batch;
+  }
+
+  fastify.get<{ Params: { reference: string } }>(
+    `${API}/transactions/bulk/:reference/payout`,
+    async (request, reply) => {
+      authenticate(request);
+      const batch = await batchTransfers(request.params.reference);
+      return reply.send(
+        ok('Payouts retrieved successfully', {
+          data: batch.map((transfer) => ({
+            ...serializePayout(transfer),
+            batch_reference: request.params.reference,
+            type: String(transfer.metadata.type ?? 'bank_account'),
+          })),
+        }),
+      );
+    },
+  );
+
+  fastify.get<{ Params: { reference: string } }>(
+    `${API}/transactions/bulk/:reference`,
+    async (request, reply) => {
+      authenticate(request);
+      const batch = await batchTransfers(request.params.reference);
+      const count = (predicate: (status: string) => boolean) =>
+        batch.filter((transfer) => predicate(transfer.status)).length;
+
+      const failed = count((status) => status === 'failed' || status === 'cancelled');
+      const successful = count((status) => status === 'successful');
+      const processing = count((status) => status === 'processing');
+      const pending = batch.length - failed - successful - processing;
+
+      return reply.send(
+        ok('Bulk transaction retrieved successfully', {
+          amount: majorString(batch.reduce((sum, transfer) => sum + transfer.amount, 0)),
+          currency: batch[0]!.currency,
+          reference: request.params.reference,
+          // `complete` only once nothing is still in flight.
+          status: processing + pending === 0 ? 'complete' : 'pending',
+          failed_transactions: failed,
+          successful_transactions: successful,
+          pending_transactions: pending,
+          processing_transactions: processing,
+        }),
+      );
+    },
+  );
+
+  /* ------------------------------- misc ------------------------------- */
+
+  /**
+   * Bank and mobile-money-operator lists.
+   *
+   * Real codes, so a payout payload copied from a developer's own code works
+   * here unchanged. Nothing is resolved against a real institution (spec §29).
+   */
+  const BANKS: Record<string, { name: string; slug: string; code: string; country: string }[]> = {
+    NG: [
+      { name: 'Access Bank', slug: 'access', code: '044', country: 'NG' },
+      { name: 'Guaranty Trust Bank', slug: 'gtb', code: '058', country: 'NG' },
+      { name: 'Zenith Bank', slug: 'zenith', code: '057', country: 'NG' },
+      { name: 'United Bank for Africa', slug: 'uba', code: '033', country: 'NG' },
+    ],
+    GH: [
+      { name: 'Ghana Commercial Bank', slug: 'gcb', code: 'GH010100', country: 'GH' },
+      { name: 'Absa Bank Ghana', slug: 'absa-gh', code: 'GH020100', country: 'GH' },
+    ],
+    KE: [{ name: 'Kenya Commercial Bank', slug: 'kcb', code: '01', country: 'KE' }],
+  };
+
+  const OPERATORS: Record<string, { name: string; slug: string; country: string; code: string; min: number; max: number }[]> = {
+    GH: [
+      { name: 'MTN', slug: 'mtn-gh', country: 'GH', code: '0003', min: 1, max: 1_000_000 },
+      { name: 'VODAFONE', slug: 'vodafone-gh', country: 'GH', code: '0004', min: 1, max: 1_000_000 },
+    ],
+    KE: [
+      { name: 'SAFARICOM', slug: 'safaricom-ke', country: 'KE', code: '0001', min: 10, max: 70_000 },
+      { name: 'AIRTEL', slug: 'airtel-ke', country: 'KE', code: '0002', min: 10, max: 1_000_000 },
+    ],
+  };
+
+  fastify.get<{ Querystring: { countryCode?: string } }>(
+    `${API}/misc/banks`,
+    async (request, reply) => {
+      authenticate(request);
+      const country = (request.query.countryCode ?? 'NG').toUpperCase();
+      const banks = BANKS[country];
+      if (!banks) {
+        throw new PayboxError(
+          'not_found',
+          `paybox has no bank list for "${country}". Available: ${Object.keys(BANKS).join(', ')}.`,
+        );
+      }
+      return reply.send(ok('Successful', banks));
+    },
+  );
+
+  fastify.get<{ Querystring: { countryCode?: string } }>(
+    `${API}/misc/mobile-money`,
+    async (request, reply) => {
+      authenticate(request);
+      const country = (request.query.countryCode ?? 'GH').toUpperCase();
+      const operators = OPERATORS[country];
+      if (!operators) {
+        throw new PayboxError(
+          'not_found',
+          `paybox has no mobile-money operators for "${country}". ` +
+            `Available: ${Object.keys(OPERATORS).join(', ')}.`,
+        );
+      }
+      return reply.send(ok('Successful', operators));
+    },
+  );
+
   /* --------------------------- the hosted page --------------------------- */
 
   fastify.get<{ Params: { ref: string } }>('/checkout/:ref', async (request, reply) => {
@@ -742,7 +1066,6 @@ export const koraPlugin: FastifyPluginAsync<KoraPluginOptions> = async (fastify,
     );
   });
 
-  void majorString;
 };
 
 /** Convenience for tests that want the plugin on a bare Fastify. */

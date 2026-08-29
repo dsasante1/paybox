@@ -150,3 +150,48 @@ export const checkoutPaySchema = z.object({
   exp_month: z.string().optional(),
   exp_year: z.string().optional(),
 });
+
+/* ---------------------------------------------------------------- *
+ * Depth: bulk payouts and cursor-paged listing
+ * ---------------------------------------------------------------- */
+
+const bulkPayout = z.object({
+  reference: z.string().min(1),
+  amount: majorAmount,
+  type: z.enum(['bank_account', 'mobile_money']).default('bank_account'),
+  narration: z.string().optional(),
+  bank_account: z
+    .object({ bank: z.string().optional(), bank_code: z.string().optional(), account: z.string().optional(), account_number: z.string().optional() })
+    .optional(),
+  mobile_money: z
+    .object({ operator: z.string().optional(), mobile_number: z.string().optional() })
+    .optional(),
+  customer: z.object({ name: z.string().optional(), email: z.string().optional() }).optional(),
+});
+
+export const bulkDisburseSchema = z.object({
+  batch_reference: z.string().min(1),
+  description: z.string().optional(),
+  currency: currency.optional(),
+  merchant_bears_cost: z.boolean().optional(),
+  payouts: z.array(bulkPayout).min(1),
+});
+
+/**
+ * Kora's cursor pagination.
+ *
+ * Each row carries an opaque `pointer`, and `starting_after` names the pointer
+ * to resume from -- so the cursor is a row identity, not an offset. `limit`
+ * bounds the page and `has_more` says whether another exists.
+ */
+export const koraListQuerySchema = z.object({
+  limit: z
+    .union([z.number(), z.string()])
+    .optional()
+    .transform((value) => {
+      const parsed = value === undefined ? 10 : Number(value);
+      if (!Number.isFinite(parsed)) return 10;
+      return Math.min(Math.max(Math.trunc(parsed), 1), 100);
+    }),
+  starting_after: z.string().optional(),
+});

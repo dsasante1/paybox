@@ -32,8 +32,14 @@ Kora's own published URLs, so an existing client's paths work unchanged.
 | `GET /virtual-bank-account/{reference}` | **Compatible** | |
 | `POST /virtual-bank-account/sandbox/credit` | **Compatible** | Kora's own sandbox endpoint. |
 | `POST /misc/banks/resolve` | **Partially compatible** | Always resolves to a synthetic test account. |
+| `GET /pay-ins`, `GET /payouts` | **Compatible** | Cursor-paged; see below. |
+| `GET /balances` | **Partially compatible** | `pending_balance` always 0; see below. |
+| `GET /balances/history` | **Compatible** | Folded from the ledger. |
+| `POST /transactions/disburse/bulk` | **Compatible** | Each entry is a real transfer. |
+| `GET /transactions/bulk/{ref}`, `GET /transactions/bulk/{ref}/payout` | **Compatible** | |
+| `GET /misc/banks`, `GET /misc/mobile-money` | **Partially compatible** | Fixed lists for NG, GH, KE. |
 | `GET /kora/checkout/{reference}` | **Emulator-only** | The hosted page. |
-| Bulk payouts, remittance, pool accounts, direct debit, vouchers, stablecoins, pay-with-bank, account holders | **Not supported** | |
+| Remittance, pool accounts, direct debit, vouchers, stablecoins, pay-with-bank, account holders, conversions | **Not supported** | |
 
 ## What is faithful, and deliberately so
 
@@ -87,11 +93,23 @@ account originates with the payer's bank. Neither is an emulator invention.
 4. **`fee` and `vat` are always 0.** paybox does not model Kora's pricing, so
    `amount_expected` equals `amount` and `merchant_bears_cost` is echoed rather
    than acted on.
-5. **No cursor pagination.** Kora's `starting_after` / `pointer` scheme is not
-   implemented; `GET /refunds` always reports `has_more: false`.
-6. **`/misc/banks/resolve` always succeeds** and returns a synthetic name. The
+5. **Cursor pagination is implemented on `/pay-ins` and `/payouts`**, by
+   `pointer` and `starting_after` as Kora does — the pointer is derived from
+   the row's canonical id, so a client that stores one and comes back later
+   finds the same place, and a stale pointer degrades to the first page rather
+   than breaking a sync loop. `GET /refunds` still reports `has_more: false`
+   and is not paged.
+6. **`pending_balance` is always 0.** paybox settles instantly, so there is no
+   window in which money is collected but unavailable. Inventing a figure here
+   would invite a developer to build a "wait for funds" flow around a wait that
+   does not exist.
+7. **A bulk payout is not atomic.** Each entry becomes a real transfer that
+   reserves against the balance and can fail on its own, which is how Kora
+   behaves — the batch summary reports the mix, and only reads `complete` once
+   nothing is still in flight.
+8. **`/misc/banks/resolve` always succeeds** and returns a synthetic name. The
    emulator resolves no real account at any real bank (spec §29).
-7. **Refund status is `success`, not `completed`.** That is Kora's own
+9. **Refund status is `success`, not `completed`.** That is Kora's own
    vocabulary — it differs from Flutterwave's, and the difference is preserved.
 
 ## Safety
