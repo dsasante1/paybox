@@ -22,7 +22,9 @@ Coverage for each is documented honestly in `docs/paystack.md`, `docs/stripe.md`
 
 **Adding a route therefore means adding a manifest entry** — the build will tell you if you forget.
 
-`.github/workflows/ci.yml` runs typecheck, lint and the full suite on every pull request and every push to `main`, across Node 22.5 (the floor `node:sqlite` sets) and Node 24. The coverage contract and the determinism rules only protect anything if they actually run.
+`.github/workflows/ci.yml` runs typecheck, lint and the full suite on every pull request and every push to `main`, across Node 22 and Node 24. The coverage contract and the determinism rules only protect anything if they actually run.
+
+**CI reports failures; GitHub does not block them.** Branch protection and rulesets both need a public repo or a paid plan, and this one is private on a free plan — `docs/ci.md` has the two ways to fix that properly. Until then two client-side guards stand in, and both are guards rather than gates: `npm run ship -- <pr>` merges only when every check has passed (and refuses a PR with *no* checks), and `.githooks/pre-push` refuses a direct push to `main`. `npm install` wires the hook up via `core.hooksPath`.
 
 Adding Stripe was the test of the injection design, and it needed three new seams rather than a rewrite: a `retry` transition flag (Stripe's PaymentIntent has no terminal failure), a clock-aware webhook signature with per-attempt re-signing, and webhook fan-out (one canonical event can be several provider events). All three are in `docs/architecture.md`.
 

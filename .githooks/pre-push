@@ -1,0 +1,40 @@
+#!/bin/sh
+# Refuse to push straight to main.
+#
+# Everything on this repo is meant to go through a pull request so CI verifies
+# it first. Branch protection would enforce that on GitHub's side, but it needs
+# a public repo or a paid plan (see docs/ci.md), so this catches the local half.
+#
+# It is a guard, not a gate: `git push --no-verify` bypasses it, and anyone who
+# has not run `npm install` will not have it at all. The point is to make the
+# accidental push impossible and the deliberate one deliberate.
+#
+# This exists because a force-push to main did happen on this repo — recovering
+# from it was fine, but only because someone noticed.
+
+protected_branch='main'
+remote_ref_prefix='refs/heads/'
+
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  branch=${remote_ref#"$remote_ref_prefix"}
+  [ "$branch" = "$protected_branch" ] || continue
+
+  cat >&2 <<MESSAGE
+
+  ✗ Refusing to push directly to $protected_branch.
+
+    Open a pull request so CI verifies the change first:
+
+      git switch -c my-change
+      git push -u origin my-change
+      gh pr create
+      npm run ship -- <pr-number>
+
+    If you genuinely need to bypass this, use --no-verify and say why in the
+    commit or the PR.
+
+MESSAGE
+  exit 1
+done
+
+exit 0
