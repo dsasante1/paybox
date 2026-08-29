@@ -19,7 +19,9 @@
     "test:watch": "vitest",
     "typecheck": "tsc -b --pretty",
     "lint": "eslint .",
-    "coverage:table": "tsx scripts/coverage-table.ts"
+    "coverage:table": "tsx scripts/coverage-table.ts",
+    "ship": "node scripts/ship.mjs",
+    "prepare": "git config core.hooksPath .githooks || true"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
