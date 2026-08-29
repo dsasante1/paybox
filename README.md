@@ -58,8 +58,16 @@ adapter can see another and the engine sees none of them.
 ## Zero to a simulated payment
 
 ```bash
-npm install
-npm start
+npx paybox-emulator start
+```
+
+No clone, no database server, no compiler — Node 22.5 or newer is the only
+requirement. `npm install -g paybox-emulator` puts the `paybox` command on your
+PATH for everything below; each command also works as `npx paybox-emulator …`.
+Without Node, the same thing as a container:
+
+```bash
+docker run --rm -p 127.0.0.1:8080:8080 dsasante1/paybox
 ```
 
 ```
@@ -113,8 +121,8 @@ Open that URL — it is a real checkout page with the test instruments listed on
 it. Or drive it from the CLI:
 
 ```bash
-npm run cli -- webhook add http://localhost:3000/webhooks/paystack
-npm run cli -- payment success order_1
+paybox webhook add http://localhost:3000/webhooks/paystack
+paybox payment success order_1
 ```
 
 Your app receives a signed `charge.success` webhook, and `verify` now returns
@@ -126,27 +134,27 @@ Your app receives a signed `charge.success` webhook, and `verify` now returns
 
 ```bash
 # A mobile-money charge answers immediately; the customer has not approved yet.
-npm run cli -- payment create --amount 25000 --method mobile_money --reference momo_1
+paybox payment create --amount 25000 --method mobile_money --reference momo_1
 #   → requires_action, "Please approve the payment prompt on your phone"
 
 # Fast-forward instead of waiting. Every job that comes due runs before this returns.
-npm run cli -- time advance 5s
+paybox time advance 5s
 #   → successful, charge.success delivered
 
 # Make every webhook fail, then watch the retry ladder run to exhaustion.
-npm run cli -- webhook fail http_500
-npm run cli -- time advance 2h
-npm run cli -- webhook list
+paybox webhook fail http_500
+paybox time advance 2h
+paybox webhook list
 
 # Replay a delivery with a byte-identical signed payload — does your handler
 # double-credit the customer?
-npm run cli -- webhook replay whd_...
+paybox webhook replay whd_...
 
 # Duplicate and reorder every webhook.
-npm run cli -- webhook chaos --duplicate true --out-of-order true
+paybox webhook chaos --duplicate true --out-of-order true
 
 # Hold the API response open so the webhook lands before the call returns.
-npm run cli -- network latency 3000
+paybox network latency 3000
 ```
 
 ---
@@ -161,7 +169,8 @@ npm run cli -- network latency 3000
 | [Webhooks](docs/webhooks.md) | Signing, retries, replay, failure simulation |
 | [Scenarios](docs/scenarios.md) | Reusable multi-step flows |
 | [CLI](docs/cli.md) | Every command |
-| [Docker](docs/docker.md) | Container and compose |
+| [Docker](docs/docker.md) | The published image, compose, CI services |
+| [Releasing](docs/releasing.md) | How a tag becomes an npm package and a container image |
 | [Security](SECURITY.md) | The safety guarantees and their limits |
 
 ---
@@ -169,9 +178,15 @@ npm run cli -- network latency 3000
 ## Development
 
 ```bash
-npm test           # 54 tests: unit, integration, provider compatibility
-npm run typecheck  # strict, project references
-npm run lint       # includes the determinism rules
+npm install
+npm start                        # the server, straight from the TypeScript source
+npm run cli -- time advance 5s   # the CLI, likewise — nothing is built
+
+npm test               # unit, integration, provider compatibility
+npm run typecheck      # strict, project references
+npm run lint           # includes the determinism rules
+npm run build          # bundles the publishable package into apps/paybox/dist
+npm run smoke:package  # installs that package into an empty directory and runs it
 ```
 
 The lint rules are load-bearing, not cosmetic: `Date.now()`, `new Date()`,
@@ -179,6 +194,10 @@ The lint rules are load-bearing, not cosmetic: `Date.now()`, `new Date()`,
 Everything reads from an injected `Clock` and a seeded `Random`. That is what
 makes `time advance` work and what makes `PAYBOX_SEED=x` reproduce a run
 byte for byte.
+
+A release is a tag. Pushing `v0.2.0` runs the full verification again and then
+publishes that one version to npm, to Docker Hub and as a GitHub Release from a
+single workflow — [docs/releasing.md](docs/releasing.md) has the one-time setup.
 
 ## Design notes
 

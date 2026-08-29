@@ -3,5 +3,12 @@ node_modules
 **/dist
 data
 *.tsbuildinfo
+*.tgz
 .git
+.github
+.githooks
+docs
+examples
+tests
+**/*.test.ts
 idea.txt

@@ -72,3 +72,67 @@ jobs:
       # README's generated coverage table has gone stale.
       - name: Test
         run: npm test
+
+      # Bundles the publishable package, and fails if apps/paybox/package.json
+      # and the bundle's actual imports disagree in either direction
+      # (scripts/build.mjs) — a missing dependency would otherwise surface as
+      # a crash on a developer's machine after `npx`.
+      - name: Build
+        run: npm run build
+
+      # Packs the package, installs the tarball into an empty directory with
+      # production dependencies only, and drives the `paybox` binary that
+      # produced. Everything above tests the source tree; this is the only
+      # step that tests what `npx paybox-emulator` actually hands a developer.
+      # On the 22 lane it also proves the launcher keeps node:sqlite's
+      # ExperimentalWarning off stderr.
+      - name: Package smoke test
+        run: npm run smoke:package
+
+  # The Dockerfile is a second artifact with its own way of going stale: it
+  # once listed the workspace manifests to copy by hand, stopped at one
+  # provider of five, and nothing noticed because nothing built it. Now every
+  # pull request builds the image, boots it, waits for /api/health, and runs
+  # the CLI inside it. Single platform here; the release workflow does the
+  # multi-arch build and shares this job's layer cache.
+  image:
+    name: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          load: true
+          tags: paybox:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Boot, wait for health, drive the CLI inside the container
+        run: |
+          docker run -d --name paybox -p 127.0.0.1:8080:8080 -e PAYBOX_DATABASE=:memory: paybox:ci
+          healthy=0
+          for _ in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8080/api/health >/dev/null; then healthy=1; break; fi
+            sleep 0.5
+          done
+          echo "--- container output ---"
+          docker logs paybox
+          echo "------------------------"
+          if [ "$healthy" != 1 ]; then
+            echo "::error::the image did not answer /api/health within 30s"
+            exit 1
+          fi
+          docker exec paybox paybox status
+          docker exec paybox paybox time advance 5s
+          if docker logs paybox 2>&1 | grep -q ExperimentalWarning; then
+            echo "::error::node:sqlite's ExperimentalWarning reached stderr; the launcher should keep it off"
+            exit 1
+          fi

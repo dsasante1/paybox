@@ -19,8 +19,5 @@
     "@paybox/kora": "0.1.0",
     "@paybox/wewire": "0.1.0",
     "@paybox/wise": "0.1.0"
-  },
-  "bin": {
-    "paybox": "./src/main.ts"
   }
 }

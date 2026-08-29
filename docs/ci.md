@@ -5,11 +5,25 @@
 `.github/workflows/ci.yml` runs on every pull request and every push to `main`:
 
 ```
-npm ci  →  npm run typecheck  →  npm run lint  →  npm test
+npm ci  →  typecheck  →  lint  →  test  →  build  →  package smoke test
 ```
 
 on **Node 22 and Node 24**, with `fail-fast: false` so a failure reports every
 affected version rather than just the first.
+
+The last two steps are about the artifact rather than the source. `npm run
+build` bundles `apps/paybox` and fails if its dependency list disagrees with
+what the bundle actually imports; `npm run smoke:package` installs the packed
+tarball into an empty directory and drives the `paybox` binary it produced.
+Everything before them tests the source tree through workspace symlinks with
+every devDependency present; the smoke test is the only step that tests what
+`npx paybox-emulator` hands a developer.
+
+A second job, `image`, builds `docker/Dockerfile`, boots the result, waits for
+`/api/health` and runs the CLI inside the container. The Dockerfile once went
+stale without anyone noticing — it listed the workspace manifests to copy by
+hand and stopped at one provider of five — because nothing built it. It is not
+in the matrix: the image pins its own Node.
 
 The matrix is not decoration. Its first run caught a real difference: on Node
 22.5.0 exactly, typecheck and lint passed but the test runner could not start —
@@ -22,39 +36,31 @@ Running that suite is what makes the other guarantees real. The coverage
 contract (`tests/coverage-drift.test.ts`) and the determinism rules
 (`eslint.config.js`) only protect anything if something runs them.
 
-## What is *not* enforced, and why
+## What GitHub enforces
 
-**GitHub cannot block a red merge on this repo.** Branch protection and
-rulesets both return:
+`main` is protected. A pull request cannot merge until `verify (node 22)` and
+`verify (node 24)` have passed; force-pushes to `main` and deletion of it are
+refused; and *"Do not allow bypassing the above settings"* is on, so the rule
+binds administrators too — without that box an admin can still merge red,
+which is most of the gap.
 
-```
-403  Upgrade to GitHub Pro or make this repository public to enable this feature.
-```
+Deliberately **off**: *require pull request reviews*. On a solo repo it only
+means reaching for `--admin` to get past it, and a rule everyone routinely
+bypasses is worse than no rule, because it teaches you to ignore the ones that
+matter.
 
-The repository is private on a free plan, which gates both. So CI *reports*
-failures; it does not *prevent* anyone merging past them.
+This was not always available. Branch protection needs a public repository or
+a paid plan, and this one was private on a free plan until it was opened up;
+the two client-side guards below date from then and remain worth having.
 
-Two ways to close that properly, whenever it is worth it:
+Releases are a separate workflow: a `v*` tag runs
+`.github/workflows/release.yml`, which repeats the full verification before it
+publishes anything. See [releasing.md](releasing.md).
 
-| | What it costs | What you get |
-| --- | --- | --- |
-| Make the repository public | Nothing, if the code can be public | Branch protection and rulesets, free |
-| GitHub Pro | A few dollars a month | The same, staying private |
+## What else guards this repo
 
-Either one, then: **Settings → Branches → Add rule** on `main`, require the
-status checks `verify (node 22)` and `verify (node 24)`, and tick *"Do not
-allow bypassing the above settings"* — without that last box an admin can still
-merge red, which is most of the gap.
-
-Deliberately **not** recommended on a solo repo: *require pull request
-reviews*. With one contributor it only means reaching for `--admin` to get past
-it, and a rule everyone routinely bypasses is worse than no rule, because it
-teaches you to ignore the ones that matter.
-
-## What guards this repo today
-
-Client-side, because that is what is available. Both are **guards, not gates** —
-each can be bypassed, deliberately, by someone who means to.
+Client-side, and older than the protection above. Both are **guards, not
+gates** — each can be bypassed, deliberately, by someone who means to.
 
 ### `npm run ship -- <pr>`
 

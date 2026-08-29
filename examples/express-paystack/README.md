@@ -4,9 +4,9 @@ A complete integration. The only production difference is `PAYSTACK_BASE_URL`.
 
 ```bash
 # terminal 1
-paybox start
+npx paybox-emulator start
 
-# terminal 2
+# terminal 2  (npm install -g paybox-emulator puts `paybox` on your PATH)
 paybox webhook add http://localhost:3000/webhooks/paystack
 
 # terminal 3

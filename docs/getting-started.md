@@ -7,9 +7,26 @@ Node 22.5 or newer. Nothing else — no database server, no Redis, no compiler.
 ## Install and run
 
 ```bash
-npm install
-npm start
+npx paybox-emulator start
 ```
+
+That fetches the package on first use and starts the emulator in the
+foreground. To keep the `paybox` command on your PATH:
+
+```bash
+npm install -g paybox-emulator
+paybox start
+```
+
+Without Node at all, the same thing as a container — see [Docker](docker.md):
+
+```bash
+docker run --rm -p 127.0.0.1:8080:8080 dsasante1/paybox
+```
+
+From a clone of the repository, `npm install && npm start` runs the server
+straight from the TypeScript source and `npm run cli -- <command>` is the CLI;
+nothing is built in that loop.
 
 The banner prints your API URL, dashboard URL, and a generated local test key
 pair. The keys are regenerated on each start and are not real credentials.
@@ -77,12 +94,16 @@ PAYBOX_DATABASE=:memory: \
 PAYBOX_FREEZE_CLOCK=1 \
 PAYBOX_START_AT=2026-01-01T00:00:00Z \
 PAYBOX_SEED=$CI_JOB_ID \
-paybox start &
+npx paybox-emulator start &
 ```
 
 A frozen clock plus a fixed seed makes every id, timestamp and jitter value
 reproducible, so tests can assert exact values instead of matching patterns.
 Drive time forward explicitly with `paybox time advance`.
+
+On a runner without Node, or alongside a non-Node application, run the
+container as a service instead — [Docker](docker.md#ci) has the GitHub Actions
+block.
 
 ## Provider SDKs
 

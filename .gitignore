@@ -4,6 +4,11 @@ data/
 *.tsbuildinfo
 .env
 
+# Build output of scripts/build.mjs besides dist/: the LICENCE copy npm needs
+# inside the package directory, and anything `npm pack` left behind.
+apps/paybox/LICENSE
+*.tgz
+
 # The design brief that drove this build. Kept locally and cited by source
 # comments as `spec §N`, but not published: it is a working document, not
 # documentation. docs/spec-references.md indexes the sections the code cites.

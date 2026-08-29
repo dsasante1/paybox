@@ -5,6 +5,8 @@ npm install
 npm test
 npm run typecheck
 npm run lint
+npm run build          # the publishable package; fails on dependency drift
+npm run smoke:package  # installs that package somewhere empty and runs it
 ```
 
 ## Non-negotiables
@@ -59,6 +61,22 @@ curl -H "Authorization: Bearer sk_test_local_x" \
 
 Seeding 520 payments takes about a second. Use it whenever you touch an
 endpoint that aggregates, exports, or resolves an id by scanning.
+
+## Adding a runtime dependency
+
+The workspace packages are private and export TypeScript source; what
+developers install is `apps/paybox`, a bundle of the `@paybox/*` code with
+third-party packages left as ordinary dependencies. So a new runtime dependency
+goes in two places: the workspace that imports it, and
+`apps/paybox/package.json`. `npm run build` fails if those disagree in either
+direction — a package the bundle imports but does not declare would only show
+up as a crash on someone's machine after `npx`.
+
+## Releasing
+
+A release is a tag: `v0.2.0` runs [docs/releasing.md](docs/releasing.md)'s
+workflow, which verifies everything again and then publishes to npm, Docker
+Hub and a GitHub Release. That document also has the one-time setup.
 
 ## Tests
 
