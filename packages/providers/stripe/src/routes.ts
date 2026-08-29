@@ -23,6 +23,10 @@ import { stripeInstrumentResolver } from './instruments.js';
 import { stripeAuthorizationMinter, stripeInstrumentDraft } from './authorization.js';
 import { fromStripeRecurring, fromStripeStatus } from './status.js';
 import {
+  accountCreateSchema,
+  accountLinkCreateSchema,
+  accountRejectSchema,
+  accountUpdateSchema,
   chargeCaptureSchema,
   chargeCreateSchema,
   chargeUpdateSchema,
@@ -60,11 +64,15 @@ import {
 import {
   renderCheckoutPage,
   renderCheckoutResult,
+  renderOnboardingPage,
+  renderOnboardingResult,
   renderSetupAuthenticationPage,
   renderSetupResult,
 } from './checkout.js';
 import {
   list,
+  serializeAccount,
+  serializeAccountLink,
   serializeCharge,
   serializeCheckoutSession,
   serializeInvoice,
@@ -584,6 +592,227 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
       return reply.send(list(data, '/v1/payment_intents', hasMore));
     },
   );
+
+  /* ---------------------------------------------------------------- *
+   * Connect: connected accounts
+   *
+   * A connected account is the canonical Subaccount -- the same resource
+   * Paystack's marketplace uses -- plus an onboarding lifecycle, because at
+   * Stripe an account created through the API cannot charge anything until it
+   * has submitted details. That gap is the most common thing a Connect
+   * integration ships broken, so the emulator reproduces it rather than
+   * handing back an account that works immediately.
+   * ---------------------------------------------------------------- */
+
+  /** Stripe's onboarding links expire; an hour is its documented window. */
+  const ACCOUNT_LINK_LIFETIME_MS = 60 * 60_000;
+
+  async function loadAccount(handle: string) {
+    const canonical = handle.replace(/^acct_/, 'sac_');
+    const subaccount =
+      (await storage.subaccounts.byId(canonical)) ?? (await storage.subaccounts.byId(handle));
+    if (subaccount && subaccount.provider === PROVIDER) return subaccount;
+    throw new PayboxError('not_found', `No such account: '${handle}'.`);
+  }
+
+  /** Which capabilities were asked for, as the account's capability map. */
+  function requestedCapabilities(
+    requested: Record<string, { requested?: boolean | undefined } | undefined> | undefined,
+    active: boolean,
+  ): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const [name, value] of Object.entries(requested ?? {})) {
+      if (value?.requested === false) continue;
+      out[name] = active ? 'active' : 'inactive';
+    }
+    return out;
+  }
+
+  fastify.post('/v1/accounts', async (request, reply) => {
+    authenticate(request);
+    const body = accountCreateSchema.parse(request.body ?? {});
+    const currency = (body.default_currency ?? 'usd').toUpperCase();
+    if (!isSupportedCurrency(currency)) {
+      throw new PayboxError(
+        'unsupported_currency',
+        `The currency ${body.default_currency} is not supported.`,
+      );
+    }
+
+    const account = await engine.createSubaccount({
+      provider: PROVIDER,
+      businessName: body.business_profile?.name ?? body.email ?? 'Connected account',
+      // Synthetic, and generated rather than accepted: no real bank details
+      // may enter the emulator (spec §29).
+      settlementBank: 'TEST BANK',
+      accountNumber: ids.token(10).replace(/\D/g, '').padEnd(10, '0').slice(0, 10),
+      percentageCharge: 0,
+      currency,
+      countryCode: (body.country ?? 'US').toUpperCase(),
+      accountType: body.type ?? 'standard',
+      primaryContactEmail: body.email ?? null,
+      // The load-bearing line: a new Stripe account is *not* usable yet.
+      onboarded: false,
+      capabilities: requestedCapabilities(body.capabilities, false),
+      metadata: {
+        ...(body.metadata ?? {}),
+        ...(body.business_type ? { business_type: body.business_type } : {}),
+        ...(body.business_profile?.url ? { business_url: body.business_profile.url } : {}),
+      },
+    });
+
+    return reply.send(serializeAccount(account));
+  });
+
+  fastify.get<{ Params: { account: string } }>('/v1/accounts/:account', async (request, reply) => {
+    authenticate(request);
+    return reply.send(serializeAccount(await loadAccount(request.params.account)));
+  });
+
+  fastify.post<{ Params: { account: string } }>(
+    '/v1/accounts/:account',
+    async (request, reply) => {
+      authenticate(request);
+      const body = accountUpdateSchema.parse(request.body ?? {});
+      const account = await loadAccount(request.params.account);
+
+      const capabilities = body.capabilities
+        ? {
+            ...account.capabilities,
+            ...requestedCapabilities(body.capabilities, account.chargesEnabled),
+          }
+        : account.capabilities;
+
+      const updated = await engine.updateSubaccount(account.id, {
+        ...(body.email !== undefined ? { primaryContactEmail: body.email } : {}),
+        ...(body.business_profile?.name ? { businessName: body.business_profile.name } : {}),
+        ...(body.default_currency
+          ? { currency: body.default_currency.toUpperCase() }
+          : {}),
+        capabilities,
+        metadata: {
+          ...account.metadata,
+          ...(body.metadata ?? {}),
+          ...(body.business_type ? { business_type: body.business_type } : {}),
+          ...(body.business_profile?.url ? { business_url: body.business_profile.url } : {}),
+        },
+      });
+      return reply.send(serializeAccount(updated));
+    },
+  );
+
+  fastify.post<{ Params: { account: string } }>(
+    '/v1/accounts/:account/reject',
+    async (request, reply) => {
+      authenticate(request);
+      const body = accountRejectSchema.parse(request.body);
+      const account = await loadAccount(request.params.account);
+      return reply.send(
+        serializeAccount(await engine.rejectSubaccount(account.id, body.reason)),
+      );
+    },
+  );
+
+  /**
+   * Deleting an account marks it rejected rather than removing it.
+   *
+   * Same reasoning as a deleted invoice: the event log is append-only, and an
+   * account that vanished would leave every charge it took pointing at
+   * nothing. docs/stripe.md records the difference.
+   */
+  fastify.delete<{ Params: { account: string } }>(
+    '/v1/accounts/:account',
+    async (request, reply) => {
+      authenticate(request);
+      const account = await loadAccount(request.params.account);
+      await engine.rejectSubaccount(account.id, 'other');
+      return reply.send({
+        id: stripeId('acct', account.id),
+        object: 'account',
+        deleted: true,
+      });
+    },
+  );
+
+  fastify.get<{ Querystring: Record<string, string> }>('/v1/accounts', async (request, reply) => {
+    authenticate(request);
+    const query = listQuerySchema.parse(request.query);
+    const { page, hasMore } = await paginate(
+      query,
+      (limit, offset) => storage.subaccounts.list({ provider: PROVIDER, limit, offset }),
+      (account) => stripeId('acct', account.id),
+    );
+    return reply.send(list(page.map(serializeAccount), '/v1/accounts', hasMore));
+  });
+
+  /* ---------------------------------------------------------------- *
+   * Connect: onboarding links
+   * ---------------------------------------------------------------- */
+
+  fastify.post('/v1/account_links', async (request, reply) => {
+    authenticate(request);
+    const body = accountLinkCreateSchema.parse(request.body);
+    const account = await loadAccount(body.account);
+
+    const createdISO = clock.nowISO();
+    const expiresISO = new Date(clock.now() + ACCOUNT_LINK_LIFETIME_MS).toISOString();
+    const accountId = stripeId('acct', account.id);
+    const query = body.return_url
+      ? `?return_url=${encodeURIComponent(body.return_url)}`
+      : '';
+
+    return reply.send(
+      serializeAccountLink({
+        url: `${options.baseUrl}${options.basePath}/connect/onboard/${accountId}${query}`,
+        createdISO,
+        expiresISO,
+      }),
+    );
+  });
+
+  fastify.get<{ Params: { account: string }; Querystring: { return_url?: string } }>(
+    '/connect/onboard/:account',
+    async (request, reply) => {
+      const account = await loadAccount(request.params.account);
+      if (account.detailsSubmitted) {
+        return reply.type('text/html').send(
+          renderOnboardingResult({
+            completed: account.chargesEnabled,
+            redirectUrl: request.query.return_url ?? null,
+          }),
+        );
+      }
+      const requirements = account.requirements as { currently_due?: unknown };
+      return reply.type('text/html').send(
+        renderOnboardingPage({
+          accountId: stripeId('acct', account.id),
+          businessName: account.businessName,
+          basePath: options.basePath,
+          requirements: Array.isArray(requirements.currently_due)
+            ? (requirements.currently_due as string[])
+            : [],
+        }),
+      );
+    },
+  );
+
+  fastify.post<{
+    Params: { account: string };
+    Querystring: { return_url?: string };
+    Body: { outcome?: string };
+  }>('/connect/onboard/:account/complete', async (request, reply) => {
+    const account = await loadAccount(request.params.account);
+    const completed = (request.body?.outcome ?? 'complete') !== 'abandon';
+    if (completed && !account.detailsSubmitted) {
+      await engine.completeOnboarding(account.id);
+    }
+    return reply.type('text/html').send(
+      renderOnboardingResult({
+        completed,
+        redirectUrl: request.query.return_url ?? null,
+      }),
+    );
+  });
 
   /* ---------------------------------------------------------------- *
    * SetupIntents

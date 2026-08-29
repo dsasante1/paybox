@@ -326,6 +326,13 @@ export interface SubaccountRow {
   primary_contact_phone: string | null;
   currency: string;
   active: number;
+  account_type: string | null;
+  country_code: string;
+  charges_enabled: number;
+  payouts_enabled: number;
+  details_submitted: number;
+  requirements: string;
+  capabilities: string;
   metadata: string;
   created_at: string;
   updated_at: string;

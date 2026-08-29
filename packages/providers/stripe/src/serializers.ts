@@ -10,6 +10,7 @@ import type {
   Plan,
   Product,
   Refund,
+  Subaccount,
   Subscription,
   SubscriptionItem,
 } from '@paybox/shared';
@@ -848,5 +849,105 @@ export function serializeInvoice(
     subscription: options.subscription ? stripeId('sub', options.subscription.id) : null,
     subtotal: invoice.amount,
     total: invoice.amount,
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * Connect
+ * ------------------------------------------------------------------ */
+
+/**
+ * A connected account.
+ *
+ * `charges_enabled` and `requirements` are the fields that matter: a freshly
+ * created account has the first false and the second non-empty, and stays that
+ * way until it onboards. An emulator that handed back a working account would
+ * hide the exact failure a Connect integration most often ships with.
+ */
+export function serializeAccount(subaccount: Subaccount) {
+  const requirements = subaccount.requirements as Record<string, unknown>;
+  return {
+    id: stripeId('acct', subaccount.id),
+    object: 'account' as const,
+    business_profile: {
+      mcc: null,
+      name: subaccount.businessName,
+      support_address: null,
+      support_email: subaccount.primaryContactEmail,
+      support_phone: subaccount.primaryContactPhone,
+      support_url: null,
+      url: (subaccount.metadata.business_url as string | undefined) ?? null,
+    },
+    business_type: (subaccount.metadata.business_type as string | undefined) ?? null,
+    capabilities: subaccount.capabilities,
+    charges_enabled: subaccount.chargesEnabled,
+    country: subaccount.countryCode,
+    created: unix(subaccount.createdAt),
+    default_currency: subaccount.currency.toLowerCase(),
+    details_submitted: subaccount.detailsSubmitted,
+    email: subaccount.primaryContactEmail,
+    external_accounts: {
+      object: 'list' as const,
+      data: subaccount.accountNumber
+        ? [
+            {
+              id: stripeId('ba', subaccount.id),
+              object: 'bank_account' as const,
+              account: stripeId('acct', subaccount.id),
+              // Synthetic, like every account number in the emulator: no money
+              // can move through it (spec §29).
+              account_holder_name: subaccount.businessName,
+              bank_name: subaccount.settlementBank,
+              country: subaccount.countryCode,
+              currency: subaccount.currency.toLowerCase(),
+              default_for_currency: true,
+              last4: subaccount.accountNumber.slice(-4),
+              status: 'new',
+            },
+          ]
+        : [],
+      has_more: false,
+      url: `/v1/accounts/${stripeId('acct', subaccount.id)}/external_accounts`,
+    },
+    livemode: false,
+    metadata: subaccount.metadata,
+    payouts_enabled: subaccount.payoutsEnabled,
+    requirements: {
+      alternatives: requirements.alternatives ?? [],
+      current_deadline: requirements.current_deadline ?? null,
+      currently_due: requirements.currently_due ?? [],
+      disabled_reason: requirements.disabled_reason ?? null,
+      errors: requirements.errors ?? [],
+      eventually_due: requirements.eventually_due ?? [],
+      past_due: requirements.past_due ?? [],
+      pending_verification: requirements.pending_verification ?? [],
+    },
+    settings: {
+      payouts: { schedule: { interval: 'manual' }, statement_descriptor: null },
+    },
+    tos_acceptance: {
+      date: subaccount.detailsSubmitted ? unix(subaccount.updatedAt) : null,
+    },
+    type: subaccount.accountType ?? 'standard',
+  };
+}
+
+/**
+ * An onboarding link.
+ *
+ * Short-lived at Stripe and short-lived here: the expiry is real virtual time,
+ * so `time advance` past it and the link stops working, which is the failure a
+ * developer needs to have seen once.
+ */
+export function serializeAccountLink(options: {
+  url: string;
+  createdISO: string;
+  expiresISO: string;
+}) {
+  return {
+    object: 'account_link' as const,
+    created: unix(options.createdISO),
+    expires_at: unix(options.expiresISO),
+    url: options.url,
   };
 }

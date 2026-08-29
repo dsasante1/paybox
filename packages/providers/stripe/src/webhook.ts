@@ -7,6 +7,7 @@ import type {
 } from '@paybox/webhooks';
 import { stripeSignatureHeaders } from './signature.js';
 import {
+  serializeAccount,
   serializeCharge,
   serializeCheckoutSession,
   serializeCustomer,
@@ -71,6 +72,10 @@ const EVENT_MAP: Record<string, readonly string[]> = {
   'authorization.created': ['payment_method.attached'],
   'authorization.attached': ['payment_method.attached'],
   'authorization.detached': ['payment_method.detached'],
+  // Connect. Note there is no `account.created`: Stripe does not send one,
+  // because the platform made the account and already knows.
+  'subaccount.created': ['account.updated'],
+  'subaccount.updated': ['account.updated'],
   'subscription.created': ['customer.subscription.created'],
   'subscription.updated': ['customer.subscription.updated'],
   'subscription.non_renewing': ['customer.subscription.updated'],
@@ -101,9 +106,11 @@ function subjectFor(
   | 'subscription'
   | 'invoice'
   | 'setup'
+  | 'account'
   | 'payment_method' {
   if (eventType.startsWith('customer.subscription.')) return 'subscription';
   if (eventType.startsWith('setup_intent.')) return 'setup';
+  if (eventType.startsWith('account.')) return 'account';
   if (eventType.startsWith('payment_method.')) return 'payment_method';
   if (eventType.startsWith('invoice.')) return 'invoice';
   if (eventType.startsWith('checkout.session.')) return 'session';
@@ -285,6 +292,11 @@ export class StripeWebhookFormatter implements WebhookFormatter {
         ? await storage.customers.byId(authorization.customerId)
         : null;
       return serializePaymentMethod(authorization, customer);
+    }
+
+    if (event.resourceType === 'subaccount') {
+      const subaccount = await storage.subaccounts.byId(event.resourceId);
+      return subaccount ? serializeAccount(subaccount) : null;
     }
 
     if (event.resourceType === 'customer') {

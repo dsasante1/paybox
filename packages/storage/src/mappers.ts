@@ -784,6 +784,13 @@ export const toSubaccount = (row: SubaccountRow): Subaccount => ({
   primaryContactPhone: row.primary_contact_phone,
   currency: row.currency,
   active: row.active === 1,
+  accountType: row.account_type,
+  countryCode: row.country_code,
+  chargesEnabled: row.charges_enabled === 1,
+  payoutsEnabled: row.payouts_enabled === 1,
+  detailsSubmitted: row.details_submitted === 1,
+  requirements: readJson(row.requirements),
+  capabilities: readJson(row.capabilities),
   metadata: readJson(row.metadata),
   createdAt: row.created_at,
   updatedAt: row.updated_at,
@@ -803,6 +810,13 @@ export const fromSubaccount = (a: Subaccount): SubaccountRow => ({
   primary_contact_phone: a.primaryContactPhone,
   currency: a.currency,
   active: a.active ? 1 : 0,
+  account_type: a.accountType,
+  country_code: a.countryCode,
+  charges_enabled: a.chargesEnabled ? 1 : 0,
+  payouts_enabled: a.payoutsEnabled ? 1 : 0,
+  details_submitted: a.detailsSubmitted ? 1 : 0,
+  requirements: writeJson(a.requirements),
+  capabilities: writeJson(a.capabilities),
   metadata: writeJson(a.metadata),
   created_at: a.createdAt,
   updated_at: a.updatedAt,
@@ -823,6 +837,16 @@ export function subaccountPatch(patch: Partial<Subaccount>): Partial<SubaccountR
     out.primary_contact_phone = patch.primaryContactPhone;
   }
   if (patch.active !== undefined) out.active = patch.active ? 1 : 0;
+  if (patch.accountType !== undefined) out.account_type = patch.accountType;
+  if (patch.countryCode !== undefined) out.country_code = patch.countryCode;
+  if (patch.chargesEnabled !== undefined) out.charges_enabled = patch.chargesEnabled ? 1 : 0;
+  if (patch.payoutsEnabled !== undefined) out.payouts_enabled = patch.payoutsEnabled ? 1 : 0;
+  if (patch.detailsSubmitted !== undefined) {
+    out.details_submitted = patch.detailsSubmitted ? 1 : 0;
+  }
+  if (patch.requirements !== undefined) out.requirements = writeJson(patch.requirements);
+  if (patch.capabilities !== undefined) out.capabilities = writeJson(patch.capabilities);
+  if (patch.currency !== undefined) out.currency = patch.currency;
   if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
   if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
   return out;

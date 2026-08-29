@@ -704,4 +704,26 @@ export const MIGRATIONS: readonly Migration[] = [
         WHERE signature IS NOT NULL;
     `,
   },
+  {
+    id: '0014_connected_accounts',
+    sql: `
+      -- A connected account is not usable the moment it is created.
+      --
+      -- At Stripe it must submit details first; until then charges_enabled is
+      -- false and requirements says what is missing. That gap is the single
+      -- most common thing a Connect integration gets wrong in production, so
+      -- the emulator models it rather than handing back a working account.
+      --
+      -- Existing rows are Paystack subaccounts, which have no such lifecycle
+      -- and are usable at once: they backfill to fully enabled, so nothing
+      -- about Paystack's behaviour changes.
+      ALTER TABLE subaccounts ADD COLUMN account_type TEXT;
+      ALTER TABLE subaccounts ADD COLUMN country_code TEXT NOT NULL DEFAULT 'NG';
+      ALTER TABLE subaccounts ADD COLUMN charges_enabled INTEGER NOT NULL DEFAULT 1;
+      ALTER TABLE subaccounts ADD COLUMN payouts_enabled INTEGER NOT NULL DEFAULT 1;
+      ALTER TABLE subaccounts ADD COLUMN details_submitted INTEGER NOT NULL DEFAULT 1;
+      ALTER TABLE subaccounts ADD COLUMN requirements TEXT NOT NULL DEFAULT '{}';
+      ALTER TABLE subaccounts ADD COLUMN capabilities TEXT NOT NULL DEFAULT '{}';
+    `,
+  },
 ];

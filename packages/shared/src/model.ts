@@ -442,6 +442,14 @@ export interface InvoiceItem {
  *
  * Canonical: Stripe calls it a connected account, Flutterwave a subaccount.
  * The bank details are synthetic and nothing is ever settled to them for real.
+ *
+ * The onboarding fields exist because at Stripe an account is **not usable the
+ * moment it is created**. It has to submit details first, and until it does,
+ * `chargesEnabled` is false and `requirements` says what is missing. That gap
+ * is the single most common thing a Connect integration gets wrong in
+ * production, so the emulator models it rather than handing back an account
+ * that works immediately. Paystack has no such lifecycle, and its adapter
+ * creates subaccounts already enabled.
  */
 export interface Subaccount {
   id: string;
@@ -458,6 +466,18 @@ export interface Subaccount {
   primaryContactPhone: string | null;
   currency: string;
   active: boolean;
+  /** How much of the relationship the platform owns. Null where unmodelled. */
+  accountType: string | null;
+  countryCode: string;
+  /** False until onboarding completes: the account cannot accept payments. */
+  chargesEnabled: boolean;
+  /** False until onboarding completes: money cannot leave for a bank. */
+  payoutsEnabled: boolean;
+  detailsSubmitted: boolean;
+  /** What the account still owes before it can transact. */
+  requirements: Metadata;
+  /** Which capabilities are active, e.g. `card_payments`, `transfers`. */
+  capabilities: Metadata;
   metadata: Metadata;
   createdAt: string;
   updatedAt: string;

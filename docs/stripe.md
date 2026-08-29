@@ -81,7 +81,13 @@ The **Charge** is different: charges are immutable attempt records, and
 | `POST /v1/setup_intents/{id}/cancel` | **Compatible** | |
 | `GET /stripe/setup/{id}` | **Emulator-only** | The step-up page `next_action` points at. |
 | `POST /v1/setup_intents/{id}/verify_microdeposits` | **Not supported** | No bank-debit methods. |
-| Connect, Terminal, Issuing, Radar, Tax, everything else | **Not supported** | Out of scope. |
+| `POST /v1/accounts`, `GET /v1/accounts`, `GET /v1/accounts/{id}` | **Partially compatible** | Onboarding lifecycle modelled; see below. |
+| `POST /v1/accounts/{id}` | **Partially compatible** | Profile, email, capabilities, metadata. |
+| `POST /v1/accounts/{id}/reject` | **Compatible** | |
+| `DELETE /v1/accounts/{id}` | **Partially compatible** | Rejects rather than removes; see below. |
+| `POST /v1/account_links` | **Compatible** | Expiry is real virtual time. |
+| `GET /stripe/connect/onboard/{id}` | **Emulator-only** | The onboarding page; see below. |
+| Terminal, Issuing, Radar, Tax, everything else | **Not supported** | Out of scope. |
 
 ## Requests are form-encoded
 
@@ -369,7 +375,21 @@ expected to react.
 19. **`current_period_start` moves with each renewal.** It previously reported
    the subscription's `start_date`, which was only right during the first
    cycle. Proration is measured against this window.
-20. `expand[]` is honoured on every route, in the query string and in a POST
+20. **A connected account cannot charge anything until it onboards.**
+   `POST /v1/accounts` returns `charges_enabled: false`, `payouts_enabled:
+   false` and a populated `requirements.currently_due` — exactly as Stripe
+   does, and deliberately, because an emulator that handed back a working
+   account would hide the single most common way a Connect integration ships
+   broken. `POST /v1/account_links` returns a link to a page the emulator
+   actually serves; completing it enables the account and activates its
+   requested capabilities. Differences: the onboarding page presents the
+   *decision* rather than a fake form (business details, bank accounts and
+   identity documents cannot mean anything locally), `external_account` is
+   generated rather than accepted (spec §29 — no real bank details may enter),
+   `DELETE` rejects rather than removes so charges the account took do not end
+   up pointing at nothing, and there is no `account.application.authorized`,
+   `capability.updated` or `account.external_account.*` event.
+21. `expand[]` is honoured on every route, in the query string and in a POST
    body, on single objects and on `data.` paths in a list. Naming a nested path
    expands the levels above it, as Stripe does, and more than four levels is
    refused. Two differences from Stripe: an id that does not resolve leaves the

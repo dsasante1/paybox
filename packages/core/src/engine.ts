@@ -2333,6 +2333,20 @@ export class PaymentEngine {
    * Marketplace: subaccounts, splits and the balance ledger
    * ---------------------------------------------------------------- */
 
+  /**
+   * What a freshly created account still owes before it can transact.
+   *
+   * Deliberately not empty. At Stripe an account created through the API is
+   * unusable until it submits details, and a developer whose integration
+   * assumes otherwise finds out in production. The emulator makes them find
+   * out here instead.
+   */
+  static readonly ONBOARDING_REQUIREMENTS: readonly string[] = [
+    'business_profile.url',
+    'external_account',
+    'tos_acceptance.date',
+  ];
+
   async createSubaccount(input: {
     provider: ProviderId;
     businessName: string;
@@ -2345,6 +2359,17 @@ export class PaymentEngine {
     primaryContactName?: string | null;
     primaryContactPhone?: string | null;
     providerSubaccountCode?: string;
+    accountType?: string | null;
+    countryCode?: string;
+    /**
+     * Whether the account can transact immediately.
+     *
+     * Paystack's subaccounts can; Stripe's connected accounts cannot until
+     * they have onboarded. Passed by the adapter rather than inferred from the
+     * provider, so the engine never learns which is which (spec §30).
+     */
+    onboarded?: boolean;
+    capabilities?: Metadata;
     metadata?: Metadata;
   }): Promise<Subaccount> {
     if (input.percentageCharge < 0 || input.percentageCharge > 100) {
@@ -2356,7 +2381,8 @@ export class PaymentEngine {
     }
 
     const now = this.#clock.nowISO();
-    return this.#storage.subaccounts.insert({
+    const onboarded = input.onboarded ?? true;
+    const subaccount: Subaccount = {
       id: this.#ids.next('sac'),
       provider: input.provider,
       providerSubaccountCode: input.providerSubaccountCode ?? this.#ids.token(12),
@@ -2370,10 +2396,132 @@ export class PaymentEngine {
       primaryContactPhone: input.primaryContactPhone ?? null,
       currency: input.currency.toUpperCase(),
       active: true,
+      accountType: input.accountType ?? null,
+      countryCode: (input.countryCode ?? 'NG').toUpperCase(),
+      chargesEnabled: onboarded,
+      payoutsEnabled: onboarded,
+      detailsSubmitted: onboarded,
+      requirements: onboarded ? emptyRequirements() : pendingRequirements(),
+      capabilities: input.capabilities ?? {},
       metadata: input.metadata ?? {},
       createdAt: now,
       updatedAt: now,
+    };
+
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const created = await tx.subaccounts.insert(subaccount);
+      const event = await this.#appendEvent(tx, {
+        type: 'subaccount.created',
+        provider: created.provider,
+        resourceId: created.id,
+        resourceType: 'subaccount',
+        data: subaccountEventData(created),
+        previousStatus: null,
+        currentStatus: created.chargesEnabled ? 'enabled' : 'pending',
+      });
+      return { result: created, events: [event] };
     });
+
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
+  async updateSubaccount(id: string, patch: Partial<Subaccount>): Promise<Subaccount> {
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const existing = await tx.subaccounts.byId(id);
+      if (!existing) throw new PayboxError('not_found', `No subaccount with id ${id}.`);
+
+      const updated = await tx.subaccounts.update(id, {
+        ...patch,
+        updatedAt: this.#clock.nowISO(),
+      });
+      const event = await this.#appendEvent(tx, {
+        type: 'subaccount.updated',
+        provider: updated.provider,
+        resourceId: updated.id,
+        resourceType: 'subaccount',
+        data: subaccountEventData(updated),
+        previousStatus: existing.chargesEnabled ? 'enabled' : 'pending',
+        currentStatus: updated.chargesEnabled ? 'enabled' : 'pending',
+      });
+      return { result: updated, events: [event] };
+    });
+
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
+  /**
+   * Finish onboarding: the account may now transact.
+   *
+   * The one transition that matters in a Connect integration, because before
+   * it a connected account looks complete and silently refuses every charge.
+   */
+  async completeOnboarding(id: string): Promise<Subaccount> {
+    const existing = await this.#storage.subaccounts.byId(id);
+    if (!existing) throw new PayboxError('not_found', `No subaccount with id ${id}.`);
+    return this.updateSubaccount(id, {
+      chargesEnabled: true,
+      payoutsEnabled: true,
+      detailsSubmitted: true,
+      requirements: emptyRequirements(),
+      capabilities: Object.fromEntries(
+        Object.keys(existing.capabilities).map((key) => [key, 'active']),
+      ),
+    });
+  }
+
+  /**
+   * Refuse an account.
+   *
+   * Terminal in practice: a rejected account keeps its rows so the history
+   * stays auditable, but can neither charge nor be paid out.
+   */
+  async rejectSubaccount(id: string, reason: string): Promise<Subaccount> {
+    const existing = await this.#storage.subaccounts.byId(id);
+    if (!existing) throw new PayboxError('not_found', `No subaccount with id ${id}.`);
+    return this.updateSubaccount(id, {
+      active: false,
+      chargesEnabled: false,
+      payoutsEnabled: false,
+      requirements: { ...emptyRequirements(), disabled_reason: `rejected.${reason}` },
+      capabilities: Object.fromEntries(
+        Object.keys(existing.capabilities).map((key) => [key, 'inactive']),
+      ),
+    });
+  }
+
+  async getSubaccount(id: string): Promise<Subaccount | null> {
+    return this.#storage.subaccounts.byId(id);
+  }
+
+  /**
+   * Refuse to act for an account that has not finished onboarding.
+   *
+   * Called by adapters before anything that moves money on a connected
+   * account's behalf, so the refusal is identical wherever it comes from.
+   */
+  assertChargeableAccount(subaccount: Subaccount): void {
+    if (!subaccount.active) {
+      throw new PayboxError(
+        'validation_failed',
+        `Account ${subaccount.providerSubaccountCode} is rejected and cannot process charges.`,
+        { details: { subaccountId: subaccount.id } },
+      );
+    }
+    if (!subaccount.chargesEnabled) {
+      throw new PayboxError(
+        'validation_failed',
+        `Account ${subaccount.providerSubaccountCode} cannot currently process charges: ` +
+          `onboarding is incomplete.`,
+        {
+          details: {
+            subaccountId: subaccount.id,
+            requirements: subaccount.requirements,
+          },
+        },
+      );
+    }
   }
 
   /**
@@ -2853,6 +3001,42 @@ function setupEventData(setup: InstrumentSetup): Metadata {
  */
 function setupToPaymentStatus(status: SetupStatus): PaymentStatus {
   return status === 'cancelled' ? 'cancelled' : (status as PaymentStatus);
+}
+
+function subaccountEventData(subaccount: Subaccount): Metadata {
+  return {
+    id: subaccount.id,
+    subaccount_code: subaccount.providerSubaccountCode,
+    business_name: subaccount.businessName,
+    currency: subaccount.currency,
+    charges_enabled: subaccount.chargesEnabled,
+    payouts_enabled: subaccount.payoutsEnabled,
+    details_submitted: subaccount.detailsSubmitted,
+  };
+}
+
+/** The requirements block of an account that owes nothing. */
+function emptyRequirements(): Metadata {
+  return {
+    alternatives: [],
+    current_deadline: null,
+    currently_due: [],
+    disabled_reason: null,
+    errors: [],
+    eventually_due: [],
+    past_due: [],
+    pending_verification: [],
+  };
+}
+
+/** The requirements block of an account that has not onboarded yet. */
+function pendingRequirements(): Metadata {
+  return {
+    ...emptyRequirements(),
+    currently_due: [...PaymentEngine.ONBOARDING_REQUIREMENTS],
+    eventually_due: [...PaymentEngine.ONBOARDING_REQUIREMENTS],
+    disabled_reason: 'requirements.past_due',
+  };
 }
 
 function dedicatedAccountEventData(account: DedicatedAccount): Metadata {

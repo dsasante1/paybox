@@ -105,6 +105,54 @@ export const refundCreateSchema = z.object({
   metadata,
 });
 
+/* ---------------------------------------------------------------- *
+ * Connect
+ * ---------------------------------------------------------------- */
+
+/**
+ * Creating a connected account.
+ *
+ * `capabilities` arrives as `capabilities[card_payments][requested]=true`,
+ * which the form expander turns into a nested object before this runs.
+ */
+export const accountCreateSchema = z.object({
+  type: z.enum(['standard', 'express', 'custom']).optional(),
+  country: z.string().min(2).max(2).optional(),
+  email: z.string().email().optional(),
+  default_currency: z.string().min(3).max(3).optional(),
+  business_type: z.enum(['individual', 'company', 'non_profit', 'government_entity']).optional(),
+  business_profile: z
+    .object({ name: z.string().optional(), url: z.string().optional() })
+    .optional(),
+  capabilities: z.record(z.string(), z.object({ requested: formBool }).optional()).optional(),
+  metadata,
+});
+
+export const accountUpdateSchema = z.object({
+  email: z.string().email().optional(),
+  business_type: z.enum(['individual', 'company', 'non_profit', 'government_entity']).optional(),
+  business_profile: z
+    .object({ name: z.string().optional(), url: z.string().optional() })
+    .optional(),
+  capabilities: z.record(z.string(), z.object({ requested: formBool }).optional()).optional(),
+  default_currency: z.string().min(3).max(3).optional(),
+  metadata,
+});
+
+export const accountRejectSchema = z.object({
+  reason: z.enum(['fraud', 'terms_of_service', 'other']),
+});
+
+export const accountLinkCreateSchema = z.object({
+  account: z.string().min(1),
+  type: z
+    .enum(['account_onboarding', 'account_update'])
+    .optional()
+    .default('account_onboarding'),
+  refresh_url: z.string().optional(),
+  return_url: z.string().optional(),
+});
+
 /**
  * Invoices you build by hand.
  *
