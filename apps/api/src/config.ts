@@ -77,6 +77,8 @@ const DEFAULTS: PayboxConfig = {
     stripe: { enabled: true },
     flutterwave: { enabled: true },
     kora: { enabled: true },
+    wewire: { enabled: true },
+    wise: { enabled: true },
   },
   security: { allowAnyKey: false },
   simulation: { autoAdvance: true, autoAdvanceDelayMs: 3_000 },

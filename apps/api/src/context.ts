@@ -50,6 +50,8 @@ import {
   generateV4Credentials,
 } from '@paybox/flutterwave';
 import { KoraWebhookFormatter, generateKoraKeys } from '@paybox/kora';
+import { WewireWebhookFormatter, generateWewireKeys } from '@paybox/wewire';
+import { WiseWebhookFormatter, generateWiseKeys } from '@paybox/wise';
 import type { PayboxConfig } from './config.js';
 import { PayboxLogger, type LogEntry } from './logger.js';
 import { NetworkSimulator } from './network.js';
@@ -81,6 +83,10 @@ export interface PayboxContext {
   flutterwaveV4: { clientId: string; clientSecret: string };
   /** Kora's secret key doubles as the card-payload encryption key. */
   koraKeys: { secretKey: string; publicKey: string };
+  /** WeWire has one key, sent verbatim in `ww-api-key`. */
+  wewireKeys: { secretKey: string };
+  /** Wise uses a bearer token; its webhooks are RSA-signed, not shared-secret. */
+  wiseKeys: { apiToken: string };
   baseUrl: string;
   shutdown(): Promise<void>;
 }
@@ -206,6 +212,8 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
   dispatcher.register(new StripeWebhookFormatter({ basePath: '/stripe' }));
   dispatcher.register(new FlutterwaveWebhookFormatter({ version: 'v3' }));
   dispatcher.register(new KoraWebhookFormatter());
+  dispatcher.register(new WewireWebhookFormatter());
+  dispatcher.register(new WiseWebhookFormatter());
   dispatcher.attachTo(bus);
 
   // Structured event log (spec §42) and a bus-level error boundary, so a
@@ -290,6 +298,32 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
     });
   });
 
+  /**
+   * Settle a queued payout, the way a settlement rail eventually would.
+   *
+   * WeWire returns `PENDING` and settles asynchronously, so the outcome has
+   * to arrive on its own — and a scheduled job is the only thing
+   * `paybox time advance` can drive. The outcome is decided when the job is
+   * enqueued (from WeWire's published sandbox numbers), never here, so the
+   * answer is fixed before the clock moves.
+   */
+  scheduler.register('transfer.settle', async (job) => {
+    const transferId = String(job.payload.transferId ?? '');
+    const outcome = String(job.payload.outcome ?? 'successful') as 'successful' | 'failed';
+    if (!transferId) return;
+
+    const transfer = await engine.getTransfer(transferId);
+    // It may have been settled by hand from the CLI in the meantime.
+    if (!transfer || (transfer.status !== 'pending' && transfer.status !== 'processing')) return;
+
+    if (transfer.status === 'pending') await engine.transitionTransfer(transferId, 'processing');
+    await engine.transitionTransfer(transferId, outcome, {
+      ...(outcome === 'failed'
+        ? { failureReason: String(job.payload.reason ?? 'The rail rejected the transfer') }
+        : {}),
+    });
+  });
+
   scheduler.register('payment.expire', async (job) => {
     const paymentId = String(job.payload.paymentId ?? '');
     const payment = await engine.getPayment(paymentId);
@@ -304,6 +338,8 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
   const stripeKeys = generateStripeKeys(ids.token(20));
   const flutterwaveKeys = generateFlutterwaveKeys(ids.token(20));
   const koraKeys = generateKoraKeys(ids.token(20));
+  const wewireKeys = generateWewireKeys(ids.token(20));
+  const wiseKeys = generateWiseKeys(ids.token(20));
   const flutterwaveV4 = generateV4Credentials(ids.token(20));
 
   return {
@@ -326,6 +362,8 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
     flutterwaveKeys,
     flutterwaveV4,
     koraKeys,
+    wewireKeys,
+    wiseKeys,
     baseUrl,
     async shutdown() {
       await scheduler.stop();

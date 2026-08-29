@@ -8,6 +8,8 @@
     { "path": "./packages/simulator" },
     { "path": "./packages/providers/flutterwave" },
     { "path": "./packages/providers/kora" },
+    { "path": "./packages/providers/wewire" },
+    { "path": "./packages/providers/wise" },
     { "path": "./packages/providers/paystack" },
     { "path": "./packages/providers/stripe" },
     { "path": "./apps/api" },

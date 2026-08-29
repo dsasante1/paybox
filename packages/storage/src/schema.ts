@@ -157,6 +157,21 @@ export interface IdempotencyRow {
   created_at: string;
 }
 
+/**
+ * Adapter scratch space (migration 0019).
+ *
+ * Provider-scoped, mutable, and read by nothing in `packages/core`. See the
+ * migration for why this is not the idempotency store and not a canonical
+ * model.
+ */
+export interface ProviderStateRow {
+  provider: string;
+  key: string;
+  value: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface EventSequenceRow {
   resource_id: string;
   next_sequence: number;
@@ -371,6 +386,8 @@ export interface SplitSubaccountRow {
 
 export interface LedgerEntryRow {
   id: string;
+  /** Append order. See migration 0020: a running balance is a fold. */
+  sequence: number;
   provider: string;
   currency: string;
   direction: string;
@@ -448,6 +465,7 @@ export interface Database {
   webhook_deliveries: WebhookDeliveryRow;
   jobs: JobRow;
   idempotency_keys: IdempotencyRow;
+  provider_state: ProviderStateRow;
   authorizations: AuthorizationRow;
   dedicated_accounts: DedicatedAccountRow;
   instrument_setups: InstrumentSetupRow;

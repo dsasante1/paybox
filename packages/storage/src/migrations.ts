@@ -815,4 +815,61 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_jobs_due ON jobs (status, run_at, sequence);
     `,
   },
+  {
+    id: '0019_provider_state',
+    sql: `
+      -- Adapter scratch space, explicitly not a canonical model.
+      --
+      -- Some provider objects are short-lived, mutable, and meaningless to the
+      -- engine. Wise's quote is the case that forced this: it lives 30
+      -- minutes, is consumed exactly once, carries the rate a transfer is
+      -- built from, and has no counterpart in \`shared/src/model.ts\`.
+      --
+      -- Two things were tried first and are worth recording so they are not
+      -- tried again. Reusing \`idempotency_keys\` fails because its \`put\` is an
+      -- insert, not an upsert -- correctly so, since a genuine replay must
+      -- never overwrite the stored response. Promoting Quote to a canonical
+      -- resource fails a different test: the engine would gain a concept it
+      -- never uses, and \`docs/architecture.md\` is clear that new canonical
+      -- resources earn their place by being shared across providers.
+      --
+      -- So this is a provider-scoped key/value store with an upsert, and
+      -- nothing in \`packages/core\` reads it. An adapter owning its own
+      -- short-lived state is the same principle as an adapter owning its own
+      -- status vocabulary (spec §30).
+      CREATE TABLE provider_state (
+        provider TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (provider, key)
+      );
+    `,
+  },
+  {
+    id: '0020_ledger_sequence',
+    sql: `
+      -- Append order, explicitly. The same bug as 0018, in the other
+      -- append-only table.
+      --
+      -- \`ledger.list\` ordered by created_at then id. Under the frozen clock
+      -- every entry written in one request shares a created_at, so the tie
+      -- fell to \`id\` -- a base32 token drawn from the seeded random stream,
+      -- which is deterministic but has nothing to do with insertion order.
+      --
+      -- That is invisible for a balance, which is a sum and does not care
+      -- about order. It is not invisible for a **running** balance: WeWire
+      -- puts \`balanceBefore\` and \`balanceAfter\` on every wallet transaction,
+      -- and those are a fold. Fold the same entries in the wrong order and a
+      -- payout reports the balance from before the top-up that funded it.
+      --
+      -- created_at cannot carry it, for exactly the reason above.
+      ALTER TABLE balance_ledger ADD COLUMN sequence INTEGER NOT NULL DEFAULT 0;
+      -- Existing rows keep their relative order by taking ascending values in
+      -- rowid order, which is insertion order for a table never updated.
+      UPDATE balance_ledger SET sequence = rowid;
+      CREATE INDEX idx_ledger_sequence ON balance_ledger (provider, currency, sequence);
+    `,
+  },
 ];

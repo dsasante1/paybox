@@ -714,6 +714,23 @@ export class PaymentEngine {
     destinationSubaccountId?: string | null;
     sourcePaymentId?: string | null;
     transferGroup?: string | null;
+    /**
+     * Whether creating the transfer reserves its amount against the balance.
+     *
+     * Defaults to true, which is what every provider does that treats
+     * "create" as "send": the money is committed the moment the payout is
+     * queued, so two queued payouts cannot spend the same funds.
+     *
+     * Wise does not work that way. Creating a transfer there commits nothing
+     * -- it is a quote turned into an intent -- and a **separate** funding
+     * call is what debits the balance. Reserving at creation would make an
+     * unfunded Wise transfer hold money that a real one does not, so the
+     * adapter passes false and reserves at funding instead.
+     *
+     * A transfer created without a reservation also does not release one when
+     * it fails, or the balance would be credited money it never gave up.
+     */
+    reserve?: boolean;
   }): Promise<Transfer> {
     const { result, events } = await this.#storage.transaction((tx) =>
       this.#createTransferIn(tx, input),
@@ -750,6 +767,7 @@ export class PaymentEngine {
       destinationSubaccountId?: string | null;
       sourcePaymentId?: string | null;
       transferGroup?: string | null;
+      reserve?: boolean;
     },
   ): Promise<{ result: Transfer; events: PayboxEvent[] }> {
     validateAmount(input.amount);
@@ -782,6 +800,9 @@ export class PaymentEngine {
               fee_refundable: input.feeRefundable !== false,
             }
           : {}),
+        // Recorded rather than inferred: the release path on failure has to
+        // know whether anything was ever reserved.
+        ...(input.reserve === false ? { paybox_reserved: false } : {}),
       },
       createdAt: now,
       updatedAt: now,
@@ -797,7 +818,7 @@ export class PaymentEngine {
     const required = transfer.amount + fee;
     const source = transfer.sourceSubaccountId;
 
-    if (this.#enforceBalance) {
+    if (this.#enforceBalance && input.reserve !== false) {
       // The *source* pot, which for a marketplace is not always the platform's.
       const net = await tx.ledger.net(transfer.provider, transfer.currency, source);
       const available = (source === null ? this.#openingBalance : 0) + net;
@@ -821,30 +842,37 @@ export class PaymentEngine {
     }
 
     const created = await tx.transfers.insert(transfer);
+
     // Reserve immediately rather than on success: a queued payout has
     // already committed the funds, and waiting would let a second transfer
     // spend the same money.
-    await this.#ledgerIn(tx, 'debit', {
-      provider: created.provider,
-      currency: created.currency,
-      amount: required,
-      reason: 'transfer',
-      resourceId: created.id,
-      subaccountId: source,
-    });
-
-    // An internal move credits the other side now too, so the pair is written
-    // together and the books cannot balance halfway. A payout to a bank has no
-    // other side: the money has left.
-    if (created.destinationSubaccountId) {
-      await this.#ledgerIn(tx, 'credit', {
+    //
+    // Unless the adapter said not to. A Wise transfer is an intent until it
+    // is funded by a separate call, so reserving here would have it hold
+    // money the real one does not.
+    if (input.reserve !== false) {
+      await this.#ledgerIn(tx, 'debit', {
         provider: created.provider,
         currency: created.currency,
-        amount: created.amount,
+        amount: required,
         reason: 'transfer',
         resourceId: created.id,
-        subaccountId: created.destinationSubaccountId,
+        subaccountId: source,
       });
+
+      // An internal move credits the other side now too, so the pair is
+      // written together and the books cannot balance halfway. A payout to a
+      // bank has no other side: the money has left.
+      if (created.destinationSubaccountId) {
+        await this.#ledgerIn(tx, 'credit', {
+          provider: created.provider,
+          currency: created.currency,
+          amount: created.amount,
+          reason: 'transfer',
+          resourceId: created.id,
+          subaccountId: created.destinationSubaccountId,
+        });
+      }
     }
 
     const event = await this.#appendEvent(tx, {
@@ -862,7 +890,21 @@ export class PaymentEngine {
   async transitionTransfer(
     transferId: string,
     to: TransferStatus,
-    options: { failureReason?: string | null } = {},
+    options: {
+      failureReason?: string | null;
+      /**
+       * Provider facts to record alongside the transition.
+       *
+       * Merged over the existing metadata, mirroring how
+       * `transitionPayment` handles `paymentMethodDetails`. A provider often
+       * learns something at a transition that only it understands -- Wise
+       * reports the FX leg settling as a milestone distinct from the payout
+       * leaving, and paybox has one canonical status for both -- and the
+       * transfer is the right place for that, not a conditional in core
+       * (spec §30).
+       */
+      metadata?: Metadata;
+    } = {},
   ): Promise<Transfer> {
     const { result, events } = await this.#storage.transaction(async (tx) => {
       const transfer = await tx.transfers.byId(transferId);
@@ -877,12 +919,21 @@ export class PaymentEngine {
         ...(options.failureReason !== undefined
           ? { failureReason: options.failureReason }
           : {}),
+        ...(options.metadata !== undefined
+          ? { metadata: { ...transfer.metadata, ...options.metadata } }
+          : {}),
       });
 
       // A payout that did not happen releases what it reserved. The fee comes
       // back only where the provider gives it back -- keeping a
       // non-refundable fee is the whole point of the flag.
-      if (to === 'failed' || to === 'reversed' || to === 'cancelled') {
+      // Nothing to release if nothing was ever reserved -- a Wise transfer
+      // that was never funded, for instance. Crediting here would hand the
+      // balance money it never gave up.
+      if (
+        (to === 'failed' || to === 'reversed' || to === 'cancelled') &&
+        updated.metadata.paybox_reserved !== false
+      ) {
         const reservedFee = Math.max(0, Math.trunc(Number(updated.metadata.fee ?? 0)));
         const refundable = updated.metadata.fee_refundable !== false;
         // Only what has not already been sent back: a partial reversal has
@@ -941,6 +992,31 @@ export class PaymentEngine {
    * pulled back by the platform, which is exactly why Stripe offers reversals
    * on transfers and not on payouts.
    */
+  /**
+   * Record provider facts on a transfer without moving it.
+   *
+   * A provider sometimes learns something at a moment that is not a canonical
+   * transition. Wise reports its FX leg settling (`funds_converted`) as a
+   * milestone distinct from the payout leaving, and paybox has one canonical
+   * `processing` for both -- so the flag that tells them apart has to be
+   * writable without a state change.
+   *
+   * Deliberately narrow: it touches `metadata` and nothing else, so it cannot
+   * become a way to sidestep the state machine.
+   */
+  async updateTransferMetadata(transferId: string, metadata: Metadata): Promise<Transfer> {
+    return this.#storage.transaction(async (tx) => {
+      const transfer = await tx.transfers.byId(transferId);
+      if (!transfer) {
+        throw new PayboxError('not_found', `No transfer with id ${transferId}.`);
+      }
+      return tx.transfers.update(transferId, {
+        metadata: { ...transfer.metadata, ...metadata },
+        updatedAt: this.#clock.nowISO(),
+      });
+    });
+  }
+
   async reverseTransfer(transferId: string, amount?: number): Promise<Transfer> {
     const { result, events } = await this.#storage.transaction(async (tx) => {
       const transfer = await tx.transfers.byId(transferId);

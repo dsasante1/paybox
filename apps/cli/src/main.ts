@@ -22,6 +22,8 @@ import { PAYSTACK_COVERAGE } from '@paybox/paystack';
 import { STRIPE_COVERAGE } from '@paybox/stripe';
 import { FLUTTERWAVE_V3_COVERAGE, FLUTTERWAVE_V4_COVERAGE } from '@paybox/flutterwave';
 import { KORA_COVERAGE } from '@paybox/kora';
+import { WEWIRE_COVERAGE } from '@paybox/wewire';
+import { WISE_COVERAGE } from '@paybox/wise';
 import { CliError, PayboxClient } from './client.js';
 import {
   heading,
@@ -139,6 +141,8 @@ const MANIFESTS: readonly CoverageManifest[] = [
   FLUTTERWAVE_V3_COVERAGE,
   FLUTTERWAVE_V4_COVERAGE,
   KORA_COVERAGE,
+  WEWIRE_COVERAGE,
+  WISE_COVERAGE,
 ];
 
 program

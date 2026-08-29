@@ -923,7 +923,13 @@ export const toLedgerEntry = (row: LedgerEntryRow): LedgerEntry => ({
   createdAt: row.created_at,
 });
 
-export const fromLedgerEntry = (entry: LedgerEntry): LedgerEntryRow => ({
+/**
+ * `sequence` is assigned by the repository, not the caller -- append order is
+ * the storage layer's business, and a caller cannot know it. See migration
+ * 0020.
+ */
+export const fromLedgerEntry = (entry: LedgerEntry, sequence: number): LedgerEntryRow => ({
+  sequence,
   id: entry.id,
   provider: entry.provider,
   currency: entry.currency,

@@ -16,7 +16,9 @@
     "@paybox/paystack": "0.1.0",
     "@paybox/stripe": "0.1.0",
     "@paybox/flutterwave": "0.1.0",
-    "@paybox/kora": "0.1.0"
+    "@paybox/kora": "0.1.0",
+    "@paybox/wewire": "0.1.0",
+    "@paybox/wise": "0.1.0"
   },
   "bin": {
     "paybox": "./src/main.ts"
