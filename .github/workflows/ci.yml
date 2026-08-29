@@ -1,0 +1,68 @@
+# Verify every change before it reaches main.
+#
+# The coverage contract (tests/coverage-drift.test.ts) and the determinism
+# rules (eslint.config.js) only protect anything if they actually run. Without
+# this, a pull request adding an undeclared route — or a `Date.now()` in the
+# engine — would show as mergeable and nothing would object.
+#
+# Node is pinned to the floor and the current release rather than a single
+# version: `node:sqlite` is what sets the >=22.5 requirement in package.json,
+# it is still marked experimental, and its API has moved between majors. A
+# matrix catches both "broke the minimum we claim to support" and "broke on
+# what people actually run".
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A new push supersedes an in-flight run for the same ref. Queued CI on a
+# branch someone is still pushing to is wasted minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      # Report every failing combination, not just the first. Knowing a change
+      # breaks only the older Node is more useful than knowing it broke.
+      fail-fast: false
+      matrix:
+        node: ['22.5', '24']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # `ci`, not `install`: it installs exactly the lockfile and fails if
+      # package.json and the lockfile have drifted apart, which is itself worth
+      # catching.
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Includes the determinism rules — no Date.now(), Math.random() or
+      # setTimeout outside the few exempt paths. See eslint.config.js.
+      - name: Lint
+        run: npm run lint
+
+      # Includes tests/coverage-drift.test.ts, which fails if an adapter serves
+      # a route it has not declared, declares one it does not serve, or if the
+      # README's generated coverage table has gone stale.
+      - name: Test
+        run: npm test
