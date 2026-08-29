@@ -21,11 +21,14 @@
     "typecheck": "tsc -b --pretty",
     "lint": "eslint .",
     "coverage:table": "tsx scripts/coverage-table.ts",
+    "build": "node scripts/build.mjs",
+    "smoke:package": "node scripts/smoke-package.mjs",
     "ship": "node scripts/ship.mjs",
     "prepare": "git config core.hooksPath .githooks || true"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "esbuild": "^0.28.2",
     "eslint": "^9.0.0",
     "tsx": "^4.23.12",
     "typescript": "~5.9.0",

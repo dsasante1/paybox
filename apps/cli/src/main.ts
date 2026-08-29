@@ -34,13 +34,14 @@ import {
   statusColour,
   table,
 } from './render.js';
+import { VERSION } from './version.js';
 
 const DEFAULT_URL = process.env.PAYBOX_URL ?? 'http://127.0.0.1:8080';
 
 const program = new Command()
   .name('paybox')
   .description('Local payment infrastructure emulator')
-  .version('0.1.0')
+  .version(VERSION)
   .option('--url <url>', 'emulator base URL', DEFAULT_URL)
   .option('--json', 'print raw JSON instead of tables', false);
 

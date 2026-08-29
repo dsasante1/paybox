@@ -7,10 +7,15 @@
 
 services:
   paybox:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    image: paybox:local
+    # Published to Docker Hub by .github/workflows/release.yml for linux/amd64
+    # and linux/arm64. Pin a version (`:0.1`) anywhere reproducibility matters.
+    # The same image is also at ghcr.io/dsasante1/paybox.
+    #
+    # To run from a checkout instead, replace `image` with:
+    #   build:
+    #     context: ..
+    #     dockerfile: docker/Dockerfile
+    image: dsasante1/paybox:latest
     ports:
       # Published to loopback only. Change to "8080:8080" to expose it on your
       # network — and read SECURITY.md first.

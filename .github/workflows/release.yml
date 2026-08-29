@@ -1,0 +1,231 @@
+# Cut a release from a tag.
+#
+# `git push origin v0.2.0` runs this. It repeats the full verification —
+# typecheck, lint, tests, the bundle build and the packed-tarball smoke test —
+# and only then publishes that one version to three places:
+#
+#   npm         paybox-emulator, with provenance (trusted publishing: no token)
+#   Docker Hub  <DOCKERHUB_IMAGE>, linux/amd64 + linux/arm64 — the published image
+#   GitHub      a Release with generated notes and the npm tarball attached
+#
+# The same image manifest is also pushed to ghcr.io/<owner>/paybox. That costs
+# nothing (GITHUB_TOKEN, no setup) and gives CI users an address without Docker
+# Hub's anonymous pull limit; Docker Hub is the one the docs point at.
+#
+# The tag must equal the version in apps/paybox/package.json, checked before
+# anything else runs, and the GitHub Release is created last and only if both
+# publishes succeeded — so a release page never describes a version that
+# cannot be installed. docs/releasing.md has the one-time setup.
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+# Never cancel a release half-way through publishing.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # The floor we claim to support, not the newest Node: if the package
+      # only works on 24, this is where that should fail.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Tag matches the package version
+        id: version
+        run: |
+          version="$(node -p "require('./apps/paybox/package.json').version")"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match apps/paybox/package.json version $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # Fail here, before the long steps, rather than in the image job after
+      # everything else has passed.
+      - name: Docker Hub is configured
+        env:
+          DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
+        run: |
+          if [ -z "$DOCKERHUB_IMAGE" ]; then
+            echo "::error::the DOCKERHUB_IMAGE repository variable is not set (e.g. dsasante1/paybox); see docs/releasing.md"
+            exit 1
+          fi
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Package smoke test
+        run: npm run smoke:package
+
+      - name: Pack
+        run: npm pack --workspace apps/paybox --pack-destination release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-package
+          path: release/*.tgz
+          if-no-files-found: error
+
+  npm:
+    name: publish to npm
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # Trusted publishing: npm exchanges this workflow's OIDC token for a
+      # short-lived publish credential, and attaches provenance automatically.
+      # There is deliberately no NPM_TOKEN path in this workflow.
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # Trusted publishing needs npm >= 11.5.1 and Node >= 22.14 (npm docs,
+      # "Trusted publishing for npm packages"). Node 24 satisfies both; the
+      # explicit npm upgrade removes any dependence on what the runner bundles.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - run: npm install -g npm@11
+
+      - name: Install
+        run: npm ci
+
+      # Rebuilt here rather than taken from the verify job's artifact so the
+      # provenance statement describes the bundle it is attached to. The build
+      # is deterministic; the smoke-tested tarball and this one are the same
+      # bytes.
+      - name: Build
+        run: npm run build
+
+      - name: Publish
+        run: npm publish --workspace apps/paybox --access public
+
+  image:
+    name: publish image
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      # DOCKERHUB_IMAGE is a repository *variable* (it is a name, not a
+      # secret); DOCKERHUB_USERNAME and DOCKERHUB_TOKEN are secrets, the token
+      # being a Docker Hub personal access token with read/write scope.
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # v0.2.0 -> 0.2.0, 0.2 and latest, on both registries (metadata-action
+      # lowercases the repository name and adds `latest` for a non-prerelease
+      # semver tag).
+      - name: Tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            docker.io/${{ vars.DOCKERHUB_IMAGE }}
+            ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The overview shown on the Docker Hub page. Discoverability is the
+      # reason the image is on Docker Hub at all, so keep it current — but a
+      # failure here must never block a release that has already pushed.
+      - name: Update the Docker Hub description
+        uses: peter-evans/dockerhub-description@v5
+        continue-on-error: true
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ vars.DOCKERHUB_IMAGE }}
+          short-description: Local payment infrastructure emulator — Paystack, Stripe, Flutterwave, Kora, WeWire, Wise
+          readme-filepath: apps/paybox/README.md
+
+  release:
+    name: github release
+    needs: [verify, npm, image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-package
+          path: release
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/*.tgz \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

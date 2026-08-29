@@ -1,17 +1,52 @@
 # Docker
 
+Every release publishes the image to Docker Hub, for `linux/amd64` and
+`linux/arm64`:
+
 ```bash
-docker compose -f docker/docker-compose.yml up --build
+docker run --rm -p 127.0.0.1:8080:8080 -v paybox-data:/app/data dsasante1/paybox
+```
+
+Tags: `latest`, the minor line (`0.1`) and the exact version (`0.1.0`). Pin
+one of the last two anywhere reproducibility matters.
+
+The same image, under the same tags, is also pushed to
+`ghcr.io/dsasante1/paybox`. Docker Hub rate-limits anonymous pulls per IP;
+if a busy CI runner hits that, switch the address and nothing else.
+
+Or with compose, which adds the volume and a restart policy:
+
+```bash
+docker compose -f docker/docker-compose.yml up
 ```
 
 Dashboard at <http://localhost:8080/dashboard>.
 
-Or without compose:
+## Building from source
 
 ```bash
-docker build -f docker/Dockerfile -t paybox .
-docker run --rm -p 127.0.0.1:8080:8080 -v paybox-data:/app/data paybox
+docker build -f docker/Dockerfile -t paybox:local .
+docker run --rm -p 127.0.0.1:8080:8080 paybox:local
 ```
+
+The Dockerfile bundles the TypeScript sources with `scripts/build.mjs`,
+installs that bundle's production dependencies, and copies only those two
+things into the runtime stage: no source tree, no devDependencies, no
+compiler. It is the same artifact `npx paybox-emulator` installs, started by
+the same launcher.
+
+## The CLI inside the container
+
+The `paybox` command is on the image's PATH and talks to the server over the
+container's own loopback:
+
+```bash
+docker exec <container> paybox status
+docker exec <container> paybox time advance 2h
+```
+
+From the host, point a CLI at the published port instead:
+`npx paybox-emulator --url http://127.0.0.1:8080 status`.
 
 ## Reaching your application from the container
 
@@ -25,7 +60,7 @@ localhost, not your machine. Use:
 ```bash
 docker run --rm -p 127.0.0.1:8080:8080 \
   --add-host=host.docker.internal:host-gateway \
-  paybox
+  dsasante1/paybox
 ```
 
 ```bash
@@ -57,7 +92,7 @@ For a clean slate every run, set `PAYBOX_DATABASE=:memory:`.
 ```yaml
 services:
   paybox:
-    image: paybox:local
+    image: dsasante1/paybox:0.1
     env:
       PAYBOX_DATABASE: ":memory:"
       PAYBOX_FREEZE_CLOCK: "1"

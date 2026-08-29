@@ -14,6 +14,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 All packages are implemented and the vertical slice runs end to end: `shared`, `core`, `storage`, `webhooks`, `simulator`, `providers/paystack`, `apps/api`, `apps/cli`. `npm start` serves the API, dashboard and OpenAPI docs; `npm run cli -- …` drives it.
 
+**The published artifact is `paybox-emulator` on npm** (`npx paybox-emulator start`; the installed command is `paybox`) **and `dsasante1/paybox` on Docker Hub** (also pushed to `ghcr.io/dsasante1/paybox`, but Docker Hub is the address the docs use). The workspace packages export TypeScript source and are private, so none of them is installable on its own; `apps/paybox` is the one package that ships. `scripts/build.mjs` bundles the `@paybox/*` code into `apps/paybox/dist/paybox.js` and leaves third-party packages as ordinary dependencies — then fails if `apps/paybox/package.json` and the bundle's actual imports disagree in either direction. `apps/paybox/bin/paybox.js` is the launcher: it refuses Node < 22.5 with a readable message and keeps `node:sqlite`'s ExperimentalWarning off stderr on Node 22. `scripts/smoke-package.mjs` installs the packed tarball into an empty directory and runs it; CI runs both. A `v*` tag runs `.github/workflows/release.yml`; `docs/releasing.md` has the one-time setup. (`paybox` itself on npm is an unrelated 2013 client for the French Paybox gateway, hence the name.)
+
 **All four providers are implemented**, each partially: Paystack, Stripe, Flutterwave and Kora. Flutterwave ships two live APIs — v3 (`FLWSECK_TEST-` keys, `{status:"success",…}`) and v4 (OAuth2, `{status:"failed", error:{…}}`) — with different authentication, envelopes and webhook signatures, so they are **two adapters** at `/flutterwave/v3` and `/flutterwave/v4` rather than one with a flag.
 
 Coverage for each is documented honestly in `docs/paystack.md`, `docs/stripe.md`, `docs/flutterwave.md`, `docs/kora.md`, `docs/wewire.md` and `docs/wise.md` — those files are contracts, not marketing. If something is missing from one, assume it is not implemented.
@@ -22,9 +24,9 @@ Coverage for each is documented honestly in `docs/paystack.md`, `docs/stripe.md`
 
 **Adding a route therefore means adding a manifest entry** — the build will tell you if you forget.
 
-`.github/workflows/ci.yml` runs typecheck, lint and the full suite on every pull request and every push to `main`, across Node 22 and Node 24. The coverage contract and the determinism rules only protect anything if they actually run.
+`.github/workflows/ci.yml` runs typecheck, lint, the full suite, the package build and the packed-tarball smoke test on every pull request and every push to `main`, across Node 22 and Node 24, and a separate `image` job builds and boots the Docker image. The coverage contract and the determinism rules only protect anything if they actually run.
 
-**CI reports failures; GitHub does not block them.** Branch protection and rulesets both need a public repo or a paid plan, and this one is private on a free plan — `docs/ci.md` has the two ways to fix that properly. Until then two client-side guards stand in, and both are guards rather than gates: `npm run ship -- <pr>` merges only when every check has passed (and refuses a PR with *no* checks), and `.githooks/pre-push` refuses a direct push to `main`. `npm install` wires the hook up via `core.hooksPath`.
+**`main` is protected**: both `verify` checks are required, administrators included, and force-pushes are refused — the repository is public now, which is what made that available. Two older client-side guards remain, and both are guards rather than gates: `npm run ship -- <pr>` merges only when every check has passed (and refuses a PR with *no* checks), and `.githooks/pre-push` refuses a direct push to `main`. `npm install` wires the hook up via `core.hooksPath`. `docs/ci.md` has the details.
 
 Adding Stripe was the test of the injection design, and it needed three new seams rather than a rewrite: a `retry` transition flag (Stripe's PaymentIntent has no terminal failure), a clock-aware webhook signature with per-attempt re-signing, and webhook fan-out (one canonical event can be several provider events). All three are in `docs/architecture.md`.
 
@@ -61,6 +63,8 @@ npm run test:watch
 npx vitest run tests/engine.test.ts          # a single file
 npx vitest run -t 'enforces total_refunded'  # a single test by name
 npm run typecheck                 # tsc -b across all project references
+npm run build                     # bundle the publishable package (apps/paybox/dist)
+npm run smoke:package             # pack it, install it somewhere empty, run it
 ```
 
 Node **≥ 22.5** is required — storage uses the built-in `node:sqlite`.
@@ -164,6 +168,7 @@ Vitest picks up `packages/**/*.test.ts`, `apps/**/*.test.ts`, and `tests/**/*.te
 2. `tsconfig.json` extending `../../tsconfig.base.json` with `composite`, `rootDir: src`, `outDir: dist`, and a `references` entry per dependency.
 3. Add a `references` entry in the root `tsconfig.json`.
 4. Workspace globs are `packages/*`, `packages/providers/*`, `apps/*`.
+5. A **third-party runtime dependency** added to any workspace must also be added to `apps/paybox/package.json`, because that is what the published package installs. `npm run build` fails if the two disagree in either direction, so this cannot be forgotten silently.
 
 `tsconfig.base.json` sets `verbatimModuleSyntax` (type-only imports must say `import type`), `NodeNext` resolution (relative imports need the `.js` extension even from `.ts`), and `noUncheckedIndexedAccess` (indexing yields `T | undefined`).
 
