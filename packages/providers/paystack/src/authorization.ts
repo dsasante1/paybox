@@ -69,7 +69,11 @@ export const paystackAuthorizationMinter: AuthorizationMinter = (
     return {
       channel,
       reusable: true,
-      providerAuthorizationCode: print,
+      // Folded with the customer, because a Paystack `authorization_code`
+      // identifies *this customer's* stored card. Two customers paying with
+      // the same card get two codes, which is what Paystack does -- and what
+      // the per-customer uniqueness rule in migration 0013 requires.
+      providerAuthorizationCode: fingerprint([print, payment.customerId ?? payment.reference]),
       signature: `SIG_${print}`,
       bin,
       last4,

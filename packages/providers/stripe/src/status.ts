@@ -4,6 +4,7 @@ import {
   type PaymentStatus,
   type PlanInterval,
   type RefundStatus,
+  type SetupStatus,
   type SubscriptionStatus,
 } from '@paybox/shared';
 
@@ -89,7 +90,16 @@ export function fromStripeStatus(status: string): PaymentStatus | null {
 export type StripeChargeStatus = 'succeeded' | 'pending' | 'failed';
 
 export function toStripeChargeStatus(status: PaymentStatus): StripeChargeStatus {
-  if (status === 'successful' || status === 'refunded' || status === 'partially_refunded') {
+  if (
+    status === 'successful' ||
+    status === 'refunded' ||
+    status === 'partially_refunded' ||
+    // An authorized-but-uncaptured charge is `succeeded` at Stripe, with
+    // `captured: false` carrying the distinction and `paid` documented as
+    // "true if the charge succeeded, or was successfully authorized for later
+    // capture". The status is not where the two are told apart.
+    status === 'authorized'
+  ) {
     return 'succeeded';
   }
   if (status === 'failed' || status === 'cancelled' || status === 'expired') return 'failed';
@@ -130,11 +140,44 @@ export function cancellationReason(status: PaymentStatus): string | null {
 
 
 /**
+ * SetupIntent status: canonical -> Stripe.
+ *
+ * Stripe's enum is `requires_payment_method | requires_confirmation |
+ * requires_action | processing | succeeded | canceled` -- note the absence of
+ * a failure state, exactly as on PaymentIntents. A setup that is declined
+ * returns to `requires_payment_method` and reports why in `last_setup_error`,
+ * so the merchant can confirm again with another instrument.
+ *
+ * Verified against `stripe/openapi` `openapi/spec3.json` schema `setup_intent`
+ * (API version 2026-08-26.dahlia, read 2026-08-28).
+ */
+export function toStripeSetupStatus(status: SetupStatus): string {
+  switch (status) {
+    case 'created':
+      return 'requires_payment_method';
+    case 'pending':
+      return 'requires_confirmation';
+    case 'requires_action':
+      return 'requires_action';
+    case 'processing':
+      return 'processing';
+    case 'successful':
+      return 'succeeded';
+    case 'cancelled':
+      return 'canceled';
+    // No `failed` at Stripe: a declined setup is alive and retryable.
+    case 'failed':
+      return 'requires_payment_method';
+  }
+}
+
+/**
  * Subscription status: canonical -> Stripe.
  *
  * Stripe's enum is `active | canceled | incomplete | incomplete_expired |
  * past_due | paused | trialing | unpaid`. Two mappings deserve a note:
  *
+ *   trialing      -> trialing   Exists, will bill, has not yet.
  *   attention     -> past_due   A renewal failed and the merchant must act.
  *   non_renewing  -> active     Stripe expresses "stops at period end" as a
  *                               *flag* (`cancel_at_period_end`), not a status,
@@ -145,6 +188,8 @@ export function cancellationReason(status: PaymentStatus): string | null {
  */
 export function toStripeSubscriptionStatus(status: SubscriptionStatus): string {
   switch (status) {
+    case 'trialing':
+      return 'trialing';
     case 'attention':
       return 'past_due';
     case 'non_renewing':
@@ -166,11 +211,18 @@ export function toStripeSubscriptionStatus(status: SubscriptionStatus): string {
  */
 export function toStripeInvoiceStatus(status: InvoiceStatus): string {
   switch (status) {
+    case 'draft':
+      return 'draft';
     case 'success':
       return 'paid';
+    case 'void':
+      return 'void';
+    case 'uncollectible':
+      return 'uncollectible';
+    // A *failed attempt* leaves the invoice open at Stripe -- the status
+    // describes the invoice, not the attempt, and Stripe keeps retrying it.
     case 'failed':
-      return 'open';
-    default:
+    case 'pending':
       return 'open';
   }
 }

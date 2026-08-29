@@ -3,6 +3,7 @@ import {
   PayboxError,
   isSupportedCurrency,
   type Clock,
+  type ErrorCode,
   type IdFactory,
   type Payment,
   type PaymentMethod,
@@ -14,16 +15,26 @@ import {
   type PaymentSimulator,
   type SubscriptionRunner,
 } from '@paybox/simulator';
-import { expandFormBody } from './form.js';
+import { expandFormBody, formBoolean } from './form.js';
+import { applyExpansions, assertExpandDepth, expandPaths } from './expand.js';
 import { assertStripeCredentials } from './auth.js';
 import { toStripeError } from './errors.js';
 import { stripeInstrumentResolver } from './instruments.js';
-import { stripeAuthorizationMinter } from './authorization.js';
+import { stripeAuthorizationMinter, stripeInstrumentDraft } from './authorization.js';
 import { fromStripeRecurring, fromStripeStatus } from './status.js';
 import {
+  chargeCaptureSchema,
+  chargeCreateSchema,
+  chargeUpdateSchema,
   checkoutPaySchema,
   checkoutSessionCreateSchema,
   customerCreateSchema,
+  invoiceCreateSchema,
+  invoiceFinalizeSchema,
+  invoiceItemCreateSchema,
+  invoicePaySchema,
+  invoiceUpdateSchema,
+  invoiceVoidSchema,
   listQuerySchema,
   paymentIntentCancelSchema,
   paymentIntentCaptureSchema,
@@ -35,24 +46,39 @@ import {
   priceCreateSchema,
   productCreateSchema,
   refundCreateSchema,
+  setupIntentCancelSchema,
+  setupIntentConfirmSchema,
+  setupIntentCreateSchema,
+  setupIntentUpdateSchema,
   subscriptionCancelSchema,
   subscriptionCreateSchema,
+  subscriptionItemCreateSchema,
+  subscriptionItemDeleteSchema,
+  subscriptionItemUpdateSchema,
   subscriptionUpdateSchema,
 } from './schemas.js';
-import { renderCheckoutPage, renderCheckoutResult } from './checkout.js';
+import {
+  renderCheckoutPage,
+  renderCheckoutResult,
+  renderSetupAuthenticationPage,
+  renderSetupResult,
+} from './checkout.js';
 import {
   list,
   serializeCharge,
   serializeCheckoutSession,
   serializeInvoice,
+  serializeInvoiceItem,
   serializeLineItems,
   serializePrice,
   serializeProduct,
   serializeSubscription,
+  serializeSubscriptionItem,
   serializeCustomer,
   serializePaymentIntent,
   serializePaymentMethod,
   serializeRefund,
+  serializeSetupIntent,
   stripeId,
 } from './serializers.js';
 
@@ -254,6 +280,30 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
     });
   }
 
+  /** Masked card detail carried by a stored instrument. */
+  function authorizationDetails(authorization: {
+    id: string;
+    bin: string | null;
+    last4: string | null;
+    expMonth: string | null;
+    expYear: string | null;
+    brand: string | null;
+    countryCode: string | null;
+  }): Record<string, unknown> {
+    return {
+      bin: authorization.bin,
+      last4: authorization.last4,
+      exp_month: authorization.expMonth,
+      exp_year: authorization.expYear,
+      brand: authorization.brand,
+      country: authorization.countryCode,
+      // Which stored instrument this payment used. The minter reads it and
+      // mints nothing: charging a PaymentMethod you already have must not
+      // produce a second one for the same card.
+      authorization_id: authorization.id,
+    };
+  }
+
   /** Masked card detail from inline `payment_method_data`, or a stored method. */
   function cardDetailsFrom(card: {
     number: string;
@@ -272,6 +322,82 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
       country: 'US',
     };
   }
+
+  /* ---------------------------------------------------------------- *
+   * expand[]
+   * ---------------------------------------------------------------- */
+
+  /**
+   * Resolve one Stripe id to the object it names.
+   *
+   * Prefix-dispatched, because that is genuinely how Stripe ids work: the
+   * prefix is the type. A handle that does not resolve returns null and the
+   * caller leaves the string alone -- see `ExpandLoader`.
+   */
+  async function loadExpandable(handle: string): Promise<unknown | null> {
+    try {
+      if (handle.startsWith('cus_')) return serializeCustomer(await loadCustomer(handle));
+      if (handle.startsWith('pi_')) return await decorate(await loadPayment(handle));
+      if (handle.startsWith('ch_')) return await decorateCharge(await loadPayment(handle));
+      if (handle.startsWith('pm_')) return serializePaymentMethod(await loadAuthorization(handle));
+      if (handle.startsWith('prod_')) return serializeProduct(await loadProduct(handle));
+      if (handle.startsWith('price_')) {
+        const plan = await loadPrice(handle);
+        return serializePrice(plan, plan.productId ? await storage.products.byId(plan.productId) : null);
+      }
+      if (handle.startsWith('seti_')) return await decorateSetup(await loadSetup(handle));
+      if (handle.startsWith('sub_')) return await decorateSubscription(await loadSubscription(handle));
+      if (handle.startsWith('in_')) return await decorateInvoice(await loadInvoice(handle));
+      if (handle.startsWith('re_')) {
+        const canonical = handle.replace(/^re_/, 'ref_');
+        const refund = (await storage.refunds.byId(canonical)) ?? (await storage.refunds.byId(handle));
+        if (!refund) return null;
+        return serializeRefund(refund, await storage.payments.byId(refund.paymentId));
+      }
+      return null;
+    } catch {
+      // An unresolvable id is not an error: expansion asks for more detail,
+      // and failing to supply it must never turn a 200 into a 404.
+      return null;
+    }
+  }
+
+  const requestedExpansions = (request: FastifyRequest): string[] => [
+    ...expandPaths(request.body),
+    ...expandPaths(request.query),
+  ];
+
+  /**
+   * Reject an over-deep `expand[]` before the handler does any work.
+   *
+   * The check has to happen here rather than at serialisation time: an error
+   * thrown from `preSerialization` runs after the handler has already produced
+   * a payload, and Fastify answers it from its default serialiser rather than
+   * this plugin's -- which would hand a Stripe client a Fastify-shaped error.
+   * Validating a bad request up front is what a real API does anyway.
+   */
+  fastify.addHook('preValidation', async (request) => {
+    assertExpandDepth(requestedExpansions(request));
+  });
+
+  /**
+   * Apply `expand[]` to every JSON response this plugin produces.
+   *
+   * A `preSerialization` hook rather than a call in each of forty handlers:
+   * the payload is still a plain object at this point, so one walk covers the
+   * whole surface and no route can forget to honour the parameter. Hooks added
+   * inside a plugin apply to that plugin's routes only, which is exactly the
+   * encapsulation this adapter is registered for.
+   */
+  fastify.addHook('preSerialization', async (request, reply, payload) => {
+    if (payload === null || typeof payload !== 'object') return payload;
+    // An error envelope has no ids worth expanding, and walking it would only
+    // risk turning a clean 400 into something else.
+    if (reply.statusCode >= 400) return payload;
+    const paths = requestedExpansions(request);
+    if (paths.length === 0) return payload;
+    return applyExpansions(payload, paths, loadExpandable);
+  });
 
   /* ---------------------------------------------------------------- *
    * PaymentIntents
@@ -362,14 +488,7 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
         const authorization = await loadAuthorization(body.payment_method);
         engine.assertChargeable(authorization);
         number = authorization.last4;
-        details = {
-          bin: authorization.bin,
-          last4: authorization.last4,
-          exp_month: authorization.expMonth,
-          exp_year: authorization.expYear,
-          brand: authorization.brand,
-          country: authorization.countryCode,
-        };
+        details = authorizationDetails(authorization);
       }
 
       if (details) {
@@ -463,6 +582,288 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
       );
       const data = await Promise.all(page.map((payment) => decorate(payment)));
       return reply.send(list(data, '/v1/payment_intents', hasMore));
+    },
+  );
+
+  /* ---------------------------------------------------------------- *
+   * SetupIntents
+   *
+   * Storing an instrument without charging for it. Deliberately *not* a
+   * zero-amount payment: a row that never moves money would pollute every
+   * total, list and balance with things that are not transactions. The
+   * canonical resource is an InstrumentSetup, and it ends in the same stored
+   * authorization a successful charge would leave behind -- with the same
+   * fingerprint, so a card saved here and the same card charged directly are
+   * one PaymentMethod rather than two.
+   * ---------------------------------------------------------------- */
+
+  async function loadSetup(handle: string) {
+    const canonical = handle.replace(/^seti_/, 'set_');
+    const setup =
+      (await storage.instrumentSetups.byId(canonical)) ??
+      (await storage.instrumentSetups.byId(handle));
+    if (setup && setup.provider === PROVIDER) return setup;
+    throw new PayboxError('not_found', `No such setup_intent: '${handle}'.`);
+  }
+
+  async function decorateSetup(setup: Awaited<ReturnType<typeof loadSetup>>) {
+    return serializeSetupIntent(setup, {
+      customer: setup.customerId ? await storage.customers.byId(setup.customerId) : null,
+      authorization: setup.authorizationId
+        ? await storage.authorizations.byId(setup.authorizationId)
+        : null,
+      baseUrl: options.baseUrl,
+      basePath: options.basePath,
+    });
+  }
+
+  /**
+   * Run a setup to its outcome.
+   *
+   * Uses the same published-card table as a charge, so `4000002500003155`
+   * demands a step-up here exactly as it does on a payment -- a developer
+   * should not have to learn a second set of test numbers for the setup flow.
+   */
+  async function confirmSetup(
+    setup: Awaited<ReturnType<typeof loadSetup>>,
+    number: string | null,
+  ) {
+    const retry = setup.status === 'failed' ? { retry: true } : {};
+    const { outcome } = resolveInstrument(number, setup.channel ?? 'card', {
+      resolver: stripeInstrumentResolver,
+    });
+
+    if (outcome === 'authentication_required' || outcome === 'timeout') {
+      return engine.transitionInstrumentSetup(setup.id, 'requires_action', retry);
+    }
+
+    const started = await engine.transitionInstrumentSetup(setup.id, 'processing', retry);
+    if (outcome === 'success') {
+      return engine.transitionInstrumentSetup(started.id, 'successful');
+    }
+
+    const failure = setupFailure(outcome);
+    return engine.transitionInstrumentSetup(started.id, 'failed', failure);
+  }
+
+  /** The decline a failed setup reports in `last_setup_error`. */
+  function setupFailure(outcome: string): { failureCode: string; failureMessage: string } {
+    switch (outcome) {
+      case 'insufficient_funds':
+        return { failureCode: 'insufficient_funds', failureMessage: 'Insufficient funds.' };
+      case 'expired_card':
+        return { failureCode: 'expired_card', failureMessage: 'The card has expired.' };
+      case 'authentication_failed':
+      case 'customer_rejected':
+        return {
+          failureCode: 'authentication_required',
+          failureMessage: 'The customer did not complete authentication.',
+        };
+      default:
+        return {
+          failureCode: 'card_declined',
+          failureMessage: 'The card was declined by the issuer.',
+        };
+    }
+  }
+
+  /** The instrument a setup is being run against, from a body or a stored id. */
+  async function setupInstrument(body: {
+    payment_method?: string | undefined;
+    payment_method_data?: { card?: { number: string; exp_month?: unknown; exp_year?: unknown } } | undefined;
+  }): Promise<{
+    number: string | null;
+    details: Record<string, unknown>;
+    /** Set when the caller named an instrument they already hold. */
+    authorizationId?: string;
+  } | null> {
+    const inline = body.payment_method_data?.card;
+    if (inline) return { number: inline.number, details: cardDetailsFrom(inline) };
+    if (body.payment_method) {
+      const authorization = await loadAuthorization(body.payment_method);
+      engine.assertChargeable(authorization);
+      return {
+        number: authorization.last4,
+        details: authorizationDetails(authorization),
+        authorizationId: authorization.id,
+      };
+    }
+    return null;
+  }
+
+  fastify.post('/v1/setup_intents', async (request, reply) => {
+    authenticate(request);
+    const body = setupIntentCreateSchema.parse(request.body ?? {});
+    const customer = body.customer ? await loadCustomer(body.customer) : null;
+    const instrument = await setupInstrument(body);
+
+    const setup = await engine.createInstrumentSetup({
+      provider: PROVIDER,
+      customerId: customer?.id ?? null,
+      usage: body.usage ?? 'off_session',
+      channel: 'card',
+      ...(instrument ? { instrument: instrument.details } : {}),
+      // Named an instrument they already hold: attach that one on success
+      // rather than minting a second for the same card.
+      ...(instrument?.authorizationId ? { authorizationId: instrument.authorizationId } : {}),
+      status: instrument ? 'pending' : 'created',
+      metadata: {
+        ...(body.metadata ?? {}),
+        ...(body.description ? { description: body.description } : {}),
+        ...(body.return_url ? { return_url: body.return_url } : {}),
+      },
+    });
+
+
+    if (body.confirm && instrument) {
+      return reply.send(await decorateSetup(await confirmSetup(setup, instrument.number)));
+    }
+    return reply.send(await decorateSetup(setup));
+  });
+
+  fastify.post<{ Params: { intent: string } }>(
+    '/v1/setup_intents/:intent/confirm',
+    async (request, reply) => {
+      authenticate(request);
+      const body = setupIntentConfirmSchema.parse(request.body ?? {});
+      let setup = await loadSetup(request.params.intent);
+      const instrument = await setupInstrument(body);
+
+      if (instrument) {
+        setup = await engine.transitionInstrumentSetup(setup.id, 'pending', {
+          instrument: instrument.details,
+          channel: 'card',
+          // Named an instrument they already hold: attach that one on success
+          // rather than minting a second for the same card.
+          authorizationId: instrument.authorizationId ?? null,
+          ...(setup.status === 'failed' ? { retry: true } : {}),
+        });
+      } else if (Object.keys(setup.instrument).length === 0) {
+        throw new PayboxError(
+          'validation_failed',
+          'You must provide a `payment_method` or `payment_method_data` to confirm this ' +
+            'SetupIntent.',
+        );
+      }
+
+      const number =
+        instrument?.number ?? (setup.instrument.last4 as string | undefined) ?? null;
+      return reply.send(await decorateSetup(await confirmSetup(setup, number)));
+    },
+  );
+
+  fastify.post<{ Params: { intent: string } }>(
+    '/v1/setup_intents/:intent/cancel',
+    async (request, reply) => {
+      authenticate(request);
+      const body = setupIntentCancelSchema.parse(request.body ?? {});
+      const setup = await loadSetup(request.params.intent);
+      const cancelled = await engine.transitionInstrumentSetup(setup.id, 'cancelled', {
+        cancellationReason: body.cancellation_reason ?? 'requested_by_customer',
+      });
+      return reply.send(await decorateSetup(cancelled));
+    },
+  );
+
+  fastify.get<{ Params: { intent: string } }>(
+    '/v1/setup_intents/:intent',
+    async (request, reply) => {
+      authenticate(request);
+      return reply.send(await decorateSetup(await loadSetup(request.params.intent)));
+    },
+  );
+
+  fastify.post<{ Params: { intent: string } }>(
+    '/v1/setup_intents/:intent',
+    async (request, reply) => {
+      authenticate(request);
+      const body = setupIntentUpdateSchema.parse(request.body ?? {});
+      const setup = await loadSetup(request.params.intent);
+      const updated = await storage.instrumentSetups.update(setup.id, {
+        metadata: {
+          ...setup.metadata,
+          ...(body.metadata ?? {}),
+          ...(body.description ? { description: body.description } : {}),
+        },
+        ...(body.customer ? { customerId: (await loadCustomer(body.customer)).id } : {}),
+        updatedAt: clock.nowISO(),
+      });
+      return reply.send(await decorateSetup(updated));
+    },
+  );
+
+  fastify.get<{ Querystring: Record<string, string> }>(
+    '/v1/setup_intents',
+    async (request, reply) => {
+      authenticate(request);
+      const query = listQuerySchema.parse(request.query);
+      const customer = query.customer ? await loadCustomer(query.customer) : null;
+      const { page, hasMore } = await paginate(
+        query,
+        (limit, offset) =>
+          storage.instrumentSetups.list({
+            provider: PROVIDER,
+            limit,
+            offset,
+            ...(customer ? { customerId: customer.id } : {}),
+          }),
+        (setup) => stripeId('seti', setup.id),
+      );
+      const data = await Promise.all(page.map((setup) => decorateSetup(setup)));
+      return reply.send(list(data, '/v1/setup_intents', hasMore));
+    },
+  );
+
+  /**
+   * The step-up page `next_action.redirect_to_url` points at.
+   *
+   * Served because advertising a URL and answering it with a 404 would be
+   * worse than omitting `next_action` altogether.
+   */
+  fastify.get<{ Params: { setup: string } }>('/setup/:setup', async (request, reply) => {
+    const setup = await loadSetup(request.params.setup);
+    if (setup.status !== 'requires_action') {
+      return reply.type('text/html').send(
+        renderSetupResult({
+          approved: setup.status === 'successful',
+          redirectUrl: (setup.metadata.return_url as string | undefined) ?? null,
+        }),
+      );
+    }
+    return reply.type('text/html').send(
+      renderSetupAuthenticationPage({
+        setupId: stripeId('seti', setup.id),
+        basePath: options.basePath,
+        last4: (setup.instrument.last4 as string | undefined) ?? null,
+      }),
+    );
+  });
+
+  fastify.post<{ Params: { setup: string }; Body: { outcome?: string } }>(
+    '/setup/:setup/complete',
+    async (request, reply) => {
+      const setup = await loadSetup(request.params.setup);
+      if (setup.status !== 'requires_action') {
+        throw new PayboxError(
+          'invalid_state_transition',
+          `This SetupIntent is not awaiting authentication; it is ${setup.status}.`,
+        );
+      }
+
+      const approved = (request.body?.outcome ?? 'approve') !== 'reject';
+      const settled = approved
+        ? await engine.transitionInstrumentSetup(setup.id, 'successful')
+        : await engine.transitionInstrumentSetup(setup.id, 'failed', {
+            failureCode: 'authentication_required',
+            failureMessage: 'The customer did not complete authentication.',
+          });
+
+      return reply.type('text/html').send(
+        renderSetupResult({
+          approved: settled.status === 'successful',
+          redirectUrl: (setup.metadata.return_url as string | undefined) ?? null,
+        }),
+      );
     },
   );
 
@@ -605,12 +1006,99 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
   ) {
     const plan = await storage.plans.byId(subscription.planId);
     const invoices = await storage.invoices.listBySubscription(subscription.id);
+    const items = await storage.subscriptionItems.listBySubscription(subscription.id);
+
+    // One lookup per distinct plan and product, not one per item.
+    const plans = new Map<string, NonNullable<typeof plan>>();
+    const products = new Map<string, NonNullable<Awaited<ReturnType<typeof loadProduct>>>>();
+    for (const planId of new Set(items.map((item) => item.planId))) {
+      const found = await storage.plans.byId(planId);
+      if (!found) continue;
+      plans.set(found.id, found);
+      if (found.productId && !products.has(found.productId)) {
+        const product = await storage.products.byId(found.productId);
+        if (product) products.set(product.id, product);
+      }
+    }
+
     return serializeSubscription(subscription, {
       plan,
       product: plan?.productId ? await storage.products.byId(plan.productId) : null,
       customer: await storage.customers.byId(subscription.customerId),
       latestInvoice: invoices.at(-1) ?? null,
+      items,
+      plans,
+      products,
     });
+  }
+
+  /**
+   * `proration_behavior: always_invoice` -- bill the part-period difference
+   * now rather than waiting for the next cycle.
+   *
+   * Raises an invoice, finalises it (which sweeps in the pending proration
+   * lines) and pays it through the ordinary payment path, so an immediate
+   * upgrade charge is an ordinary charge with ordinary events.
+   */
+  async function billProrationsNow(subscriptionId: string, customerId: string): Promise<void> {
+    const now = clock.nowISO();
+    const draft = await engine.createInvoice({
+      provider: PROVIDER,
+      customerId,
+      subscriptionId,
+      currency: (await storage.subscriptions.byId(subscriptionId))?.currency ?? 'USD',
+      periodStart: now,
+      periodEnd: now,
+      dueAt: now,
+      status: 'draft',
+      billingReason: 'subscription_update',
+    });
+    const open = await engine.finalizeInvoice(draft.id);
+
+    // A downgrade can net to a credit, which owes nothing now. Voiding rather
+    // than charging zero keeps the merchant's invoice list honest.
+    if (open.amount === 0) {
+      await engine.transitionInvoice(open.id, 'void');
+      return;
+    }
+
+    const authorization = (await storage.authorizations.listByCustomer(customerId)).find(
+      (candidate) => candidate.reusable && candidate.active,
+    );
+    if (!authorization) return;
+
+    const payment = await engine.createPayment({
+      provider: PROVIDER,
+      amount: open.amount,
+      currency: open.currency,
+      customerId,
+      paymentMethod: authorization.channel,
+      paymentMethodDetails: authorizationDetails(authorization),
+      metadata: { invoice_code: open.providerInvoiceCode, subscription_id: subscriptionId },
+      status: 'pending',
+    });
+    const { outcome } = resolveInstrument(authorization.last4, authorization.channel, {
+      resolver: stripeInstrumentResolver,
+    });
+    const settled = await simulator.apply(payment.id, outcome);
+    await engine.transitionInvoice(
+      open.id,
+      settled.status === 'successful' ? 'success' : 'failed',
+      { paymentId: settled.id },
+    );
+  }
+
+  /** Stripe sends trial ends as unix seconds, or the literal string `now`. */
+  function trialEndFrom(value: number | string | undefined): string | null {
+    if (value === undefined) return null;
+    // `trial_end: now` ends a trial immediately, which is how a merchant
+    // converts someone who chose to start paying early.
+    if (value === 'now') return clock.nowISO();
+    const seconds = Number(value);
+    if (!Number.isFinite(seconds)) {
+      throw new PayboxError('validation_failed', `Invalid trial_end: ${String(value)}.`);
+    }
+    return new Date(seconds * 1000).toISOString();
   }
 
   fastify.post('/v1/subscriptions', async (request, reply) => {
@@ -618,15 +1106,15 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
     const body = subscriptionCreateSchema.parse(request.body);
     const customer = await loadCustomer(body.customer);
 
-    if (body.items.length > 1) {
-      throw new PayboxError(
-        'unsupported_operation',
-        'paybox models one price per subscription; multi-item subscriptions are not ' +
-          'implemented.',
-      );
+    const items = [];
+    for (const entry of body.items) {
+      const plan = await loadPrice(entry.price);
+      items.push({
+        planId: plan.id,
+        quantity: entry.quantity != null ? Number(entry.quantity) : 1,
+        metadata: entry.metadata ?? {},
+      });
     }
-    const item = body.items[0]!;
-    const plan = await loadPrice(item.price);
 
     const authorization = body.default_payment_method
       ? await loadAuthorization(body.default_payment_method)
@@ -638,12 +1126,16 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
       );
     }
 
+    const trialEnd = trialEndFrom(body.trial_end);
+    const trialDays = body.trial_period_days != null ? Number(body.trial_period_days) : null;
+
     const subscription = await engine.createSubscription({
       provider: PROVIDER,
       customerId: customer.id,
-      planId: plan.id,
+      items,
       authorizationId: authorization.id,
-      ...(item.quantity != null ? { quantity: Number(item.quantity) } : {}),
+      ...(trialEnd ? { trialEnd } : {}),
+      ...(trialDays ? { trialPeriodDays: trialDays } : {}),
       metadata: body.metadata ?? {},
     });
     await subscriptions.start(subscription);
@@ -677,6 +1169,54 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
     const body = subscriptionUpdateSchema.parse(request.body ?? {});
     const subscription = await loadSubscription(request.params.id);
 
+    // Changing what is billed. `items` is the full desired set, as at Stripe:
+    // an item left out is removed, and the part-period difference is settled
+    // according to `proration_behavior`.
+    if (body.items && body.items.length > 0) {
+      const existing = await storage.subscriptionItems.listBySubscription(subscription.id);
+      const desired = [];
+      for (const entry of body.items) {
+        const match = entry.id
+          ? existing.find((item) => stripeId('si', item.id) === entry.id)
+          : undefined;
+        if (entry.id && !match) {
+          throw new PayboxError('not_found', `No such subscription item: '${entry.id}'.`);
+        }
+        const planId = entry.price ? (await loadPrice(entry.price)).id : match?.planId;
+        if (!planId) {
+          throw new PayboxError('validation_failed', 'Each item needs a `price` or an `id`.');
+        }
+        desired.push({
+          ...(match ? { itemId: match.id } : {}),
+          planId,
+          quantity: entry.quantity != null ? Number(entry.quantity) : (match?.quantity ?? 1),
+        });
+      }
+
+      const { prorations } = await engine.updateSubscriptionItems({
+        subscriptionId: subscription.id,
+        items: desired,
+        ...(body.proration_behavior ? { behavior: body.proration_behavior } : {}),
+      });
+
+      if (body.proration_behavior === 'always_invoice' && prorations.length > 0) {
+        await billProrationsNow(subscription.id, subscription.customerId);
+      }
+    }
+
+    // `trial_end: now` converts a trial immediately.
+    if (body.trial_end !== undefined && subscription.status === 'trialing') {
+      const trialEnd = trialEndFrom(body.trial_end);
+      if (trialEnd) {
+        await storage.subscriptions.update(subscription.id, {
+          trialEnd,
+          nextPaymentDate: trialEnd,
+          updatedAt: clock.nowISO(),
+        });
+        await subscriptions.start(await loadSubscription(request.params.id));
+      }
+    }
+
     if (body.cancel_at_period_end === true && subscription.status === 'active') {
       await engine.transitionSubscription(subscription.id, 'non_renewing', {
         // Keep billing the current period; only future renewals stop.
@@ -702,12 +1242,25 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
   });
 
   async function decorateInvoice(invoice: Awaited<ReturnType<typeof loadInvoice>>) {
-    const subscription = await storage.subscriptions.byId(invoice.subscriptionId);
+    const subscription = invoice.subscriptionId
+      ? await storage.subscriptions.byId(invoice.subscriptionId)
+      : null;
+    const lines = await storage.invoiceItems.listByInvoice(invoice.id);
+
+    // One lookup per distinct plan across the lines, not one per line.
+    const plans = new Map<string, Awaited<ReturnType<typeof loadPrice>>>();
+    for (const planId of new Set(lines.map((line) => line.planId).filter(Boolean))) {
+      const plan = await storage.plans.byId(planId as string);
+      if (plan) plans.set(plan.id, plan);
+    }
+
     return serializeInvoice(invoice, {
       subscription,
       customer: await storage.customers.byId(invoice.customerId),
       payment: invoice.paymentId ? await storage.payments.byId(invoice.paymentId) : null,
       plan: subscription ? await storage.plans.byId(subscription.planId) : null,
+      lines,
+      plans,
     });
   }
 
@@ -716,6 +1269,508 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
     const invoice = await storage.invoices.byId(canonical);
     if (invoice && invoice.provider === PROVIDER) return invoice;
     throw new PayboxError('not_found', `No such invoice: '${handle}'.`);
+  }
+
+  /* ---------------------------------------------------------------- *
+   * Subscription items
+   *
+   * The per-item routes are the same operation as `POST /v1/subscriptions/:id`
+   * with an `items` array -- expressed one item at a time, which is how most
+   * SDK code actually changes a plan. Both funnel through
+   * `updateSubscriptionItems`, so proration cannot behave differently
+   * depending on which door was used.
+   * ---------------------------------------------------------------- */
+
+  async function loadSubscriptionItem(handle: string) {
+    const canonical = handle.replace(/^si_/, 'sui_');
+    const item =
+      (await storage.subscriptionItems.byId(canonical)) ??
+      (await storage.subscriptionItems.byId(handle));
+    if (item && item.provider === PROVIDER) return item;
+    throw new PayboxError('not_found', `No such subscription item: '${handle}'.`);
+  }
+
+  async function decorateSubscriptionItem(
+    item: Awaited<ReturnType<typeof loadSubscriptionItem>>,
+  ) {
+    const plan = await storage.plans.byId(item.planId);
+    return serializeSubscriptionItem(item, {
+      plan,
+      product: plan?.productId ? await storage.products.byId(plan.productId) : null,
+    });
+  }
+
+  /** The current set, expressed the way `updateSubscriptionItems` wants it. */
+  async function currentItems(subscriptionId: string) {
+    const items = await storage.subscriptionItems.listBySubscription(subscriptionId);
+    return items.map((item) => ({
+      itemId: item.id,
+      planId: item.planId,
+      quantity: item.quantity,
+    }));
+  }
+
+  async function applyItemChange(
+    subscription: Awaited<ReturnType<typeof loadSubscription>>,
+    items: { itemId?: string; planId: string; quantity?: number }[],
+    behavior: 'create_prorations' | 'none' | 'always_invoice' | undefined,
+  ) {
+    const { prorations } = await engine.updateSubscriptionItems({
+      subscriptionId: subscription.id,
+      items,
+      ...(behavior ? { behavior } : {}),
+    });
+    if (behavior === 'always_invoice' && prorations.length > 0) {
+      await billProrationsNow(subscription.id, subscription.customerId);
+    }
+  }
+
+  fastify.post('/v1/subscription_items', async (request, reply) => {
+    authenticate(request);
+    const body = subscriptionItemCreateSchema.parse(request.body);
+    const subscription = await loadSubscription(body.subscription);
+    const plan = await loadPrice(body.price);
+    const quantity = body.quantity != null ? Number(body.quantity) : 1;
+
+    const before = new Set(
+      (await storage.subscriptionItems.listBySubscription(subscription.id)).map((i) => i.id),
+    );
+    await applyItemChange(
+      subscription,
+      [...(await currentItems(subscription.id)), { planId: plan.id, quantity }],
+      body.proration_behavior,
+    );
+
+    const after = await storage.subscriptionItems.listBySubscription(subscription.id);
+    const created = after.find((item) => !before.has(item.id)) ?? after.at(-1)!;
+    return reply.send(await decorateSubscriptionItem(created));
+  });
+
+  fastify.post<{ Params: { item: string } }>(
+    '/v1/subscription_items/:item',
+    async (request, reply) => {
+      authenticate(request);
+      const body = subscriptionItemUpdateSchema.parse(request.body ?? {});
+      const item = await loadSubscriptionItem(request.params.item);
+      const subscription = await loadSubscription(stripeId('sub', item.subscriptionId));
+      const plan = body.price ? await loadPrice(body.price) : null;
+
+      const items = (await currentItems(subscription.id)).map((entry) =>
+        entry.itemId === item.id
+          ? {
+              ...entry,
+              planId: plan?.id ?? entry.planId,
+              quantity: body.quantity != null ? Number(body.quantity) : entry.quantity,
+            }
+          : entry,
+      );
+      await applyItemChange(subscription, items, body.proration_behavior);
+
+      return reply.send(await decorateSubscriptionItem(await loadSubscriptionItem(item.id)));
+    },
+  );
+
+  fastify.delete<{ Params: { item: string } }>(
+    '/v1/subscription_items/:item',
+    async (request, reply) => {
+      authenticate(request);
+      const body = subscriptionItemDeleteSchema.parse(request.body ?? {});
+      const item = await loadSubscriptionItem(request.params.item);
+      const subscription = await loadSubscription(stripeId('sub', item.subscriptionId));
+
+      const remaining = (await currentItems(subscription.id)).filter(
+        (entry) => entry.itemId !== item.id,
+      );
+      if (remaining.length === 0) {
+        throw new PayboxError(
+          'validation_failed',
+          'You cannot delete the last subscription item. Cancel the subscription instead.',
+        );
+      }
+      await applyItemChange(subscription, remaining, body.proration_behavior);
+
+      return reply.send({
+        id: stripeId('si', item.id),
+        object: 'subscription_item',
+        deleted: true,
+      });
+    },
+  );
+
+  fastify.get<{ Params: { item: string } }>(
+    '/v1/subscription_items/:item',
+    async (request, reply) => {
+      authenticate(request);
+      return reply.send(
+        await decorateSubscriptionItem(await loadSubscriptionItem(request.params.item)),
+      );
+    },
+  );
+
+  fastify.get<{ Querystring: Record<string, string> }>(
+    '/v1/subscription_items',
+    async (request, reply) => {
+      authenticate(request);
+      const query = listQuerySchema.parse(request.query);
+      const handle = (request.query as { subscription?: string }).subscription;
+      if (!handle) {
+        throw new PayboxError('validation_failed', 'The `subscription` parameter is required.');
+      }
+      const subscription = await loadSubscription(handle);
+      const items = await storage.subscriptionItems.listBySubscription(subscription.id);
+      const data = await Promise.all(
+        items.slice(0, query.limit).map((item) => decorateSubscriptionItem(item)),
+      );
+      return reply.send(
+        list(
+          data,
+          `/v1/subscription_items?subscription=${stripeId('sub', subscription.id)}`,
+          items.length > query.limit,
+        ),
+      );
+    },
+  );
+
+  /* ---------------------------------------------------------------- *
+   * Invoice lifecycle
+   *
+   * A draft is assembled from line items, finalised -- which is the moment the
+   * money becomes owed -- and then paid, voided or written off. The invoice
+   * total is a fold over its lines rather than a separately-stored number, so
+   * the two can never disagree.
+   * ---------------------------------------------------------------- */
+
+  /**
+   * The instrument an invoice is paid with: an explicit one, or the customer's
+   * stored default.
+   */
+  async function invoiceInstrument(customerId: string, handle?: string) {
+    if (handle) {
+      const explicit = await loadAuthorization(handle);
+      engine.assertChargeable(explicit);
+      return explicit;
+    }
+    const stored = (await storage.authorizations.listByCustomer(customerId)).find(
+      (candidate) => candidate.reusable && candidate.active,
+    );
+    if (!stored) {
+      throw new PayboxError(
+        'validation_failed',
+        'Cannot pay this invoice: the customer has no default payment method.',
+      );
+    }
+    return stored;
+  }
+
+  fastify.post('/v1/invoices', async (request, reply) => {
+    authenticate(request);
+    const body = invoiceCreateSchema.parse(request.body);
+    const customer = await loadCustomer(body.customer);
+    const subscription = body.subscription ? await loadSubscription(body.subscription) : null;
+
+    const now = clock.nowISO();
+    const days = Number(body.days_until_due ?? 0);
+    const dueAt =
+      Number.isFinite(days) && days > 0
+        ? new Date(clock.now() + days * 24 * 60 * 60_000).toISOString()
+        : now;
+
+    const invoice = await engine.createInvoice({
+      provider: PROVIDER,
+      customerId: customer.id,
+      subscriptionId: subscription?.id ?? null,
+      currency: (body.currency ?? subscription?.currency ?? 'USD').toUpperCase(),
+      periodStart: now,
+      periodEnd: dueAt,
+      dueAt,
+      status: 'draft',
+      billingReason: 'manual',
+      metadata: {
+        ...(body.metadata ?? {}),
+        ...(body.description ? { description: body.description } : {}),
+      },
+    });
+
+    // `auto_advance` asks Stripe to finalise the draft for you.
+    const finalized = body.auto_advance === true ? await engine.finalizeInvoice(invoice.id) : invoice;
+    return reply.send(await decorateInvoice(finalized));
+  });
+
+  fastify.post<{ Params: { invoice: string } }>(
+    '/v1/invoices/:invoice/finalize',
+    async (request, reply) => {
+      authenticate(request);
+      invoiceFinalizeSchema.parse(request.body ?? {});
+      const invoice = await loadInvoice(request.params.invoice);
+      if (invoice.status !== 'draft') {
+        throw new PayboxError(
+          'invalid_state_transition',
+          `Invoice ${request.params.invoice} is already finalized.`,
+        );
+      }
+      return reply.send(await decorateInvoice(await engine.finalizeInvoice(invoice.id)));
+    },
+  );
+
+  /**
+   * Charge an open invoice.
+   *
+   * Goes through the ordinary payment path -- create, then settle according to
+   * the instrument -- so paying an invoice appends the same events and fires
+   * the same webhooks as any other charge. A decline leaves the invoice owed
+   * and payable again, which is the dunning loop a merchant has to build.
+   */
+  fastify.post<{ Params: { invoice: string } }>(
+    '/v1/invoices/:invoice/pay',
+    async (request, reply) => {
+      authenticate(request);
+      const body = invoicePaySchema.parse(request.body ?? {});
+      const invoice = await loadInvoice(request.params.invoice);
+
+      if (invoice.status === 'draft') {
+        throw new PayboxError(
+          'invalid_state_transition',
+          'Cannot pay a draft invoice. Finalize it first.',
+        );
+      }
+      if (invoice.status === 'success') {
+        throw new PayboxError('invalid_state_transition', 'This invoice is already paid.');
+      }
+      if (invoice.status === 'void') {
+        throw new PayboxError('invalid_state_transition', 'This invoice has been voided.');
+      }
+
+      // "Paid out of band" records settlement that happened elsewhere -- a bank
+      // transfer, cash. No money moves through the emulator, so no payment row
+      // is created either.
+      if (body.paid_out_of_band === true) {
+        const settled = await engine.transitionInvoice(invoice.id, 'success');
+        return reply.send(await decorateInvoice(settled));
+      }
+
+      const authorization = await invoiceInstrument(
+        invoice.customerId,
+        body.payment_method ?? body.source,
+      );
+
+      const payment = await engine.createPayment({
+        provider: PROVIDER,
+        amount: invoice.amount,
+        currency: invoice.currency,
+        customerId: invoice.customerId,
+        paymentMethod: authorization.channel,
+        paymentMethodDetails: authorizationDetails(authorization),
+        metadata: {
+          invoice_code: invoice.providerInvoiceCode,
+          ...(invoice.subscriptionId ? { subscription_id: invoice.subscriptionId } : {}),
+        },
+        status: 'pending',
+      });
+
+      const { outcome } = resolveInstrument(authorization.last4, authorization.channel, {
+        resolver: stripeInstrumentResolver,
+      });
+      const settled = await simulator.apply(payment.id, outcome);
+
+      const updated =
+        settled.status === 'successful'
+          ? await engine.transitionInvoice(invoice.id, 'success', { paymentId: settled.id })
+          : await engine.transitionInvoice(invoice.id, 'failed', { paymentId: settled.id });
+
+      return reply.send(await decorateInvoice(updated));
+    },
+  );
+
+  fastify.post<{ Params: { invoice: string } }>(
+    '/v1/invoices/:invoice/void',
+    async (request, reply) => {
+      authenticate(request);
+      invoiceVoidSchema.parse(request.body ?? {});
+      const invoice = await loadInvoice(request.params.invoice);
+      if (invoice.status === 'success') {
+        throw new PayboxError(
+          'invalid_state_transition',
+          'You cannot void an invoice that has been paid. Refund it instead.',
+        );
+      }
+      return reply.send(
+        await decorateInvoice(await engine.transitionInvoice(invoice.id, 'void')),
+      );
+    },
+  );
+
+  fastify.post<{ Params: { invoice: string } }>(
+    '/v1/invoices/:invoice/mark_uncollectible',
+    async (request, reply) => {
+      authenticate(request);
+      const invoice = await loadInvoice(request.params.invoice);
+      return reply.send(
+        await decorateInvoice(await engine.transitionInvoice(invoice.id, 'uncollectible')),
+      );
+    },
+  );
+
+  fastify.post<{ Params: { invoice: string } }>(
+    '/v1/invoices/:invoice',
+    async (request, reply) => {
+      authenticate(request);
+      const body = invoiceUpdateSchema.parse(request.body ?? {});
+      const invoice = await loadInvoice(request.params.invoice);
+      const updated = await storage.invoices.update(invoice.id, {
+        metadata: {
+          ...invoice.metadata,
+          ...(body.metadata ?? {}),
+          ...(body.description ? { description: body.description } : {}),
+        },
+        updatedAt: clock.nowISO(),
+      });
+      return reply.send(await decorateInvoice(updated));
+    },
+  );
+
+  /** Only a draft can be deleted; anything finalized is voided instead. */
+  fastify.delete<{ Params: { invoice: string } }>(
+    '/v1/invoices/:invoice',
+    async (request, reply) => {
+      authenticate(request);
+      const invoice = await loadInvoice(request.params.invoice);
+      if (invoice.status !== 'draft') {
+        throw new PayboxError(
+          'invalid_state_transition',
+          `You can only delete a draft invoice. Invoice ${request.params.invoice} is ` +
+            `${invoice.status}; void it instead.`,
+        );
+      }
+      // Voided rather than removed: the event log is append-only, and an
+      // invoice that vanished from it would leave a hole in the audit trail.
+      // docs/stripe.md records the difference from Stripe, which deletes.
+      await engine.transitionInvoice(invoice.id, 'void');
+      return reply.send({ id: stripeId('in', invoice.id), object: 'invoice', deleted: true });
+    },
+  );
+
+  fastify.get<{ Params: { invoice: string } }>(
+    '/v1/invoices/:invoice/lines',
+    async (request, reply) => {
+      authenticate(request);
+      const invoice = await loadInvoice(request.params.invoice);
+      const serialized = await decorateInvoice(invoice);
+      return reply.send(
+        list(serialized.lines.data, `/v1/invoices/${serialized.id}/lines`, false),
+      );
+    },
+  );
+
+  /* ---------------------------------------------------------------- *
+   * Invoice items
+   * ---------------------------------------------------------------- */
+
+  fastify.post('/v1/invoiceitems', async (request, reply) => {
+    authenticate(request);
+    const body = invoiceItemCreateSchema.parse(request.body);
+    const customer = await loadCustomer(body.customer);
+    const invoice = body.invoice ? await loadInvoice(body.invoice) : null;
+    const plan = body.price ? await loadPrice(body.price) : null;
+
+    const quantity = Math.max(1, Math.trunc(Number(body.quantity ?? 1)) || 1);
+    const unitAmount =
+      body.unit_amount !== undefined
+        ? Number(body.unit_amount)
+        : plan
+          ? plan.amount
+          : undefined;
+    const amount = body.amount !== undefined ? Number(body.amount) : undefined;
+
+    if (amount === undefined && unitAmount === undefined) {
+      throw new PayboxError(
+        'validation_failed',
+        'One of `amount`, `unit_amount` or `price` is required.',
+      );
+    }
+    if (amount !== undefined && !Number.isInteger(amount)) {
+      throw new PayboxError('validation_failed', 'Amount must be an integer.');
+    }
+
+    const currency = (
+      body.currency ?? plan?.currency ?? invoice?.currency ?? 'USD'
+    ).toUpperCase();
+    if (!isSupportedCurrency(currency)) {
+      throw new PayboxError('unsupported_currency', `The currency ${currency} is not supported.`);
+    }
+
+    const item = await engine.addInvoiceItem({
+      provider: PROVIDER,
+      customerId: customer.id,
+      invoiceId: invoice?.id ?? null,
+      subscriptionId: body.subscription
+        ? (await loadSubscription(body.subscription)).id
+        : (invoice?.subscriptionId ?? null),
+      planId: plan?.id ?? null,
+      description: body.description ?? plan?.name ?? null,
+      ...(amount !== undefined ? { amount } : {}),
+      ...(unitAmount !== undefined ? { unitAmount } : {}),
+      currency,
+      quantity,
+      ...(body.period?.start ? { periodStart: unixToIso(body.period.start) } : {}),
+      ...(body.period?.end ? { periodEnd: unixToIso(body.period.end) } : {}),
+      metadata: body.metadata ?? {},
+    });
+
+    return reply.send(serializeInvoiceItem(item));
+  });
+
+  fastify.get<{ Params: { item: string } }>('/v1/invoiceitems/:item', async (request, reply) => {
+    authenticate(request);
+    return reply.send(serializeInvoiceItem(await loadInvoiceItem(request.params.item)));
+  });
+
+  fastify.delete<{ Params: { item: string } }>(
+    '/v1/invoiceitems/:item',
+    async (request, reply) => {
+      authenticate(request);
+      const item = await loadInvoiceItem(request.params.item);
+      await engine.deleteInvoiceItem(item.id);
+      return reply.send({ id: stripeId('ii', item.id), object: 'invoiceitem', deleted: true });
+    },
+  );
+
+  fastify.get<{ Querystring: Record<string, string> }>(
+    '/v1/invoiceitems',
+    async (request, reply) => {
+      authenticate(request);
+      const query = listQuerySchema.parse(request.query);
+      const customer = query.customer ? await loadCustomer(query.customer) : null;
+      // Stripe's `pending` narrows to items not yet on an invoice, which is
+      // how you inspect what the next bill will pick up.
+      const pending = formBoolean((request.query as { pending?: string }).pending) === true;
+      const { page, hasMore } = await paginate(
+        query,
+        (limit, offset) =>
+          storage.invoiceItems.list({
+            provider: PROVIDER,
+            limit,
+            offset,
+            ...(customer ? { customerId: customer.id } : {}),
+            ...(pending ? { pending: true } : {}),
+          }),
+        (item) => stripeId('ii', item.id),
+      );
+      return reply.send(list(page.map(serializeInvoiceItem), '/v1/invoiceitems', hasMore));
+    },
+  );
+
+  async function loadInvoiceItem(handle: string) {
+    const canonical = handle.replace(/^ii_/, 'ivi_');
+    const item =
+      (await storage.invoiceItems.byId(canonical)) ??
+      (await storage.invoiceItems.byId(handle));
+    if (item && item.provider === PROVIDER) return item;
+    throw new PayboxError('not_found', `No such invoiceitem: '${handle}'.`);
+  }
+
+  /** Stripe sends period bounds as unix seconds. */
+  function unixToIso(value: number | string): string {
+    return new Date(Number(value) * 1000).toISOString();
   }
 
   fastify.get<{ Params: { invoice: string } }>('/v1/invoices/:invoice', async (request, reply) => {
@@ -1061,6 +2116,165 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
     return serializeCharge(payment, { customer });
   }
 
+  /**
+   * `POST /v1/charges` -- the legacy direct charge (`PostCharges`).
+   *
+   * Deprecated at Stripe but still widely deployed, and it behaves differently
+   * enough from PaymentIntents to be worth modelling rather than aliasing:
+   *
+   *   - It is **synchronous**. The response says whether the money moved, so a
+   *     decline is HTTP 402 with a `card_error`, not a 200 carrying an object
+   *     you are meant to retry.
+   *   - It cannot do SCA. A card that needs a step-up fails with
+   *     `authentication_required` instead of parking at `requires_action` --
+   *     which is the whole reason Stripe moved everyone to PaymentIntents, and
+   *     exactly the wall a developer on this API needs to hit locally.
+   *
+   * The underlying row is the same canonical payment a PaymentIntent creates,
+   * so `pi_` and `ch_` still address one resource (docs/stripe.md).
+   */
+  fastify.post('/v1/charges', async (request, reply) => {
+    authenticate(request);
+    const body = chargeCreateSchema.parse(request.body);
+    const currency = body.currency.toUpperCase();
+    if (!isSupportedCurrency(currency)) {
+      throw new PayboxError(
+        'unsupported_currency',
+        `The currency ${body.currency} is not supported.`,
+      );
+    }
+
+    const customer = body.customer ? await loadCustomer(body.customer) : null;
+
+    // Where the instrument comes from, in Stripe's own order of precedence:
+    // an explicit source, then inline card details, then the customer's
+    // stored default.
+    let number: string | null = null;
+    let details: Record<string, unknown> | null = null;
+
+    if (body.source) {
+      const authorization = await loadAuthorization(body.source);
+      engine.assertChargeable(authorization);
+      number = authorization.last4;
+      details = authorizationDetails(authorization);
+    } else if (body.card) {
+      number = body.card.number;
+      details = cardDetailsFrom(body.card);
+    } else if (customer) {
+      const stored = (await storage.authorizations.listByCustomer(customer.id)).find(
+        (candidate) => candidate.reusable && candidate.active,
+      );
+      if (!stored) {
+        throw new PayboxError(
+          'validation_failed',
+          `Customer ${body.customer} has no attached payment source.`,
+        );
+      }
+      number = stored.last4;
+      details = authorizationDetails(stored);
+    } else {
+      throw new PayboxError(
+        'validation_failed',
+        'Must provide source or customer.',
+      );
+    }
+
+    const payment = await engine.createPayment({
+      provider: PROVIDER,
+      amount: body.amount,
+      currency,
+      customerId: customer?.id ?? null,
+      paymentMethod: 'card',
+      paymentMethodDetails: details,
+      metadata: {
+        ...(body.metadata ?? {}),
+        ...(body.description ? { description: body.description } : {}),
+        ...(body.receipt_email ? { receipt_email: body.receipt_email } : {}),
+        ...(body.transfer_group ? { transfer_group: body.transfer_group } : {}),
+        ...(body.capture === false ? { capture_method: 'manual' } : {}),
+      },
+      status: 'pending',
+    });
+
+    const { outcome } = resolveInstrument(number, 'card', {
+      resolver: stripeInstrumentResolver,
+    });
+
+    // `capture: false` authorizes and stops, which is the legacy spelling of a
+    // manual-capture intent.
+    let settled: Payment;
+    if (body.capture === false && outcome === 'success') {
+      await engine.transitionPayment(payment.id, 'processing');
+      settled = await engine.transitionPayment(payment.id, 'authorized');
+    } else {
+      settled = await simulator.apply(payment.id, outcome);
+    }
+
+    if (settled.status === 'requires_action') {
+      // The Charges API has no way to present a step-up, so Stripe fails the
+      // charge outright rather than leaving it in limbo.
+      const failed = await simulator.apply(settled.id, 'authentication_failed');
+      throw new PayboxError(
+        'authentication_required',
+        'This card requires authentication, which the Charges API cannot perform. ' +
+          'Use the PaymentIntents API.',
+        { details: { stripeCharge: stripeId('ch', failed.id), stripePaymentIntent: stripeId('pi', failed.id) } },
+      );
+    }
+
+    if (settled.status === 'failed') {
+      throw new PayboxError(
+        (settled.failureCode ?? 'card_declined') as ErrorCode,
+        settled.failureMessage ?? 'Your card was declined.',
+        {
+          details: {
+            stripeCharge: stripeId('ch', settled.id),
+            stripePaymentIntent: stripeId('pi', settled.id),
+          },
+        },
+      );
+    }
+
+    return reply.send(await decorateCharge(settled));
+  });
+
+  fastify.post<{ Params: { charge: string } }>(
+    '/v1/charges/:charge/capture',
+    async (request, reply) => {
+      authenticate(request);
+      chargeCaptureSchema.parse(request.body ?? {});
+      const payment = await loadPayment(request.params.charge);
+      if (payment.status !== 'authorized') {
+        throw new PayboxError(
+          'invalid_state_transition',
+          `Charge ${request.params.charge} has already been captured.`,
+        );
+      }
+      // Partial capture would have to shrink the charge amount, and paybox
+      // stores one amount per payment; docs/stripe.md records the omission
+      // rather than silently capturing the full amount as if it were partial.
+      return reply.send(await decorateCharge(await simulator.capture(payment.id)));
+    },
+  );
+
+  fastify.post<{ Params: { charge: string } }>('/v1/charges/:charge', async (request, reply) => {
+    authenticate(request);
+    const body = chargeUpdateSchema.parse(request.body ?? {});
+    const payment = await loadPayment(request.params.charge);
+    const updated = await storage.payments.update(payment.id, {
+      metadata: {
+        ...payment.metadata,
+        ...(body.metadata ?? {}),
+        ...(body.description ? { description: body.description } : {}),
+        ...(body.receipt_email ? { receipt_email: body.receipt_email } : {}),
+        ...(body.transfer_group ? { transfer_group: body.transfer_group } : {}),
+      },
+      ...(body.customer ? { customerId: (await loadCustomer(body.customer)).id } : {}),
+      updatedAt: clock.nowISO(),
+    });
+    return reply.send(await decorateCharge(updated));
+  });
+
   fastify.get<{ Params: { charge: string } }>('/v1/charges/:charge', async (request, reply) => {
     authenticate(request);
     return reply.send(await decorateCharge(await loadPayment(request.params.charge)));
@@ -1189,18 +2403,27 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
       );
     }
 
-    const masked = maskInstrument(body.card.number);
+    // Through the same draft builder the charge and setup paths use, so one
+    // card is one PaymentMethod whichever door it came in by.
+    // No customer yet, so the owner is unique to this call: Stripe mints a
+    // fresh PaymentMethod for every POST /v1/payment_methods, even for a card
+    // it has seen before.
+    const draft = stripeInstrumentDraft('card', cardDetailsFrom(body.card), ids.token(12));
     const created = await engine.createAuthorizationRecord({
       provider: PROVIDER,
       channel: 'card',
       reusable: true,
-      bin: masked.bin,
-      last4: masked.last4,
-      expMonth: body.card.exp_month != null ? String(body.card.exp_month) : null,
-      expYear: body.card.exp_year != null ? String(body.card.exp_year) : null,
-      brand: 'visa',
-      cardType: 'visa',
-      countryCode: 'US',
+      bin: draft.bin ?? null,
+      last4: draft.last4 ?? null,
+      expMonth: draft.expMonth ?? null,
+      expYear: draft.expYear ?? null,
+      brand: draft.brand ?? null,
+      cardType: draft.cardType ?? null,
+      countryCode: draft.countryCode ?? null,
+      signature: draft.signature ?? null,
+      ...(draft.providerAuthorizationCode
+        ? { providerAuthorizationCode: draft.providerAuthorizationCode }
+        : {}),
       metadata: body.metadata ?? {},
     });
     return reply.send(serializePaymentMethod(created));
@@ -1225,10 +2448,7 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
       const body = paymentMethodAttachSchema.parse(request.body);
       const authorization = await loadAuthorization(request.params.paymentMethod);
       const customer = await loadCustomer(body.customer);
-      const attached = await storage.authorizations.update(authorization.id, {
-        customerId: customer.id,
-        updatedAt: clock.nowISO(),
-      });
+      const attached = await engine.attachAuthorization(authorization.id, customer.id);
       return reply.send(serializePaymentMethod(attached, customer));
     },
   );
@@ -1238,10 +2458,7 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
     async (request, reply) => {
       authenticate(request);
       const authorization = await loadAuthorization(request.params.paymentMethod);
-      const detached = await storage.authorizations.update(authorization.id, {
-        customerId: null,
-        updatedAt: clock.nowISO(),
-      });
+      const detached = await engine.detachAuthorization(authorization.id);
       return reply.send(serializePaymentMethod(detached));
     },
   );

@@ -53,6 +53,8 @@ const STYLES = `
   .tabs button[aria-selected="true"] { border-color:var(--accent); color:var(--accent); }
   .pay { width:100%; margin-top:20px; padding:12px; font-size:15px; font-weight:600;
          border:0; border-radius:8px; background:var(--accent); color:#fff; cursor:pointer; }
+  .pay.secondary { background:transparent; color:var(--muted);
+                   border:1px solid var(--line); margin-top:8px; }
   .err { background:#ffe3e3; color:#a61e1e; border:1px solid #ffc9c9; border-radius:8px;
          padding:10px 12px; font-size:13px; margin-bottom:12px; }
   @media (prefers-color-scheme: dark) {

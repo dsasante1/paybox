@@ -42,7 +42,10 @@ The **Charge** is different: charges are immutable attempt records, and
 | `POST /v1/payment_intents/{id}/confirm` | **Compatible** | Retries a declined intent. |
 | `POST /v1/payment_intents/{id}/capture` | **Compatible** | |
 | `POST /v1/payment_intents/{id}/cancel` | **Compatible** | |
-| `GET /v1/charges`, `GET /v1/charges/{id}` | **Partially compatible** | Read-only; see below. |
+| `GET /v1/charges`, `GET /v1/charges/{id}` | **Compatible** | |
+| `POST /v1/charges` | **Partially compatible** | Synchronous, as Stripe's is; see below. |
+| `POST /v1/charges/{id}` | **Compatible** | |
+| `POST /v1/charges/{id}/capture` | **Partially compatible** | No partial capture; see below. |
 | `POST /v1/refunds` | **Compatible** | Full and partial. |
 | `GET /v1/refunds`, `GET /v1/refunds/{id}` | **Compatible** | |
 | `POST /v1/customers`, `GET /v1/customers`, `GET /v1/customers/{id}` | **Partially compatible** | No update or delete. |
@@ -56,11 +59,29 @@ The **Charge** is different: charges are immutable attempt records, and
 | `GET /stripe/checkout/{id}` | **Emulator-only** | The hosted page; see below. |
 | `POST /v1/products`, `GET /v1/products`, `GET /v1/products/{id}` | **Partially compatible** | No update or delete. |
 | `POST /v1/prices`, `GET /v1/prices`, `GET /v1/prices/{id}` | **Partially compatible** | Recurring prices only. |
-| `POST /v1/subscriptions`, `GET /v1/subscriptions`, `GET /v1/subscriptions/{id}` | **Partially compatible** | One price per subscription. |
-| `POST /v1/subscriptions/{id}` | **Partially compatible** | `cancel_at_period_end` only. |
+| `POST /v1/subscriptions`, `GET /v1/subscriptions`, `GET /v1/subscriptions/{id}` | **Partially compatible** | Multi-item and trials; see below. |
+| `POST /v1/subscriptions/{id}` | **Partially compatible** | `items`, `proration_behavior`, `trial_end`, `cancel_at_period_end`. |
+| `POST /v1/subscription_items`, `GET`/`POST`/`DELETE /v1/subscription_items/{id}` | **Compatible** | |
+| `GET /v1/subscription_items` | **Partially compatible** | `subscription` is required, as at Stripe. |
 | `DELETE /v1/subscriptions/{id}` | **Compatible** | Cancels immediately. |
-| `GET /v1/invoices`, `GET /v1/invoices/{id}` | **Partially compatible** | Read-only; no draft/finalise/void. |
-| SetupIntents, Connect, Terminal, Issuing, Radar, Tax, everything else | **Not supported** | Out of scope. |
+| `GET /v1/invoices`, `GET /v1/invoices/{id}` | **Compatible** | |
+| `POST /v1/invoices` | **Partially compatible** | Draft; `collection_method` accepted, not acted on. |
+| `POST /v1/invoices/{id}` | **Partially compatible** | Metadata and description. |
+| `DELETE /v1/invoices/{id}` | **Partially compatible** | Voids rather than removes; see below. |
+| `POST /v1/invoices/{id}/finalize` | **Compatible** | Sweeps in pending items. |
+| `POST /v1/invoices/{id}/pay` | **Partially compatible** | Card and out-of-band; see below. |
+| `POST /v1/invoices/{id}/void` | **Compatible** | |
+| `POST /v1/invoices/{id}/mark_uncollectible` | **Compatible** | |
+| `GET /v1/invoices/{id}/lines` | **Compatible** | |
+| `POST /v1/invoiceitems`, `GET /v1/invoiceitems`, `GET`/`DELETE /v1/invoiceitems/{id}` | **Partially compatible** | No update; no discounts or tax rates. |
+| `POST /v1/invoices/{id}/send`, `/add_lines`, `/remove_lines`, `/update_lines`, `create_preview`, `search` | **Not supported** | |
+| `POST /v1/setup_intents`, `GET /v1/setup_intents`, `GET /v1/setup_intents/{id}` | **Compatible** | |
+| `POST /v1/setup_intents/{id}` | **Partially compatible** | Metadata, description and customer. |
+| `POST /v1/setup_intents/{id}/confirm` | **Compatible** | Retries a declined setup. |
+| `POST /v1/setup_intents/{id}/cancel` | **Compatible** | |
+| `GET /stripe/setup/{id}` | **Emulator-only** | The step-up page `next_action` points at. |
+| `POST /v1/setup_intents/{id}/verify_microdeposits` | **Not supported** | No bank-debit methods. |
+| Connect, Terminal, Issuing, Radar, Tax, everything else | **Not supported** | Out of scope. |
 
 ## Requests are form-encoded
 
@@ -273,8 +294,17 @@ expected to react.
    cursor beyond that window is ignored rather than honoured.
 8. `POST /v1/payment_intents/{id}` updates metadata, description and
    `receipt_email` only. Amount and currency are deliberately not updatable.
-9. Charges are read-only. There is no `POST /v1/charges`; the legacy direct
-   charge API is not implemented.
+9. The legacy Charges API is implemented: `POST /v1/charges`,
+   `POST /v1/charges/{id}` and `POST /v1/charges/{id}/capture`. It is
+   deliberately **synchronous**, as Stripe's is -- a decline is a 402
+   `card_error` carrying `charge` and `payment_intent`, not a 200 with a
+   retryable object -- and a card needing SCA fails with
+   `authentication_required`, because this API has no way to present a step-up.
+   Three gaps: `source` accepts paybox's own `pm_` ids (there is no Tokens API,
+   so `tok_`, `src_` and `card_` are not resolvable), partial capture is not
+   supported (`amount` on capture is accepted and ignored; paybox stores one
+   amount per payment), and `application_fee_amount`, `destination` and
+   `transfer_data` are Connect fields that are not modelled.
 10. Refunds settle **immediately**. Stripe's asynchronous refund path applies to
    bank-backed methods, which this slice does not implement.
 11. `client_secret` is derived from the intent id and is **not** a credential.
@@ -283,4 +313,67 @@ expected to react.
    That is what Stripe returns before one exists.
 13. A customer created without an email gets a synthetic local address, because
    paybox keys customers on email and Stripe does not require one.
-14. `expand[]` is parsed and ignored. Nothing is expanded.
+14. **An invoice's total is a fold over its lines**, recomputed on every change
+   rather than stored alongside them -- a total that can disagree with the
+   lines beneath it eventually will. Line amounts are signed, so a credit is a
+   negative line and the arithmetic works out; the invoice total is clamped at
+   zero, because paybox has no customer credit balance for an overall negative
+   to go into. Four differences from Stripe: `DELETE /v1/invoices/{id}` **voids**
+   a draft rather than removing it (the event log is append-only, and a
+   vanished invoice would leave a hole in the audit trail — the response still
+   reports `deleted: true`); `collection_method: send_invoice` is accepted but
+   nothing is emailed, since the emulator sends no mail; there are no discounts,
+   coupons or tax rates; and `invoice.finalization_failed`, `invoice.sent`,
+   `invoice.upcoming`, `invoice.updated` and `invoiceitem.deleted` are not
+   emitted.
+15. **SetupIntents store an instrument without moving money**, and are modelled
+   as their own canonical resource rather than a zero-amount payment -- a row
+   that never moves money would pollute every total, list and balance with
+   things that are not transactions. A card saved through a setup, created
+   directly as a PaymentMethod, or left behind by a charge resolves to **one**
+   PaymentMethod: all three doors compute the same instrument fingerprint.
+   Gaps: no `latest_attempt` (paybox has no SetupAttempt object), no `mandate`,
+   and `verify_microdeposits` is absent because no bank-debit method is
+   implemented.
+
+   **A stored instrument belongs to a customer.** One customer saving the same
+   card twice has one PaymentMethod; two customers saving the same card have
+   two, because that is what both providers do -- Paystack mints a separate
+   `authorization_code` per customer and a Stripe PaymentMethod attaches to
+   exactly one. `POST /v1/payment_methods` mints a fresh one every time, since
+   it has no customer to dedupe against, and confirming a SetupIntent against a
+   PaymentMethod you already hold attaches *that* one rather than minting a
+   second for the same card.
+16. **A subscription can carry several prices on one cycle**, and every price
+   on it must share an interval and currency -- a mismatch is refused rather
+   than producing a subscription whose renewal date is a lie about half its
+   prices. `subscription.quantity` and `planId` remain the *first* item's, which
+   is what sets the cadence.
+17. **Trials are a status, not a date.** A trialing subscription reports
+   `trialing` and bills nothing until `trial_end`, which is also its first
+   billing date -- so the trial and its first charge can never disagree about
+   when the free period stopped. `customer.subscription.trial_will_end` fires
+   three days ahead, as Stripe documents, and is skipped entirely for a trial
+   shorter than that rather than fired with a date in the past.
+   `trial_end: now` converts immediately.
+18. **Proration is two lines, not one net figure**: a credit for the unused
+   time on the old shape and a charge for the remainder on the new, each
+   `proration: true`, so the arithmetic on the invoice is checkable. All three
+   of Stripe's behaviours work — `create_prorations` (the default) raises
+   pending items that land on the next invoice, `none` changes the price and
+   waives the difference, `always_invoice` bills it now. Two differences: a
+   downgrade that nets to a credit is **voided** rather than charged as zero
+   (paybox has no customer credit balance to carry it into), and there is no
+   `pending_update` / `payment_behavior` flow, so a change always applies
+   immediately.
+19. **`current_period_start` moves with each renewal.** It previously reported
+   the subscription's `start_date`, which was only right during the first
+   cycle. Proration is measured against this window.
+20. `expand[]` is honoured on every route, in the query string and in a POST
+   body, on single objects and on `data.` paths in a list. Naming a nested path
+   expands the levels above it, as Stripe does, and more than four levels is
+   refused. Two differences from Stripe: an id that does not resolve leaves the
+   string in place rather than erroring, and a path naming a field paybox does
+   not model is a no-op rather than "This property cannot be expanded" -- these
+   objects are a documented subset, and erroring on the difference would break
+   integrations without teaching anything.

@@ -1,17 +1,22 @@
 import type {
   Authorization,
   Customer,
+  InstrumentSetup,
   Invoice,
+  InvoiceItem,
+  Metadata,
   Payment,
   PayboxEvent,
   Plan,
   Product,
   Refund,
   Subscription,
+  SubscriptionItem,
 } from '@paybox/shared';
 import {
   cancellationReason,
   toStripeInvoiceStatus,
+  toStripeSetupStatus,
   toStripeRecurring,
   toStripeSubscriptionStatus,
   toStripeChargeStatus,
@@ -478,6 +483,77 @@ export function serializeLineItems(payment: Payment) {
 }
 
 
+/**
+ * A SetupIntent.
+ *
+ * `payment_method` is the instrument the setup produced, which is the whole
+ * output of the flow -- a succeeded SetupIntent whose `payment_method` is null
+ * has achieved nothing, and the engine will not report one.
+ *
+ * `next_action` mirrors the PaymentIntent shape: `redirect_to_url` pointing at
+ * the emulator's own hosted page, so a front end that already handles a 3-D
+ * Secure step-up on a payment handles one on a setup without a second code
+ * path.
+ */
+export function serializeSetupIntent(
+  setup: InstrumentSetup,
+  options: {
+    customer?: Customer | null;
+    authorization?: Authorization | null;
+    baseUrl?: string;
+    basePath?: string;
+  } = {},
+) {
+  const id = stripeId('seti', setup.id);
+  const failure = stripeFailure(setup.failureCode);
+  const status = toStripeSetupStatus(setup.status);
+
+  return {
+    id,
+    object: 'setup_intent' as const,
+    application: null,
+    attach_to_self: false,
+    automatic_payment_methods: null,
+    cancellation_reason: setup.cancellationReason,
+    client_secret: clientSecret(id),
+    created: unix(setup.createdAt),
+    customer: setup.customerId ? stripeId('cus', setup.customerId) : null,
+    description: (setup.metadata.description as string | undefined) ?? null,
+    flow_directions: null,
+    last_setup_error:
+      setup.status === 'failed'
+        ? {
+            type: 'card_error',
+            code: failure?.code ?? setup.failureCode,
+            ...(failure?.declineCode ? { decline_code: failure.declineCode } : {}),
+            message: setup.failureMessage,
+          }
+        : null,
+    latest_attempt: null,
+    livemode: false,
+    mandate: null,
+    metadata: setup.metadata,
+    next_action:
+      setup.status === 'requires_action' && options.baseUrl
+        ? {
+            type: 'redirect_to_url',
+            redirect_to_url: {
+              return_url: (setup.metadata.return_url as string | undefined) ?? null,
+              url: `${options.baseUrl}${options.basePath ?? "/stripe"}/setup/${id}`,
+            },
+          }
+        : null,
+    on_behalf_of: null,
+    payment_method: setup.authorizationId ? stripeId('pm', setup.authorizationId) : null,
+    payment_method_configuration_details: null,
+    payment_method_options: null,
+    payment_method_types: [setup.channel ?? 'card'],
+    single_use_mandate: null,
+    status,
+    usage: setup.usage,
+  };
+}
+
 export function serializeProduct(product: Product) {
   return {
     id: stripeId('prod', product.id),
@@ -537,6 +613,27 @@ export interface SerializeSubscriptionOptions {
   product?: Product | null;
   customer?: Customer | null;
   latestInvoice?: Invoice | null;
+  /** Every price on the subscription, in order. */
+  items?: SubscriptionItem[];
+  /** Plans for those items, keyed by canonical plan id. */
+  plans?: Map<string, Plan>;
+  products?: Map<string, Product>;
+}
+
+/** One price on a subscription. */
+export function serializeSubscriptionItem(
+  item: SubscriptionItem,
+  options: { plan?: Plan | null; product?: Product | null } = {},
+) {
+  return {
+    id: stripeId('si', item.id),
+    object: 'subscription_item' as const,
+    created: unix(item.createdAt),
+    metadata: item.metadata,
+    price: options.plan ? serializePrice(options.plan, options.product) : null,
+    quantity: item.quantity,
+    subscription: stripeId('sub', item.subscriptionId),
+  };
 }
 
 export function serializeSubscription(
@@ -545,17 +642,32 @@ export function serializeSubscription(
 ) {
   const id = stripeId('sub', subscription.id);
   const periodEnd = subscription.nextPaymentDate ?? subscription.updatedAt;
-  const item = options.plan
-    ? {
-        id: `si_${id.slice(4)}`,
-        object: 'subscription_item' as const,
-        created: unix(subscription.createdAt),
-        metadata: {},
-        price: serializePrice(options.plan, options.product),
-        quantity: subscription.quantity,
-        subscription: id,
-      }
-    : null;
+  const stored = options.items ?? [];
+
+  const items =
+    stored.length > 0
+      ? stored.map((item) => {
+          const plan = options.plans?.get(item.planId) ?? options.plan;
+          return serializeSubscriptionItem(item, {
+            plan,
+            product: plan?.productId ? options.products?.get(plan.productId) : options.product,
+          });
+        })
+      : options.plan
+        ? [
+            // Subscriptions written before items existed still serialise, from
+            // the plan on the row itself.
+            {
+              id: `si_${id.slice(4)}`,
+              object: 'subscription_item' as const,
+              created: unix(subscription.createdAt),
+              metadata: {} as Metadata,
+              price: serializePrice(options.plan, options.product),
+              quantity: subscription.quantity,
+              subscription: id,
+            },
+          ]
+        : [];
 
   return {
     id,
@@ -569,7 +681,9 @@ export function serializeSubscription(
     created: unix(subscription.createdAt),
     currency: subscription.currency.toLowerCase(),
     current_period_end: unix(periodEnd),
-    current_period_start: unix(subscription.startDate),
+    // The period that is running *now*, which is not the subscription's start
+    // date on any cycle after the first.
+    current_period_start: unix(subscription.currentPeriodStart),
     customer: stripeId('cus', subscription.customerId),
     days_until_due: null,
     default_payment_method: stripeId('pm', subscription.authorizationId),
@@ -581,7 +695,7 @@ export function serializeSubscription(
         : null,
     items: {
       object: 'list' as const,
-      data: item ? [item] : [],
+      data: items,
       has_more: false,
       url: `/v1/subscription_items?subscription=${id}`,
     },
@@ -593,8 +707,56 @@ export function serializeSubscription(
     pause_collection: null,
     start_date: unix(subscription.startDate),
     status: toStripeSubscriptionStatus(subscription.status),
-    trial_end: null,
-    trial_start: null,
+    trial_end: subscription.trialEnd ? unix(subscription.trialEnd) : null,
+    trial_start: subscription.trialStart ? unix(subscription.trialStart) : null,
+  };
+}
+
+export function serializeInvoiceItem(item: InvoiceItem) {
+  return {
+    id: stripeId('ii', item.id),
+    object: 'invoiceitem' as const,
+    amount: item.amount,
+    currency: item.currency.toLowerCase(),
+    customer: stripeId('cus', item.customerId),
+    date: unix(item.createdAt),
+    description: item.description,
+    discountable: true,
+    invoice: item.invoiceId ? stripeId('in', item.invoiceId) : null,
+    livemode: false,
+    metadata: item.metadata,
+    period: { start: unix(item.periodStart), end: unix(item.periodEnd) },
+    price: item.planId ? stripeId('price', item.planId) : null,
+    proration: item.proration,
+    quantity: item.quantity,
+    subscription: item.subscriptionId ? stripeId('sub', item.subscriptionId) : null,
+    unit_amount: item.unitAmount,
+    unit_amount_decimal: String(item.unitAmount),
+  };
+}
+
+/** An invoice line, as it appears inside `invoice.lines`. */
+function serializeLine(item: InvoiceItem, invoiceId: string, plan?: Plan | null) {
+  // Two fields are annotated wider than this branch produces so the
+  // plan-derived fallback below is the same type; without that the two
+  // branches union and callers cannot treat `lines.data` as one shape.
+  return {
+    id: stripeId('il', item.id),
+    object: 'line_item' as const,
+    amount: item.amount,
+    currency: item.currency.toLowerCase(),
+    description: item.description,
+    discountable: true,
+    invoice: invoiceId,
+    invoice_item: stripeId('ii', item.id) as string | null,
+    livemode: false,
+    metadata: item.metadata as Metadata,
+    period: { start: unix(item.periodStart), end: unix(item.periodEnd) },
+    price: plan ? serializePrice(plan) : null,
+    proration: item.proration,
+    quantity: item.quantity,
+    subscription: item.subscriptionId ? stripeId('sub', item.subscriptionId) : null,
+    type: item.subscriptionId ? 'subscription' : 'invoiceitem',
   };
 }
 
@@ -605,20 +767,62 @@ export function serializeInvoice(
     customer?: Customer | null;
     payment?: Payment | null;
     plan?: Plan | null;
+    /** Real stored lines. Empty falls back to one synthesised from the plan. */
+    lines?: InvoiceItem[];
+    /** Plans for the lines, keyed by canonical plan id. */
+    plans?: Map<string, Plan>;
   } = {},
 ) {
   const id = stripeId('in', invoice.id);
   const paid = invoice.status === 'success';
+  // A void or written-off invoice is owed nothing further; Stripe zeroes
+  // amount_remaining rather than leaving a debt that will never be collected.
+  const closed = paid || invoice.status === 'void' || invoice.status === 'uncollectible';
+  const stored = options.lines ?? [];
+
+  const lines: ReturnType<typeof serializeLine>[] =
+    stored.length > 0
+      ? stored.map((item) =>
+          serializeLine(
+            item,
+            id,
+            item.planId ? (options.plans?.get(item.planId) ?? options.plan) : options.plan,
+          ),
+        )
+      : [
+          // Rows raised before line items existed still have to serialise, so
+          // the plan-derived single line stays as a fallback.
+          {
+            id: `il_${id.slice(3)}`,
+            object: 'line_item' as const,
+            amount: invoice.amount,
+            currency: invoice.currency.toLowerCase(),
+            description: options.plan?.name ?? null,
+            discountable: true,
+            invoice: id,
+            invoice_item: null,
+            livemode: false,
+            metadata: {} as Metadata,
+            period: { start: unix(invoice.periodStart), end: unix(invoice.periodEnd) },
+            price: options.plan ? serializePrice(options.plan) : null,
+            proration: false,
+            quantity: options.subscription?.quantity ?? 1,
+            subscription: options.subscription ? stripeId('sub', options.subscription.id) : null,
+            type: (options.subscription ? 'subscription' : 'invoiceitem') as string,
+          },
+        ];
+
   return {
     id,
     object: 'invoice' as const,
     amount_due: invoice.amount,
     amount_paid: paid ? invoice.amount : 0,
-    amount_remaining: paid ? 0 : invoice.amount,
-    attempt_count: 1,
-    attempted: invoice.status !== 'pending',
-    auto_advance: !paid,
-    billing_reason: 'subscription_cycle',
+    amount_remaining: closed ? 0 : invoice.amount,
+    attempt_count: invoice.attemptCount,
+    attempted: invoice.attemptCount > 0,
+    // Stripe stops advancing an invoice that has reached an end state.
+    auto_advance: invoice.status === 'pending' || invoice.status === 'failed',
+    billing_reason: invoice.billingReason,
     collection_method: 'charge_automatically',
     created: unix(invoice.createdAt),
     currency: invoice.currency.toLowerCase(),
@@ -629,24 +833,13 @@ export function serializeInvoice(
     invoice_pdf: null,
     lines: {
       object: 'list' as const,
-      data: [
-        {
-          id: `il_${id.slice(3)}`,
-          object: 'line_item' as const,
-          amount: invoice.amount,
-          currency: invoice.currency.toLowerCase(),
-          description: options.plan?.name ?? null,
-          period: { start: unix(invoice.periodStart), end: unix(invoice.periodEnd) },
-          price: options.plan ? serializePrice(options.plan) : null,
-          quantity: options.subscription?.quantity ?? 1,
-        },
-      ],
+      data: lines,
       has_more: false,
       url: `/v1/invoices/${id}/lines`,
     },
     livemode: false,
     metadata: invoice.metadata,
-    number: null,
+    number: invoice.number,
     paid,
     payment_intent: options.payment ? stripeId('pi', options.payment.id) : null,
     period_end: unix(invoice.periodEnd),

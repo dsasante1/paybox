@@ -161,7 +161,7 @@ describe('subscribing', () => {
     expect(invoices.data[0].amount_paid).toBe(1500);
   });
 
-  it('refuses a multi-item subscription rather than silently billing one', async () => {
+  it('bills several prices on one cycle', async () => {
     const { customerId } = await customerWithCard();
     const a = (await monthlyPrice(1000)).json();
     const b = (await monthlyPrice(2000)).json();
@@ -171,8 +171,8 @@ describe('subscribing', () => {
       'items[0][price]': a.id,
       'items[1][price]': b.id,
     });
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error.message).toMatch(/one price per subscription/);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().items.data).toHaveLength(2);
   });
 });
 

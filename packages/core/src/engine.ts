@@ -9,7 +9,9 @@ import {
   type DisputeResolution,
   type DisputeStatus,
   type IdFactory,
+  type InstrumentSetup,
   type Invoice,
+  type InvoiceItem,
   type InvoiceStatus,
   type LedgerEntry,
   type Metadata,
@@ -23,9 +25,11 @@ import {
   type ProviderId,
   type Refund,
   type RefundStatus,
+  type SetupStatus,
   type Split,
   type Subaccount,
   type Subscription,
+  type SubscriptionItem,
   type SubscriptionStatus,
   type Transfer,
   type TransferStatus,
@@ -38,6 +42,7 @@ import {
   assertPaymentTransition,
   assertRefundTransition,
   assertRefundable,
+  assertSetupTransition,
   assertSubscriptionTransition,
   assertTransferTransition,
   isTerminalPayment,
@@ -142,6 +147,56 @@ export interface AuthorizationDraft {
  */
 export type AuthorizationMinter = (payment: Payment) => AuthorizationDraft | null;
 
+/**
+ * Turns a completed instrument setup into the stored instrument its provider
+ * would mint.
+ *
+ * Same injection as `AuthorizationMinter`, and for the same reason: which
+ * fragments a provider keeps, and whether the result may be charged
+ * off-session, is provider knowledge the engine must not acquire (spec §30).
+ * The setup path needs its own because a setup has no payment to derive from --
+ * that is the entire point of it.
+ */
+/**
+ * A line to put on an invoice.
+ *
+ * Everything is optional that can be inherited from the invoice it lands on,
+ * so a caller adding a line to an existing draft supplies only what differs.
+ */
+export interface InvoiceItemDraft {
+  provider?: ProviderId;
+  customerId?: string;
+  subscriptionId?: string | null;
+  planId?: string | null;
+  description?: string | null;
+  /** Signed. Defaults to `unitAmount * quantity`. Negative is a credit. */
+  amount?: number;
+  currency?: string;
+  quantity?: number;
+  unitAmount?: number;
+  periodStart?: string;
+  periodEnd?: string;
+  proration?: boolean;
+  metadata?: Metadata;
+}
+
+/**
+ * What to do about the part-period difference when a subscription changes.
+ *
+ * Stripe's own vocabulary, because these are the three genuinely different
+ * answers and inventing a fourth would not help anyone.
+ */
+export type ProrationBehavior = 'create_prorations' | 'none' | 'always_invoice';
+
+function sumItems(items: readonly InvoiceItemDraft[]): number {
+  return items.reduce(
+    (total, item) => total + (item.amount ?? (item.unitAmount ?? 0) * (item.quantity ?? 1)),
+    0,
+  );
+}
+
+export type SetupAuthorizationMinter = (setup: InstrumentSetup) => AuthorizationDraft | null;
+
 export interface EngineDeps {
   storage: Storage;
   clock: Clock;
@@ -149,6 +204,8 @@ export interface EngineDeps {
   bus: EventBus;
   providerStatus?: ProviderStatusResolver;
   mintAuthorization?: AuthorizationMinter;
+  /** Mints the instrument a completed setup produced. */
+  mintSetupAuthorization?: SetupAuthorizationMinter;
   /**
    * Refuse a transfer that the balance cannot cover.
    *
@@ -182,6 +239,7 @@ export class PaymentEngine {
   readonly #bus: EventBus;
   readonly #providerStatus: ProviderStatusResolver;
   readonly #mintAuthorization: AuthorizationMinter;
+  readonly #mintSetupAuthorization: SetupAuthorizationMinter;
   readonly #enforceBalance: boolean;
   readonly #openingBalance: number;
 
@@ -192,6 +250,7 @@ export class PaymentEngine {
     this.#bus = deps.bus;
     this.#providerStatus = deps.providerStatus ?? ((_provider, status) => status);
     this.#mintAuthorization = deps.mintAuthorization ?? (() => null);
+    this.#mintSetupAuthorization = deps.mintSetupAuthorization ?? (() => null);
     this.#enforceBalance = deps.enforceBalance ?? true;
     this.#openingBalance = deps.openingBalance ?? 0;
   }
@@ -840,6 +899,24 @@ export class PaymentEngine {
     mobileMoneyNumber?: string | null;
     metadata?: Metadata;
   }): Promise<Authorization> {
+    // A supplied signature asserts "this identifies the instrument", so the
+    // same card reaching the engine by two doors -- created directly, saved
+    // through a setup, or left behind by a charge -- resolves to one row.
+    //
+    // Scoped to the customer, never global: two customers who happen to save
+    // the same card must get two stored instruments, or one customer's saved
+    // card would be handed to another. An instrument with no customer never
+    // dedupes, which is what both providers do -- Stripe mints a fresh
+    // PaymentMethod for every `POST /v1/payment_methods`.
+    if (input.signature && input.customerId) {
+      const existing = await this.#storage.authorizations.bySignature(
+        input.provider,
+        input.signature,
+        input.customerId,
+      );
+      if (existing) return existing;
+    }
+
     const now = this.#clock.nowISO();
     const authorization: Authorization = {
       id: this.#ids.next('aut'),
@@ -884,6 +961,68 @@ export class PaymentEngine {
     return result;
   }
 
+  /**
+   * Bind a stored instrument to a customer.
+   *
+   * Goes through the engine rather than a bare repository write so it appends
+   * an event like every other state change -- which is what lets the adapter
+   * emit `payment_method.attached` for an instrument attached later, and not
+   * only for one minted with a customer already on it.
+   */
+  async attachAuthorization(id: string, customerId: string): Promise<Authorization> {
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const existing = await tx.authorizations.byId(id);
+      if (!existing) throw new PayboxError('not_found', `No authorization with id ${id}.`);
+
+      const customer = await tx.customers.byId(customerId);
+      if (!customer) throw new PayboxError('not_found', `No customer with id ${customerId}.`);
+
+      const updated = await tx.authorizations.update(id, {
+        customerId,
+        updatedAt: this.#clock.nowISO(),
+      });
+      const event = await this.#appendEvent(tx, {
+        type: 'authorization.attached',
+        provider: updated.provider,
+        resourceId: updated.id,
+        resourceType: 'authorization',
+        data: authorizationEventData(updated),
+        previousStatus: existing.customerId ? 'attached' : 'detached',
+        currentStatus: 'attached',
+      });
+      return { result: updated, events: [event] };
+    });
+
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
+  /** Unbind a stored instrument from its customer. */
+  async detachAuthorization(id: string): Promise<Authorization> {
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const existing = await tx.authorizations.byId(id);
+      if (!existing) throw new PayboxError('not_found', `No authorization with id ${id}.`);
+
+      const updated = await tx.authorizations.update(id, {
+        customerId: null,
+        updatedAt: this.#clock.nowISO(),
+      });
+      const event = await this.#appendEvent(tx, {
+        type: 'authorization.detached',
+        provider: updated.provider,
+        resourceId: updated.id,
+        resourceType: 'authorization',
+        data: { ...authorizationEventData(updated), customer_id: existing.customerId },
+        previousStatus: 'attached',
+        currentStatus: 'detached',
+      });
+      return { result: updated, events: [event] };
+    });
+
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
   async deactivateAuthorization(id: string): Promise<Authorization> {
     const { result, events } = await this.#storage.transaction(async (tx) => {
       const existing = await tx.authorizations.byId(id);
@@ -919,25 +1058,58 @@ export class PaymentEngine {
   async #mintFor(tx: Storage, payment: Payment): Promise<PayboxEvent | null> {
     const draft = this.#mintAuthorization(payment);
     if (!draft) return null;
+    const minted = await this.#insertDraft(tx, {
+      provider: payment.provider,
+      draft,
+      customerId: payment.customerId,
+      paymentId: payment.id,
+      fallbackCode: payment.providerTransactionId,
+    });
+    return minted?.event ?? null;
+  }
 
-    // A signature is the provider's fingerprint for the instrument, so the
-    // same card charged twice must yield one authorization, not two. Channels
-    // without a signature (mobile money) mint a fresh row every time, which is
-    // what the provider does.
+  /**
+   * Write an authorization draft as a row, inside the caller's transaction.
+   *
+   * Shared by the payment path and the setup path because both end in the same
+   * place -- a stored instrument the merchant can debit later -- and the dedupe
+   * rule has to be identical for both, or a card saved through a setup and the
+   * same card charged directly would produce two instruments.
+   */
+  async #insertDraft(
+    tx: Storage,
+    input: {
+      provider: ProviderId;
+      draft: AuthorizationDraft;
+      customerId: string | null;
+      paymentId: string | null;
+      fallbackCode: string;
+    },
+  ): Promise<{ authorization: Authorization; event: PayboxEvent } | null> {
+    const { draft } = input;
+
+    // A signature is the provider's fingerprint for the instrument, so one
+    // customer's card charged twice yields one authorization, not two.
+    // Scoped to that customer for the same reason as above. Channels without a
+    // signature (mobile money) mint a fresh row every time, which is what the
+    // provider does.
     const signature = draft.signature ?? null;
-    if (signature) {
-      const existing = await tx.authorizations.bySignature(payment.provider, signature);
+    if (signature && input.customerId) {
+      const existing = await tx.authorizations.bySignature(
+        input.provider,
+        signature,
+        input.customerId,
+      );
       if (existing) return null;
     }
 
     const now = this.#clock.nowISO();
     const authorization: Authorization = {
       id: this.#ids.next('aut'),
-      provider: payment.provider,
-      providerAuthorizationCode:
-        draft.providerAuthorizationCode ?? payment.providerTransactionId,
-      customerId: payment.customerId,
-      paymentId: payment.id,
+      provider: input.provider,
+      providerAuthorizationCode: draft.providerAuthorizationCode ?? input.fallbackCode,
+      customerId: input.customerId,
+      paymentId: input.paymentId,
       channel: draft.channel,
       bin: draft.bin ?? null,
       last4: draft.last4 ?? null,
@@ -958,7 +1130,7 @@ export class PaymentEngine {
     };
 
     const created = await tx.authorizations.insert(authorization);
-    return this.#appendEvent(tx, {
+    const event = await this.#appendEvent(tx, {
       type: 'authorization.created',
       provider: created.provider,
       resourceId: created.id,
@@ -967,6 +1139,209 @@ export class PaymentEngine {
       previousStatus: null,
       currentStatus: 'active',
     });
+    return { authorization: created, event };
+  }
+
+  /* ---------------------------------------------------------------- *
+   * Instrument setups: card-on-file, without a charge
+   * ---------------------------------------------------------------- */
+
+  /**
+   * Begin storing an instrument for later use.
+   *
+   * Deliberately not a zero-amount payment. A payment that never moves money
+   * would pollute every total, every list and every balance with rows that are
+   * not transactions, and would make "how much did I take today" wrong. The
+   * lifecycle is genuinely different too: it ends in a stored instrument
+   * rather than a settlement.
+   */
+  async createInstrumentSetup(input: {
+    provider: ProviderId;
+    customerId?: string | null;
+    usage?: 'on_session' | 'off_session';
+    channel?: PaymentMethod | null;
+    instrument?: Metadata;
+    /** An instrument the caller already holds; attached rather than reminted. */
+    authorizationId?: string | null;
+    status?: SetupStatus;
+    providerSetupId?: string;
+    metadata?: Metadata;
+  }): Promise<InstrumentSetup> {
+    const now = this.#clock.nowISO();
+    const status = input.status ?? 'created';
+    const setup: InstrumentSetup = {
+      id: this.#ids.next('set'),
+      provider: input.provider,
+      providerSetupId: input.providerSetupId ?? this.#ids.token(16),
+      customerId: input.customerId ?? null,
+      authorizationId: input.authorizationId ?? null,
+      status,
+      providerStatus: status,
+      usage: input.usage ?? 'off_session',
+      channel: input.channel ?? null,
+      instrument: input.instrument ?? {},
+      failureCode: null,
+      failureMessage: null,
+      cancellationReason: null,
+      metadata: input.metadata ?? {},
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const created = await tx.instrumentSetups.insert(setup);
+      const event = await this.#appendEvent(tx, {
+        type: 'setup.created',
+        provider: created.provider,
+        resourceId: created.id,
+        resourceType: 'setup',
+        data: setupEventData(created),
+        previousStatus: null,
+        currentStatus: created.status,
+      });
+      return { result: created, events: [event] };
+    });
+
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
+  /**
+   * Move a setup along, minting the stored instrument when it succeeds.
+   *
+   * The mint happens inside the same transaction as the transition, so a setup
+   * can never be recorded as successful without the instrument it promised --
+   * the same append-and-project rule the payment path follows.
+   */
+  async transitionInstrumentSetup(
+    setupId: string,
+    to: SetupStatus,
+    options: {
+      failureCode?: string | null;
+      failureMessage?: string | null;
+      cancellationReason?: string | null;
+      channel?: PaymentMethod | null;
+      instrument?: Metadata;
+      /**
+       * An instrument the caller already holds.
+       *
+       * Set when the setup was run against an existing stored instrument
+       * rather than fresh details: the setup then *attaches* that one instead
+       * of minting a second, which is what a provider does -- confirming a
+       * SetupIntent against a PaymentMethod you already have does not give you
+       * a different PaymentMethod.
+       */
+      authorizationId?: string | null;
+      /** Resume a failed setup with another instrument. */
+      retry?: boolean;
+      eventData?: Metadata;
+    } = {},
+  ): Promise<InstrumentSetup> {
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const setup = await tx.instrumentSetups.byId(setupId);
+      if (!setup) throw new PayboxError('not_found', `No instrument setup with id ${setupId}.`);
+      assertSetupTransition(setup.status, to, { ...(options.retry ? { retry: true } : {}) });
+
+      const now = this.#clock.nowISO();
+      const patch: Partial<InstrumentSetup> = {
+        status: to,
+        providerStatus: this.#providerStatus(setup.provider, setupToPaymentStatus(to)),
+        updatedAt: now,
+        ...(options.channel !== undefined ? { channel: options.channel } : {}),
+        ...(options.instrument !== undefined
+          ? { instrument: { ...setup.instrument, ...options.instrument } }
+          : {}),
+        ...(options.authorizationId !== undefined
+          ? { authorizationId: options.authorizationId }
+          : {}),
+        ...(options.cancellationReason !== undefined
+          ? { cancellationReason: options.cancellationReason }
+          : {}),
+        ...(to === 'failed'
+          ? {
+              failureCode: options.failureCode ?? null,
+              failureMessage: options.failureMessage ?? null,
+            }
+          : {}),
+        // Retrying clears the previous attempt's error, so a caller reading the
+        // row cannot mistake a stale failure for the current state.
+        ...(options.retry && to !== 'failed'
+          ? { failureCode: null, failureMessage: null }
+          : {}),
+      };
+
+      const extra: PayboxEvent[] = [];
+      const held = patch.authorizationId ?? setup.authorizationId;
+
+      // Ran against an instrument the caller already had: attach it rather
+      // than minting a second one for the same card.
+      if (to === 'successful' && held && setup.customerId) {
+        const existing = await tx.authorizations.byId(held);
+        if (existing && existing.customerId !== setup.customerId) {
+          const attached = await tx.authorizations.update(existing.id, {
+            customerId: setup.customerId,
+            updatedAt: now,
+          });
+          extra.push(
+            await this.#appendEvent(tx, {
+              type: 'authorization.attached',
+              provider: attached.provider,
+              resourceId: attached.id,
+              resourceType: 'authorization',
+              data: authorizationEventData(attached),
+              previousStatus: existing.customerId ? 'attached' : 'detached',
+              currentStatus: 'attached',
+            }),
+          );
+        }
+      }
+
+      if (to === 'successful' && !held) {
+        const draft = this.#mintSetupAuthorization({ ...setup, ...patch } as InstrumentSetup);
+        if (draft) {
+          const minted = await this.#insertDraft(tx, {
+            provider: setup.provider,
+            draft,
+            customerId: setup.customerId,
+            paymentId: null,
+            fallbackCode: setup.providerSetupId,
+          });
+          if (minted) {
+            patch.authorizationId = minted.authorization.id;
+            extra.push(minted.event);
+          } else if (draft.signature && setup.customerId) {
+            // This customer had already stored the card, by an earlier setup
+            // or an earlier charge. Point at that row rather than leaving the
+            // setup successful with nothing to charge.
+            const existing = await tx.authorizations.bySignature(
+              setup.provider,
+              draft.signature,
+              setup.customerId,
+            );
+            if (existing) patch.authorizationId = existing.id;
+          }
+        }
+      }
+
+      const updated = await tx.instrumentSetups.update(setupId, patch);
+      const event = await this.#appendEvent(tx, {
+        type: `setup.${to}`,
+        provider: updated.provider,
+        resourceId: updated.id,
+        resourceType: 'setup',
+        data: { ...setupEventData(updated), ...(options.eventData ?? {}) },
+        previousStatus: setup.status,
+        currentStatus: to,
+      });
+      return { result: updated, events: [...extra, event] };
+    });
+
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
+  async getInstrumentSetup(id: string): Promise<InstrumentSetup | null> {
+    return this.#storage.instrumentSetups.byId(id);
   }
 
   /* ---------------------------------------------------------------- *
@@ -1145,19 +1520,73 @@ export class PaymentEngine {
    * concrete instrument. Creating a subscription that could never be debited
    * would only fail later, at the first renewal, far from the cause.
    */
+  /**
+   * Start a subscription.
+   *
+   * `items` is the general form: several prices billed on one cycle, which is
+   * what a base plan plus per-seat pricing plus an add-on actually is.
+   * `planId` remains the *first* item's plan and sets the cadence, because
+   * every price on one subscription must share an interval.
+   *
+   * A trial is expressed as a status, not as "active with a later date": the
+   * whole free-trial pattern turns on a merchant's access logic being able to
+   * tell "trying" from "paying".
+   */
   async createSubscription(input: {
     provider: ProviderId;
     customerId: string;
-    planId: string;
+    /** Single-price form. Ignored when `items` is supplied. */
+    planId?: string;
+    items?: { planId: string; quantity?: number; metadata?: Metadata }[];
     authorizationId: string;
     startDate?: string | null;
     quantity?: number;
     invoiceLimit?: number;
+    /** Absolute end of the trial. Takes precedence over `trialPeriodDays`. */
+    trialEnd?: string | null;
+    trialPeriodDays?: number | null;
     providerSubscriptionCode?: string;
     metadata?: Metadata;
   }): Promise<Subscription> {
-    const plan = await this.#storage.plans.byId(input.planId);
-    if (!plan) throw new PayboxError('not_found', `No plan with id ${input.planId}.`);
+    const drafts =
+      input.items && input.items.length > 0
+        ? input.items
+        : input.planId
+          ? [{ planId: input.planId, quantity: input.quantity ?? 1 }]
+          : [];
+    if (drafts.length === 0) {
+      throw new PayboxError('validation_failed', 'A subscription needs at least one price.');
+    }
+
+    const plans: Plan[] = [];
+    for (const draft of drafts) {
+      const plan = await this.#storage.plans.byId(draft.planId);
+      if (!plan) throw new PayboxError('not_found', `No plan with id ${draft.planId}.`);
+      plans.push(plan);
+    }
+
+    const first = plans[0]!;
+    for (const [index, plan] of plans.entries()) {
+      // Providers require one billing cycle per subscription. Accepting a
+      // mismatch would produce a subscription whose renewal date is a lie
+      // about half its prices.
+      if (plan.interval !== first.interval || plan.intervalCount !== first.intervalCount) {
+        throw new PayboxError(
+          'validation_failed',
+          `All prices on a subscription must share a billing interval. ` +
+            `"${plan.name}" is ${plan.interval}/${plan.intervalCount} but ` +
+            `"${first.name}" is ${first.interval}/${first.intervalCount}.`,
+          { details: { index, interval: plan.interval, expected: first.interval } },
+        );
+      }
+      if (plan.currency !== first.currency) {
+        throw new PayboxError(
+          'validation_failed',
+          `All prices on a subscription must share a currency. "${plan.name}" is ` +
+            `${plan.currency} but "${first.name}" is ${first.currency}.`,
+        );
+      }
+    }
 
     const authorization = await this.#storage.authorizations.byId(input.authorizationId);
     if (!authorization) {
@@ -1166,22 +1595,36 @@ export class PaymentEngine {
     this.assertChargeable(authorization);
 
     const now = this.#clock.nowISO();
-    const quantity = input.quantity ?? 1;
+    const startDate = input.startDate ?? now;
+    const quantities = drafts.map((draft) => draft.quantity ?? 1);
+    const amount = plans.reduce(
+      (total, plan, index) => total + plan.amount * (quantities[index] ?? 1),
+      0,
+    );
+
+    const trialEnd = this.#resolveTrialEnd(input.trialEnd, input.trialPeriodDays, startDate);
+    const trialing = trialEnd !== null && Date.parse(trialEnd) > Date.parse(startDate);
+    // Billing begins when the trial ends; without one, immediately.
+    const firstPayment = trialing ? trialEnd : startDate;
+
     const subscription: Subscription = {
       id: this.#ids.next('sub'),
       provider: input.provider,
       providerSubscriptionCode: input.providerSubscriptionCode ?? this.#ids.token(12),
       customerId: input.customerId,
-      planId: plan.id,
+      planId: first.id,
       authorizationId: authorization.id,
-      status: 'active',
+      status: trialing ? 'trialing' : 'active',
       providerStatus: this.#providerStatus(input.provider, 'successful'),
-      quantity,
-      amount: plan.amount * quantity,
-      currency: plan.currency,
-      startDate: input.startDate ?? now,
-      nextPaymentDate: input.startDate ?? now,
-      invoiceLimit: input.invoiceLimit ?? plan.invoiceLimit,
+      quantity: quantities[0] ?? 1,
+      amount,
+      currency: first.currency,
+      startDate,
+      currentPeriodStart: startDate,
+      trialStart: trialing ? startDate : null,
+      trialEnd: trialing ? trialEnd : null,
+      nextPaymentDate: firstPayment,
+      invoiceLimit: input.invoiceLimit ?? first.invoiceLimit,
       invoiceCount: 0,
       emailToken: this.#ids.token(20),
       cancelledAt: null,
@@ -1192,6 +1635,22 @@ export class PaymentEngine {
 
     const { result, events } = await this.#storage.transaction(async (tx) => {
       const created = await tx.subscriptions.insert(subscription);
+      let position = await tx.subscriptionItems.nextPosition();
+      for (const [index, plan] of plans.entries()) {
+        await tx.subscriptionItems.insert({
+          id: this.#ids.next('sui'),
+          provider: created.provider,
+          providerItemId: this.#ids.token(14),
+          subscriptionId: created.id,
+          planId: plan.id,
+          quantity: quantities[index] ?? 1,
+          position: position++,
+          metadata: drafts[index]?.metadata ?? {},
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+
       const event = await this.#appendEvent(tx, {
         type: 'subscription.created',
         provider: created.provider,
@@ -1206,6 +1665,233 @@ export class PaymentEngine {
 
     await this.#bus.emitAll(events);
     return result;
+  }
+
+  /** Absolute trial end from either spelling, or null for no trial. */
+  #resolveTrialEnd(
+    trialEnd: string | null | undefined,
+    trialPeriodDays: number | null | undefined,
+    from: string,
+  ): string | null {
+    if (trialEnd) return trialEnd;
+    if (trialPeriodDays && trialPeriodDays > 0) {
+      return new Date(Date.parse(from) + trialPeriodDays * 24 * 60 * 60_000).toISOString();
+    }
+    return null;
+  }
+
+  async getSubscriptionItems(subscriptionId: string): Promise<SubscriptionItem[]> {
+    return this.#storage.subscriptionItems.listBySubscription(subscriptionId);
+  }
+
+  /**
+   * Change what a subscription bills for, settling the part-period difference.
+   *
+   * Proration is two lines, not one: a **credit** for the time already paid
+   * for on the old shape and a **charge** for the remainder on the new. Both
+   * are raised as pending invoice items, so they land on the next invoice --
+   * which is where a merchant sees them, and why an upgrade does not produce
+   * an immediate surprise bill unless one is asked for.
+   *
+   * `behavior`:
+   *   create_prorations  raise the lines, bill them next cycle (the default)
+   *   none               change the price, charge nothing for the difference
+   *   always_invoice     raise the lines and bill them now
+   */
+  async updateSubscriptionItems(input: {
+    subscriptionId: string;
+    /** The full desired set. Omitted items are removed. */
+    items: { itemId?: string; planId: string; quantity?: number }[];
+    behavior?: ProrationBehavior;
+  }): Promise<{ subscription: Subscription; prorations: InvoiceItem[] }> {
+    const behavior = input.behavior ?? 'create_prorations';
+
+    const subscription = await this.#storage.subscriptions.byId(input.subscriptionId);
+    if (!subscription) {
+      throw new PayboxError('not_found', `No subscription with id ${input.subscriptionId}.`);
+    }
+    if (subscription.status === 'cancelled' || subscription.status === 'completed') {
+      throw new PayboxError(
+        'invalid_state_transition',
+        `Cannot change the prices on a subscription that is ${subscription.status}.`,
+      );
+    }
+
+    const existing = await this.#storage.subscriptionItems.listBySubscription(subscription.id);
+    const plansById = new Map<string, Plan>();
+    const planFor = async (planId: string): Promise<Plan> => {
+      const cached = plansById.get(planId);
+      if (cached) return cached;
+      const plan = await this.#storage.plans.byId(planId);
+      if (!plan) throw new PayboxError('not_found', `No plan with id ${planId}.`);
+      plansById.set(planId, plan);
+      return plan;
+    };
+    for (const item of existing) await planFor(item.planId);
+    for (const desired of input.items) await planFor(desired.planId);
+
+    // The share of the period still to run. A change on the first day
+    // prorates almost the whole period; one on the last day, almost none.
+    const remaining = this.#remainingFraction(subscription);
+    const now = this.#clock.nowISO();
+    const periodEnd = subscription.nextPaymentDate ?? now;
+
+    const keep = new Set<string>();
+    const prorationDrafts: InvoiceItemDraft[] = [];
+    let position = await this.#storage.subscriptionItems.nextPosition();
+
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      for (const desired of input.items) {
+        const plan = await planFor(desired.planId);
+        const quantity = desired.quantity ?? 1;
+        const match = desired.itemId
+          ? existing.find((item) => item.id === desired.itemId)
+          : existing.find((item) => item.planId === desired.planId);
+
+        if (!match) {
+          await tx.subscriptionItems.insert({
+            id: this.#ids.next('sui'),
+            provider: subscription.provider,
+            providerItemId: this.#ids.token(14),
+            subscriptionId: subscription.id,
+            planId: plan.id,
+            quantity,
+            position: position++,
+            metadata: {},
+            createdAt: now,
+            updatedAt: now,
+          });
+          prorationDrafts.push(
+            this.#prorationDraft(subscription, plan, quantity, remaining, now, periodEnd, 1),
+          );
+          continue;
+        }
+
+        keep.add(match.id);
+        const oldPlan = await planFor(match.planId);
+        const unchanged = match.planId === plan.id && match.quantity === quantity;
+        if (unchanged) continue;
+
+        await tx.subscriptionItems.update(match.id, {
+          planId: plan.id,
+          quantity,
+          updatedAt: now,
+        });
+        // Credit what was paid for and will not be used, then charge for what
+        // replaces it. Two lines rather than one net figure, because that is
+        // what an invoice has to show for the number to be checkable.
+        prorationDrafts.push(
+          this.#prorationDraft(
+            subscription, oldPlan, match.quantity, remaining, now, periodEnd, -1,
+          ),
+          this.#prorationDraft(subscription, plan, quantity, remaining, now, periodEnd, 1),
+        );
+      }
+
+      for (const item of existing) {
+        if (keep.has(item.id)) continue;
+        const plan = await planFor(item.planId);
+        await tx.subscriptionItems.delete(item.id);
+        prorationDrafts.push(
+          this.#prorationDraft(
+            subscription, plan, item.quantity, remaining, now, periodEnd, -1,
+          ),
+        );
+      }
+
+      const remainingItems = await tx.subscriptionItems.listBySubscription(subscription.id);
+      if (remainingItems.length === 0) {
+        throw new PayboxError(
+          'validation_failed',
+          'A subscription must keep at least one price. Cancel it instead.',
+        );
+      }
+
+      let amount = 0;
+      for (const item of remainingItems) {
+        amount += (await planFor(item.planId)).amount * item.quantity;
+      }
+      const head = remainingItems[0]!;
+
+      const updated = await tx.subscriptions.update(subscription.id, {
+        planId: head.planId,
+        quantity: head.quantity,
+        amount,
+        updatedAt: now,
+      });
+
+      const event = await this.#appendEvent(tx, {
+        type: 'subscription.updated',
+        provider: updated.provider,
+        resourceId: updated.id,
+        resourceType: 'subscription',
+        data: subscriptionEventData(updated),
+        previousStatus: subscription.status,
+        currentStatus: updated.status,
+      });
+      return { result: updated, events: [event] };
+    });
+
+    await this.#bus.emitAll(events);
+
+    const prorations: InvoiceItem[] = [];
+    if (behavior !== 'none') {
+      for (const draft of prorationDrafts) {
+        // Zero-value lines are noise on an invoice; a change on the last
+        // instant of a period genuinely owes nothing.
+        if (draft.amount === 0) continue;
+        prorations.push(await this.addInvoiceItem(draft));
+      }
+    }
+
+    return { subscription: result, prorations };
+  }
+
+  /** One proration line: `sign` is +1 for a charge, -1 for a credit. */
+  #prorationDraft(
+    subscription: Subscription,
+    plan: Plan,
+    quantity: number,
+    remaining: number,
+    now: string,
+    periodEnd: string,
+    sign: 1 | -1,
+  ): InvoiceItemDraft {
+    const full = plan.amount * quantity;
+    const amount = sign * Math.round(full * remaining);
+    return {
+      provider: subscription.provider,
+      customerId: subscription.customerId,
+      subscriptionId: subscription.id,
+      planId: plan.id,
+      description:
+        sign === 1
+          ? `Remaining time on ${plan.name}`
+          : `Unused time on ${plan.name}`,
+      amount,
+      currency: subscription.currency,
+      quantity,
+      unitAmount: plan.amount,
+      periodStart: now,
+      periodEnd,
+      proration: true,
+    };
+  }
+
+  /**
+   * How much of the current billing period is still to run, as 0..1.
+   *
+   * Clamped at both ends: a clock that has passed the renewal date without the
+   * job having run yet must not produce a negative proration, and a period of
+   * zero length must not divide by zero.
+   */
+  #remainingFraction(subscription: Subscription): number {
+    const start = Date.parse(subscription.currentPeriodStart);
+    const end = Date.parse(subscription.nextPaymentDate ?? subscription.currentPeriodStart);
+    const span = end - start;
+    if (!Number.isFinite(span) || span <= 0) return 0;
+    const left = end - this.#clock.now();
+    return Math.min(1, Math.max(0, left / span));
   }
 
   async transitionSubscription(
@@ -1257,33 +1943,83 @@ export class PaymentEngine {
     return result;
   }
 
-  /** Raise the next invoice. Emitted ahead of the debit, as Paystack does. */
+  /**
+   * Raise an invoice.
+   *
+   * Two shapes share this path. A subscription renewal supplies
+   * `subscriptionId` and lands `pending`, already owed -- emitted ahead of the
+   * debit, as Paystack does. A standalone invoice supplies `customerId` and a
+   * `draft` status, and is assembled from line items before anyone owes
+   * anything.
+   *
+   * When line items are supplied the total is a **fold over them**, never a
+   * separately-passed number: a stored total that can disagree with the lines
+   * beneath it is a total that eventually will.
+   */
   async createInvoice(input: {
-    subscriptionId: string;
+    subscriptionId?: string | null;
+    customerId?: string;
+    provider?: ProviderId;
     periodStart: string;
     periodEnd: string;
     dueAt: string;
     amount?: number;
+    currency?: string;
+    status?: Extract<InvoiceStatus, 'draft' | 'pending'>;
+    billingReason?: string;
+    items?: InvoiceItemDraft[];
     metadata?: Metadata;
   }): Promise<Invoice> {
     const { result, events } = await this.#storage.transaction(async (tx) => {
-      const subscription = await tx.subscriptions.byId(input.subscriptionId);
-      if (!subscription) {
+      const subscription = input.subscriptionId
+        ? await tx.subscriptions.byId(input.subscriptionId)
+        : null;
+      if (input.subscriptionId && !subscription) {
         throw new PayboxError('not_found', `No subscription with id ${input.subscriptionId}.`);
       }
 
+      const customerId = subscription?.customerId ?? input.customerId;
+      if (!customerId) {
+        throw new PayboxError(
+          'validation_failed',
+          'An invoice needs either a subscription or a customer.',
+        );
+      }
+      const provider = subscription?.provider ?? input.provider;
+      if (!provider) {
+        throw new PayboxError('validation_failed', 'An invoice needs a provider.');
+      }
+      const currency = subscription?.currency ?? input.currency;
+      if (!currency) {
+        throw new PayboxError('validation_failed', 'An invoice needs a currency.');
+      }
+
       const now = this.#clock.nowISO();
+      const status = input.status ?? 'pending';
+      const drafts = input.items ?? [];
+      const amount =
+        drafts.length > 0
+          ? sumItems(drafts)
+          : (input.amount ?? subscription?.amount ?? 0);
+
       const invoice: Invoice = {
         id: this.#ids.next('inv'),
-        provider: subscription.provider,
+        provider,
         providerInvoiceCode: this.#ids.token(12),
-        subscriptionId: subscription.id,
-        customerId: subscription.customerId,
+        subscriptionId: subscription?.id ?? null,
+        customerId,
         paymentId: null,
-        amount: input.amount ?? subscription.amount,
-        currency: subscription.currency,
-        status: 'pending',
-        providerStatus: 'pending',
+        // Clamped: paybox has no customer credit balance, so a total that went
+        // negative would have nowhere to go. docs/stripe.md records it.
+        amount: Math.max(0, amount),
+        currency,
+        status,
+        providerStatus: status,
+        billingReason:
+          input.billingReason ?? (subscription ? 'subscription_cycle' : 'manual'),
+        attemptCount: 0,
+        // Assigned at finalisation, as providers do. A draft has no number.
+        number: status === 'draft' ? null : this.#invoiceNumber(),
         periodStart: input.periodStart,
         periodEnd: input.periodEnd,
         dueAt: input.dueAt,
@@ -1294,23 +2030,52 @@ export class PaymentEngine {
       };
 
       const created = await tx.invoices.insert(invoice);
-      // Count the invoice as raised here, in the same transaction, so the
-      // invoice_limit check can never double-count a retried job.
-      await tx.subscriptions.update(subscription.id, {
-        invoiceCount: subscription.invoiceCount + 1,
-        updatedAt: now,
-      });
+      let position = await tx.invoiceItems.nextPosition();
+      for (const draft of drafts) {
+        await tx.invoiceItems.insert(this.#buildItem(draft, created, now, position++));
+      }
 
+      // An invoice raised straight into `pending` -- a subscription renewal --
+      // never passes through `finalizeInvoice`, so it has to sweep here or a
+      // mid-cycle proration would sit pending forever and never be billed.
+      if (status !== 'draft') {
+        for (const pending of await tx.invoiceItems.listPending(
+          customerId,
+          created.subscriptionId,
+        )) {
+          await tx.invoiceItems.update(pending.id, {
+            invoiceId: created.id,
+            position: position++,
+            updatedAt: now,
+          });
+        }
+        const total = await tx.invoiceItems.totalFor(created.id);
+        if (total !== created.amount) {
+          await tx.invoices.update(created.id, { amount: Math.max(0, total), updatedAt: now });
+        }
+      }
+
+      // Count the invoice as raised here, in the same transaction, so the
+      // invoice_limit check can never double-count a retried job. Drafts do
+      // not count: nothing has been billed yet.
+      if (subscription && status !== 'draft') {
+        await tx.subscriptions.update(subscription.id, {
+          invoiceCount: subscription.invoiceCount + 1,
+          updatedAt: now,
+        });
+      }
+
+      const settled = (await tx.invoices.byId(created.id)) ?? created;
       const event = await this.#appendEvent(tx, {
         type: 'invoice.created',
-        provider: created.provider,
-        resourceId: created.id,
+        provider: settled.provider,
+        resourceId: settled.id,
         resourceType: 'invoice',
-        data: invoiceEventData(created),
+        data: invoiceEventData(settled),
         previousStatus: null,
-        currentStatus: created.status,
+        currentStatus: settled.status,
       });
-      return { result: created, events: [event] };
+      return { result: settled, events: [event] };
     });
 
     await this.#bus.emitAll(events);
@@ -1320,7 +2085,7 @@ export class PaymentEngine {
   async transitionInvoice(
     invoiceId: string,
     to: InvoiceStatus,
-    options: { paymentId?: string | null } = {},
+    options: { paymentId?: string | null; attempted?: boolean } = {},
   ): Promise<Invoice> {
     const { result, events } = await this.#storage.transaction(async (tx) => {
       const invoice = await tx.invoices.byId(invoiceId);
@@ -1328,10 +2093,14 @@ export class PaymentEngine {
       assertInvoiceTransition(invoice.status, to);
 
       const now = this.#clock.nowISO();
+      // A settled or failed transition is by definition an attempt; the caller
+      // can force the count for a path that attempts without transitioning.
+      const attempted = options.attempted ?? (to === 'success' || to === 'failed');
       const updated = await tx.invoices.update(invoiceId, {
         status: to,
         providerStatus: to,
         updatedAt: now,
+        ...(attempted ? { attemptCount: invoice.attemptCount + 1 } : {}),
         ...(options.paymentId !== undefined ? { paymentId: options.paymentId } : {}),
         ...(to === 'success' ? { paidAt: now } : {}),
       });
@@ -1346,6 +2115,210 @@ export class PaymentEngine {
         currentStatus: to,
       });
       return { result: updated, events: [event] };
+    });
+
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
+  /**
+   * Close a draft: sweep in anything pending, total it, give it a number.
+   *
+   * Finalising is the moment the money becomes owed, which is why the sweep
+   * happens here and not at creation -- an item added while the invoice was
+   * still a draft belongs on it, and one added afterwards does not.
+   */
+  async finalizeInvoice(invoiceId: string): Promise<Invoice> {
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const invoice = await tx.invoices.byId(invoiceId);
+      if (!invoice) throw new PayboxError('not_found', `No invoice with id ${invoiceId}.`);
+      assertInvoiceTransition(invoice.status, 'pending');
+
+      const now = this.#clock.nowISO();
+      // Swept items land *after* whatever is already on the invoice, in their
+      // own creation order -- which is why position is monotonic across the
+      // whole table rather than per invoice.
+      let position = await tx.invoiceItems.nextPosition();
+      for (const pending of await tx.invoiceItems.listPending(
+        invoice.customerId,
+        invoice.subscriptionId,
+      )) {
+        await tx.invoiceItems.update(pending.id, {
+          invoiceId: invoice.id,
+          position: position++,
+          updatedAt: now,
+        });
+      }
+
+      const total = await tx.invoiceItems.totalFor(invoice.id);
+      const updated = await tx.invoices.update(invoiceId, {
+        status: 'pending',
+        providerStatus: 'pending',
+        amount: Math.max(0, total),
+        number: invoice.number ?? this.#invoiceNumber(),
+        updatedAt: now,
+      });
+
+      const event = await this.#appendEvent(tx, {
+        type: 'invoice.finalized',
+        provider: updated.provider,
+        resourceId: updated.id,
+        resourceType: 'invoice',
+        data: invoiceEventData(updated),
+        previousStatus: invoice.status,
+        currentStatus: 'pending',
+      });
+      return { result: updated, events: [event] };
+    });
+
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
+  /**
+   * Add a line.
+   *
+   * With no `invoiceId` the item is **pending**: it waits for whichever invoice
+   * is finalised next, which is how a mid-cycle change reaches the customer's
+   * next bill rather than generating one of its own.
+   */
+  async addInvoiceItem(draft: InvoiceItemDraft & { invoiceId?: string | null }): Promise<InvoiceItem> {
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const invoice = draft.invoiceId ? await tx.invoices.byId(draft.invoiceId) : null;
+      if (draft.invoiceId && !invoice) {
+        throw new PayboxError('not_found', `No invoice with id ${draft.invoiceId}.`);
+      }
+      if (invoice && invoice.status !== 'draft') {
+        throw new PayboxError(
+          'invalid_state_transition',
+          `Cannot add a line to an invoice that is ${invoice.status}; only a draft is editable.`,
+        );
+      }
+
+      const now = this.#clock.nowISO();
+      const item = await tx.invoiceItems.insert(
+        this.#buildItem(draft, invoice, now, await tx.invoiceItems.nextPosition()),
+      );
+      if (invoice) await this.#retotal(tx, invoice.id, now);
+
+      const event = await this.#appendEvent(tx, {
+        type: 'invoiceitem.created',
+        provider: item.provider,
+        resourceId: invoice?.id ?? item.id,
+        resourceType: 'invoice',
+        data: {
+          id: item.id,
+          invoice_id: item.invoiceId,
+          amount: item.amount,
+          currency: item.currency,
+          description: item.description,
+          proration: item.proration,
+        },
+        previousStatus: null,
+        currentStatus: invoice?.status ?? 'pending',
+      });
+      return { result: item, events: [event] };
+    });
+
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
+  /** Remove a line from a draft, and retotal what is left. */
+  async deleteInvoiceItem(itemId: string): Promise<void> {
+    await this.#storage.transaction(async (tx) => {
+      const item = await tx.invoiceItems.byId(itemId);
+      if (!item) throw new PayboxError('not_found', `No invoice item with id ${itemId}.`);
+
+      if (item.invoiceId) {
+        const invoice = await tx.invoices.byId(item.invoiceId);
+        if (invoice && invoice.status !== 'draft') {
+          throw new PayboxError(
+            'invalid_state_transition',
+            `Cannot remove a line from an invoice that is ${invoice.status}.`,
+          );
+        }
+      }
+
+      await tx.invoiceItems.delete(itemId);
+      if (item.invoiceId) await this.#retotal(tx, item.invoiceId, this.#clock.nowISO());
+    });
+  }
+
+  async getInvoiceItems(invoiceId: string): Promise<InvoiceItem[]> {
+    return this.#storage.invoiceItems.listByInvoice(invoiceId);
+  }
+
+  /** The invoice total is a fold over its lines, recomputed, never accumulated. */
+  async #retotal(tx: Storage, invoiceId: string, now: string): Promise<void> {
+    const total = await tx.invoiceItems.totalFor(invoiceId);
+    await tx.invoices.update(invoiceId, { amount: Math.max(0, total), updatedAt: now });
+  }
+
+  #buildItem(
+    draft: InvoiceItemDraft,
+    invoice: Invoice | null,
+    now: string,
+    position: number,
+  ): InvoiceItem {
+    const quantity = draft.quantity ?? 1;
+    const unitAmount = draft.unitAmount ?? draft.amount ?? 0;
+    return {
+      id: this.#ids.next('ivi'),
+      provider: draft.provider ?? invoice?.provider ?? 'stripe',
+      providerItemId: this.#ids.token(14),
+      customerId: draft.customerId ?? invoice?.customerId ?? '',
+      invoiceId: invoice?.id ?? null,
+      subscriptionId: draft.subscriptionId ?? invoice?.subscriptionId ?? null,
+      planId: draft.planId ?? null,
+      description: draft.description ?? null,
+      amount: draft.amount ?? unitAmount * quantity,
+      currency: draft.currency ?? invoice?.currency ?? 'USD',
+      quantity,
+      unitAmount,
+      periodStart: draft.periodStart ?? invoice?.periodStart ?? now,
+      periodEnd: draft.periodEnd ?? invoice?.periodEnd ?? now,
+      proration: draft.proration ?? false,
+      position,
+      metadata: draft.metadata ?? {},
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  /**
+   * A human-facing invoice number.
+   *
+   * Drawn from the injected id stream rather than a counter so it stays
+   * reproducible under a fixed seed, which the compat suite relies on.
+   */
+  #invoiceNumber(): string {
+    return this.#ids.token(8).toUpperCase().replace(/(.{4})(.{4})/, '$1-$2');
+  }
+
+  /**
+   * Note that a trial is about to end.
+   *
+   * An informational event, not a transition: nothing about the subscription
+   * changes, and the notice is the entire point. Appended to the log like
+   * every other event so it can be replayed and audited.
+   */
+  async announceTrialEnding(subscriptionId: string): Promise<Subscription> {
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const subscription = await tx.subscriptions.byId(subscriptionId);
+      if (!subscription) {
+        throw new PayboxError('not_found', `No subscription with id ${subscriptionId}.`);
+      }
+      const event = await this.#appendEvent(tx, {
+        type: 'subscription.trial_ending',
+        provider: subscription.provider,
+        resourceId: subscription.id,
+        resourceType: 'subscription',
+        data: subscriptionEventData(subscription),
+        previousStatus: subscription.status,
+        currentStatus: subscription.status,
+      });
+      return { result: subscription, events: [event] };
     });
 
     await this.#bus.emitAll(events);
@@ -1859,6 +2832,29 @@ function authorizationEventData(authorization: Authorization): Metadata {
   };
 }
 
+function setupEventData(setup: InstrumentSetup): Metadata {
+  return {
+    id: setup.id,
+    setup_id: setup.providerSetupId,
+    customer_id: setup.customerId,
+    authorization_id: setup.authorizationId,
+    usage: setup.usage,
+    channel: setup.channel,
+    last4: setup.instrument.last4 ?? null,
+  };
+}
+
+/**
+ * The payment status a setup status corresponds to.
+ *
+ * Only used to reach the injected `ProviderStatusResolver`, so a setup's
+ * `providerStatus` reads in the same vocabulary the adapter uses everywhere
+ * else rather than growing a second, parallel mapping.
+ */
+function setupToPaymentStatus(status: SetupStatus): PaymentStatus {
+  return status === 'cancelled' ? 'cancelled' : (status as PaymentStatus);
+}
+
 function dedicatedAccountEventData(account: DedicatedAccount): Metadata {
   return {
     id: account.id,
@@ -1880,6 +2876,7 @@ function subscriptionEventData(subscription: Subscription): Metadata {
     currency: subscription.currency,
     status: subscription.status,
     next_payment_date: subscription.nextPaymentDate,
+    trial_end: subscription.trialEnd,
   };
 }
 

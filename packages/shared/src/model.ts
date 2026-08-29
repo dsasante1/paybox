@@ -7,6 +7,7 @@ import type {
   PlanInterval,
   ProviderId,
   RefundStatus,
+  SetupStatus,
   SubscriptionStatus,
   TransferStatus,
 } from './status.js';
@@ -155,6 +156,54 @@ export interface Authorization {
 }
 
 /**
+ * Verifying an instrument and storing it, without charging for anything.
+ *
+ * Card-on-file is the flow behind every "save this card" checkbox, every
+ * free trial that later starts billing, and every off-session retry. It is
+ * *not* a payment: no money moves, and the money that eventually does move
+ * belongs to a separate charge later.
+ *
+ * Canonical rather than Stripe-specific. Stripe calls it a SetupIntent;
+ * Paystack reaches the same place by charging a nominal amount and keeping the
+ * `AUTH_` code it hands back. Both end with an [[Authorization]] the merchant
+ * can debit while the customer is away, which is the part the engine models.
+ *
+ * `authorizationId` is the whole point: a setup that succeeds without
+ * producing a chargeable instrument has achieved nothing.
+ */
+export interface InstrumentSetup {
+  id: string;
+  provider: ProviderId;
+  providerSetupId: string;
+  customerId: string | null;
+  /** The stored instrument this produced. Null until it succeeds. */
+  authorizationId: string | null;
+  status: SetupStatus;
+  providerStatus: string;
+  /**
+   * Whether the merchant intends to charge this with the customer present.
+   *
+   * Real providers treat the two differently: an off-session mandate needs
+   * stronger consent up front precisely because nobody will be there to
+   * approve the charge later.
+   */
+  usage: 'on_session' | 'off_session';
+  channel: PaymentMethod | null;
+  /**
+   * Masked instrument fragments, exactly as [[Authorization]] stores them.
+   * There is deliberately no field here that could hold a PAN or a CVV
+   * (spec §29).
+   */
+  instrument: Metadata;
+  failureCode: string | null;
+  failureMessage: string | null;
+  cancellationReason: string | null;
+  metadata: Metadata;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
  * A dedicated virtual account: a bank account number minted for one customer,
  * so money transferred into it is attributed to them automatically.
  *
@@ -242,15 +291,35 @@ export interface Subscription {
   provider: ProviderId;
   providerSubscriptionCode: string;
   customerId: string;
+  /**
+   * The plan that sets the billing cadence.
+   *
+   * A multi-item subscription has several prices but one cycle -- providers
+   * require every price on a subscription to share an interval -- so this is
+   * the first item's plan and the others are in [[SubscriptionItem]].
+   */
   planId: string;
   /** The stored instrument each renewal debits. */
   authorizationId: string;
   status: SubscriptionStatus;
   providerStatus: string;
+  /** The first item's quantity, kept for single-item subscriptions. */
   quantity: number;
+  /** Sum over the items: each plan's amount times its quantity. */
   amount: number;
   currency: string;
   startDate: string;
+  /**
+   * When the *current* billing period began.
+   *
+   * Distinct from `startDate`, which is when the subscription began. Deriving
+   * one from the other made `current_period_start` wrong on every renewal
+   * after the first, and proration is computed against this window.
+   */
+  currentPeriodStart: string;
+  /** Set while the subscription exists but has not billed yet. */
+  trialStart: string | null;
+  trialEnd: string | null;
   /** Null once the subscription stops renewing. */
   nextPaymentDate: string | null;
   invoiceLimit: number;
@@ -264,12 +333,42 @@ export interface Subscription {
   updatedAt: string;
 }
 
-/** One billing attempt. Links a subscription period to the payment that paid it. */
+/**
+ * One price on a subscription.
+ *
+ * A subscription with a base plan, a per-seat price and a metered add-on is
+ * three of these against one billing cycle -- which is why an amount lives
+ * here rather than only on the subscription, and why changing one mid-cycle is
+ * what proration exists to settle.
+ */
+export interface SubscriptionItem {
+  id: string;
+  provider: ProviderId;
+  providerItemId: string;
+  subscriptionId: string;
+  planId: string;
+  quantity: number;
+  /** Insertion order; the frozen clock gives every item one timestamp. */
+  position: number;
+  metadata: Metadata;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * A bill.
+ *
+ * Usually one billing period of a subscription, linked to the payment that
+ * settled it -- but `subscriptionId` is nullable because an invoice can also
+ * be assembled by hand from [[InvoiceItem]]s and sent to a customer who has no
+ * subscription at all.
+ */
 export interface Invoice {
   id: string;
   provider: ProviderId;
   providerInvoiceCode: string;
-  subscriptionId: string;
+  /** Null for a standalone invoice raised against a customer directly. */
+  subscriptionId: string | null;
   customerId: string;
   /** Null until the charge is attempted. */
   paymentId: string | null;
@@ -277,10 +376,62 @@ export interface Invoice {
   currency: string;
   status: InvoiceStatus;
   providerStatus: string;
+  /** Why this invoice exists: a renewal, a manual bill, a plan change. */
+  billingReason: string;
+  /** How many times payment has been attempted. */
+  attemptCount: number;
+  /** Assigned at finalisation, as providers do. A draft has none. */
+  number: string | null;
   periodStart: string;
   periodEnd: string;
   dueAt: string;
   paidAt: string | null;
+  metadata: Metadata;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * One line on an invoice.
+ *
+ * Needed the moment an invoice can be built by hand, and again the moment a
+ * subscription can carry more than one price.
+ *
+ * `amount` is deliberately signed. A credit for unused time on a plan the
+ * customer downgraded away from is a negative line, which is exactly how
+ * proration arithmetic is supposed to work -- forcing it positive and
+ * subtracting elsewhere is how that arithmetic goes wrong.
+ *
+ * `invoiceId` is null while the item is *pending*: raised by a mid-cycle
+ * change and waiting to be swept onto whichever invoice comes next.
+ */
+export interface InvoiceItem {
+  id: string;
+  provider: ProviderId;
+  providerItemId: string;
+  customerId: string;
+  /** Null while pending, waiting for the next invoice to sweep it up. */
+  invoiceId: string | null;
+  subscriptionId: string | null;
+  planId: string | null;
+  description: string | null;
+  /** Signed total for this line. Negative is a credit. */
+  amount: number;
+  currency: string;
+  quantity: number;
+  unitAmount: number;
+  periodStart: string;
+  periodEnd: string;
+  /** True for a line created by a mid-cycle change rather than a full period. */
+  proration: boolean;
+  /**
+   * Insertion order, monotonic across all items.
+   *
+   * `createdAt` cannot carry it: under the frozen clock every line on an
+   * invoice shares one timestamp, and an id tiebreak would render the lines
+   * shuffled.
+   */
+  position: number;
   metadata: Metadata;
   createdAt: string;
   updatedAt: string;
@@ -407,6 +558,7 @@ export interface PayboxEvent {
     | 'transfer'
     | 'customer'
     | 'authorization'
+    | 'setup'
     | 'subscription'
     | 'invoice'
     | 'dispute'

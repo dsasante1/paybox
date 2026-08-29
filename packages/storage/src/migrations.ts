@@ -482,4 +482,226 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE plans ADD COLUMN product_id TEXT REFERENCES products(id) ON DELETE SET NULL;
     `,
   },
+  {
+    id: '0010_instrument_setups',
+    sql: `
+      -- Verifying an instrument and storing it, without charging for it.
+      -- Stripe calls it a SetupIntent; the canonical resource is provider
+      -- neutral because every provider has some route to card-on-file.
+      --
+      -- Only masked fragments are ever written here, exactly as in
+      -- authorizations: there is no column that could hold a PAN or a CVV.
+      CREATE TABLE instrument_setups (
+        id                  TEXT PRIMARY KEY,
+        provider            TEXT NOT NULL,
+        provider_setup_id   TEXT NOT NULL,
+        customer_id         TEXT REFERENCES customers(id) ON DELETE SET NULL,
+        authorization_id    TEXT REFERENCES authorizations(id) ON DELETE SET NULL,
+        status              TEXT NOT NULL,
+        provider_status     TEXT NOT NULL,
+        usage               TEXT NOT NULL DEFAULT 'off_session',
+        channel             TEXT,
+        instrument          TEXT NOT NULL DEFAULT '{}',
+        failure_code        TEXT,
+        failure_message     TEXT,
+        cancellation_reason TEXT,
+        metadata            TEXT NOT NULL DEFAULT '{}',
+        created_at          TEXT NOT NULL,
+        updated_at          TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX idx_instrument_setups_provider_id
+        ON instrument_setups (provider, provider_setup_id);
+      CREATE INDEX idx_instrument_setups_customer ON instrument_setups (customer_id);
+    `,
+  },
+  {
+    id: '0011_invoice_lifecycle',
+    sql: `
+      -- Invoices gain a life before and after the billing run that raised
+      -- them: a draft you build up, a finalisation that opens it, and the two
+      -- ways it can end without being paid.
+      --
+      -- SQLite cannot relax a column, so the table is rebuilt. Nothing
+      -- references invoices yet, so the drop is safe with foreign keys on;
+      -- invoice_items is created afterwards, pointing at the new table.
+      --
+      -- Three changes: subscription_id becomes nullable (a standalone invoice
+      -- belongs to a customer, not a subscription), amount allows zero (a
+      -- fresh draft has no lines yet), and the three Stripe fields that only
+      -- make sense once an invoice has a lifecycle are added.
+      CREATE TABLE invoices_new (
+        id                    TEXT PRIMARY KEY,
+        provider              TEXT NOT NULL,
+        provider_invoice_code TEXT NOT NULL,
+        subscription_id       TEXT REFERENCES subscriptions(id) ON DELETE CASCADE,
+        customer_id           TEXT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+        payment_id            TEXT REFERENCES payments(id) ON DELETE SET NULL,
+        amount                INTEGER NOT NULL CHECK (amount >= 0),
+        currency              TEXT NOT NULL,
+        status                TEXT NOT NULL,
+        provider_status       TEXT NOT NULL,
+        -- Why this invoice exists, in Stripe's vocabulary.
+        billing_reason        TEXT NOT NULL DEFAULT 'subscription_cycle',
+        -- How many times payment has been attempted.
+        attempt_count         INTEGER NOT NULL DEFAULT 0,
+        -- Assigned at finalisation, as Stripe does; a draft has none.
+        number                TEXT,
+        period_start          TEXT NOT NULL,
+        period_end            TEXT NOT NULL,
+        due_at                TEXT NOT NULL,
+        paid_at               TEXT,
+        metadata              TEXT NOT NULL DEFAULT '{}',
+        created_at            TEXT NOT NULL,
+        updated_at            TEXT NOT NULL
+      );
+
+      INSERT INTO invoices_new (
+        id, provider, provider_invoice_code, subscription_id, customer_id,
+        payment_id, amount, currency, status, provider_status, billing_reason,
+        attempt_count, number, period_start, period_end, due_at, paid_at,
+        metadata, created_at, updated_at
+      )
+      SELECT
+        id, provider, provider_invoice_code, subscription_id, customer_id,
+        payment_id, amount, currency, status, provider_status,
+        'subscription_cycle',
+        CASE WHEN status = 'pending' THEN 0 ELSE 1 END,
+        NULL, period_start, period_end, due_at, paid_at,
+        metadata, created_at, updated_at
+      FROM invoices;
+
+      DROP TABLE invoices;
+      ALTER TABLE invoices_new RENAME TO invoices;
+
+      CREATE UNIQUE INDEX idx_invoices_provider_code
+        ON invoices (provider, provider_invoice_code);
+      CREATE INDEX idx_invoices_subscription ON invoices (subscription_id);
+      CREATE INDEX idx_invoices_customer ON invoices (customer_id);
+      CREATE INDEX idx_invoices_status ON invoices (status);
+
+      -- What an invoice is actually made of. Needed the moment an invoice can
+      -- be built by hand, and again the moment a subscription can carry more
+      -- than one price.
+      --
+      -- amount is deliberately unconstrained in sign: a proration credit for
+      -- unused time on a downgraded plan is a negative line, which is exactly
+      -- how the arithmetic is supposed to work.
+      CREATE TABLE invoice_items (
+        id               TEXT PRIMARY KEY,
+        provider         TEXT NOT NULL,
+        provider_item_id TEXT NOT NULL,
+        customer_id      TEXT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+        -- Null while pending: an item waiting to be swept onto the next
+        -- invoice, which is how Stripe carries a mid-cycle change forward.
+        invoice_id       TEXT REFERENCES invoices(id) ON DELETE CASCADE,
+        subscription_id  TEXT REFERENCES subscriptions(id) ON DELETE CASCADE,
+        plan_id          TEXT REFERENCES plans(id) ON DELETE SET NULL,
+        description      TEXT,
+        amount           INTEGER NOT NULL,
+        currency         TEXT NOT NULL,
+        quantity         INTEGER NOT NULL DEFAULT 1,
+        unit_amount      INTEGER NOT NULL DEFAULT 0,
+        period_start     TEXT NOT NULL,
+        period_end       TEXT NOT NULL,
+        proration        INTEGER NOT NULL DEFAULT 0,
+        -- Insertion order, explicitly.
+        --
+        -- created_at cannot carry it: the emulator's headline feature is a
+        -- frozen clock, under which every line on an invoice shares one
+        -- timestamp and the tiebreak falls to a random id -- so an invoice
+        -- would render its lines shuffled. Monotonic across the table so a
+        -- pending item swept onto an invoice still lands after the lines
+        -- already on it.
+        position         INTEGER NOT NULL DEFAULT 0,
+        metadata         TEXT NOT NULL DEFAULT '{}',
+        created_at       TEXT NOT NULL,
+        updated_at       TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX idx_invoice_items_provider_id
+        ON invoice_items (provider, provider_item_id);
+      CREATE INDEX idx_invoice_items_invoice ON invoice_items (invoice_id);
+      CREATE INDEX idx_invoice_items_customer ON invoice_items (customer_id);
+      CREATE INDEX idx_invoice_items_subscription ON invoice_items (subscription_id);
+    `,
+  },
+  {
+    id: '0012_subscription_items_and_trials',
+    sql: `
+      -- A subscription can carry several prices, and can begin with a trial.
+      CREATE TABLE subscription_items (
+        id               TEXT PRIMARY KEY,
+        provider         TEXT NOT NULL,
+        provider_item_id TEXT NOT NULL,
+        subscription_id  TEXT NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+        plan_id          TEXT NOT NULL REFERENCES plans(id) ON DELETE RESTRICT,
+        quantity         INTEGER NOT NULL DEFAULT 1 CHECK (quantity > 0),
+        -- Insertion order, for the same reason invoice_items carries one: the
+        -- frozen clock gives every item on a subscription one timestamp.
+        position         INTEGER NOT NULL DEFAULT 0,
+        metadata         TEXT NOT NULL DEFAULT '{}',
+        created_at       TEXT NOT NULL,
+        updated_at       TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX idx_subscription_items_provider_id
+        ON subscription_items (provider, provider_item_id);
+      CREATE INDEX idx_subscription_items_subscription
+        ON subscription_items (subscription_id);
+
+      -- Trial window. Null on both means the subscription bills from day one.
+      ALTER TABLE subscriptions ADD COLUMN trial_start TEXT;
+      ALTER TABLE subscriptions ADD COLUMN trial_end TEXT;
+
+      -- When the *current* period began.
+      --
+      -- start_date is when the subscription began, which is a different thing
+      -- from the third month's period start -- reporting the former as the
+      -- latter made current_period_start wrong on every renewal after the
+      -- first.
+      ALTER TABLE subscriptions ADD COLUMN current_period_start TEXT;
+      UPDATE subscriptions SET current_period_start = start_date;
+
+      -- Backfill one item per existing subscription, so a row written before
+      -- this migration reads the same as one written after it. The id is
+      -- derived from the subscription's rather than generated, which keeps the
+      -- backfill deterministic and unique without a random source.
+      INSERT INTO subscription_items (
+        id, provider, provider_item_id, subscription_id, plan_id, quantity,
+        position, metadata, created_at, updated_at
+      )
+      SELECT
+        'sui_' || substr(id, 5),
+        provider,
+        'si_' || substr(id, 5),
+        id,
+        plan_id,
+        quantity,
+        0,
+        '{}',
+        created_at,
+        updated_at
+      FROM subscriptions;
+    `,
+  },
+  {
+    id: '0013_authorization_signature_per_customer',
+    sql: `
+      -- A stored instrument belongs to a customer.
+      --
+      -- The signature index was unique on (provider, signature), which said
+      -- "one row per card, ever". That is wrong: two customers who happen to
+      -- save the same card must get two stored instruments, and the global
+      -- rule handed the first customer's saved card to the second. Every
+      -- provider we model scopes this to the customer -- Paystack mints a
+      -- separate authorization_code per customer, and a Stripe PaymentMethod
+      -- attaches to exactly one.
+      --
+      -- SQLite treats NULLs as distinct in a unique index, so instruments with
+      -- no customer never collide with each other, which is also what both
+      -- providers do: POST /v1/payment_methods mints a fresh one every time.
+      DROP INDEX IF EXISTS idx_authorizations_signature;
+      CREATE UNIQUE INDEX idx_authorizations_signature
+        ON authorizations (provider, signature, customer_id)
+        WHERE signature IS NOT NULL;
+    `,
+  },
 ];

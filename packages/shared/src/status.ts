@@ -68,8 +68,15 @@ export type TransferStatus = (typeof TRANSFER_STATUSES)[number];
  * hyphen and the adapter maps to it, the same way it maps `successful` to
  * `success`. `attention` is where a subscription lands when a renewal fails --
  * it is still alive, but the merchant has to do something about it.
+ *
+ * `trialing` is a subscription that exists and will bill, but has not yet.
+ * Modelling it as a status rather than as "active with a future date" is what
+ * lets a merchant's dunning and access logic tell "paying" from "trying" --
+ * which is the distinction the whole free-trial pattern turns on. Paystack has
+ * no trial concept, so its adapter never produces one.
  */
 export const SUBSCRIPTION_STATUSES = [
+  'trialing',
   'active',
   'non_renewing',
   'attention',
@@ -78,8 +85,51 @@ export const SUBSCRIPTION_STATUSES = [
 ] as const;
 export type SubscriptionStatus = (typeof SUBSCRIPTION_STATUSES)[number];
 
-/** One billing attempt against a subscription. */
-export const INVOICE_STATUSES = ['pending', 'success', 'failed'] as const;
+/**
+ * Setting up an instrument for later, without moving money.
+ *
+ * The vocabulary deliberately mirrors the payment one: `created` is "nothing
+ * attached yet", `successful` means the instrument is stored and chargeable.
+ * `failed` is canonical even though Stripe has no such SetupIntent status --
+ * a failed setup there returns to `requires_payment_method` and reports the
+ * reason in `last_setup_error`, exactly as its PaymentIntents do. The adapter
+ * maps it, the same way it does for payments.
+ */
+export const SETUP_STATUSES = [
+  'created',
+  'pending',
+  'processing',
+  'requires_action',
+  'successful',
+  'failed',
+  'cancelled',
+] as const;
+export type SetupStatus = (typeof SETUP_STATUSES)[number];
+
+/**
+ * An invoice's life.
+ *
+ * `pending` is an invoice that has been issued and is awaiting payment --
+ * Stripe calls that `open`, Paystack calls it `pending`. The three additions
+ * beyond Paystack's vocabulary are the ones an invoice needs once it can be
+ * built by hand rather than only raised by a billing run:
+ *
+ *   draft          Being assembled. Not owed yet, and still editable.
+ *   void           Cancelled. The money was never owed after all.
+ *   uncollectible  Owed, given up on. A bookkeeping outcome, not a failure --
+ *                  and reversible, because a customer can still pay late.
+ *
+ * `failed` is a payment attempt that did not succeed, which leaves the invoice
+ * still owed; Stripe keeps such an invoice `open` and the adapter maps it back.
+ */
+export const INVOICE_STATUSES = [
+  'draft',
+  'pending',
+  'success',
+  'failed',
+  'void',
+  'uncollectible',
+] as const;
 export type InvoiceStatus = (typeof INVOICE_STATUSES)[number];
 
 /**

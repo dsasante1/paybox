@@ -5,6 +5,7 @@ import {
   type InvoiceStatus,
   type PaymentStatus,
   type RefundStatus,
+  type SetupStatus,
   type SubscriptionStatus,
   type TransferStatus,
 } from '@paybox/shared';
@@ -93,6 +94,9 @@ const TRANSFER_TRANSITIONS: Readonly<Record<TransferStatus, readonly TransferSta
 const SUBSCRIPTION_TRANSITIONS: Readonly<
   Record<SubscriptionStatus, readonly SubscriptionStatus[]>
 > = {
+  // A trial ends by billing (active), or by the customer leaving before it
+  // does. It cannot go to `attention`: nothing has been charged to fail.
+  trialing: ['active', 'non_renewing', 'cancelled', 'completed'],
   active: ['non_renewing', 'attention', 'completed', 'cancelled'],
   non_renewing: ['completed', 'cancelled', 'active'],
   attention: ['active', 'non_renewing', 'completed', 'cancelled'],
@@ -100,12 +104,82 @@ const SUBSCRIPTION_TRANSITIONS: Readonly<
   cancelled: [],
 };
 
-/** One billing attempt: raised, then either paid or not. */
+/**
+ * Invoice lifecycle.
+ *
+ *   draft ──> pending ──┬─> success
+ *     │          │      ├─> failed ──> success | pending
+ *     │          │      ├─> void
+ *     └─> void   │      └─> uncollectible ──> success
+ *
+ * Two deliberate non-obvious edges:
+ *
+ * `failed` is not terminal. A failed payment attempt leaves the invoice still
+ * owed, and paying it again with another instrument is the normal recovery --
+ * Stripe does not even change the invoice's status for a failed attempt.
+ *
+ * `uncollectible -> success` is allowed. Writing a debt off is a bookkeeping
+ * decision, not a fact about the customer; they can still pay late, and a
+ * model that refuses that would make the merchant reconcile by hand.
+ *
+ * `success` and `void` are terminal. A paid invoice cannot be voided -- that
+ * is a refund, which is a different object with different arithmetic.
+ */
 const INVOICE_TRANSITIONS: Readonly<Record<InvoiceStatus, readonly InvoiceStatus[]>> = {
-  pending: ['success', 'failed'],
+  draft: ['pending', 'void'],
+  pending: ['success', 'failed', 'void', 'uncollectible'],
+  failed: ['success', 'pending', 'void', 'uncollectible'],
+  uncollectible: ['success', 'void'],
   success: [],
-  failed: [],
+  void: [],
 };
+
+/**
+ * Instrument setup: verify an instrument, store it, charge nothing.
+ *
+ *   created ──> pending ──> processing ──┬─> successful
+ *      │           │            │        └─> failed
+ *      │           └─> requires_action ──┘
+ *      └──> cancelled
+ *
+ * Shaped like the payment machine because it is the same shape of problem --
+ * an attempt that may need a step-up and may be declined. `successful` is
+ * terminal: a stored instrument is not re-set-up, it is charged.
+ */
+const SETUP_TRANSITIONS: Readonly<Record<SetupStatus, readonly SetupStatus[]>> = {
+  created: ['pending', 'processing', 'requires_action', 'failed', 'cancelled'],
+  pending: ['processing', 'requires_action', 'successful', 'failed', 'cancelled'],
+  processing: ['requires_action', 'successful', 'failed'],
+  requires_action: ['processing', 'successful', 'failed', 'cancelled'],
+  successful: [],
+  failed: [],
+  cancelled: [],
+};
+
+/** Where a retried setup may resume from `failed`. */
+const RETRY_SETUP_TARGETS: readonly SetupStatus[] = ['pending', 'processing', 'requires_action'];
+
+export function assertSetupTransition(
+  from: SetupStatus,
+  to: SetupStatus,
+  context: TransitionContext = {},
+): void {
+  if (from !== to && SETUP_TRANSITIONS[from].includes(to)) return;
+
+  // Same escape hatch, for the same reason: Stripe has no terminal failure on
+  // a SetupIntent either. A declined setup returns to `requires_payment_method`
+  // and is confirmed again with another instrument, so `retry` reopens exactly
+  // the in-flight states and nothing else.
+  if (context.retry && from === 'failed' && RETRY_SETUP_TARGETS.includes(to)) return;
+
+  throw new PayboxError(
+    'invalid_state_transition',
+    `Cannot move an instrument setup from ${from} to ${to}. Allowed: ${
+      SETUP_TRANSITIONS[from].join(', ') || 'none (terminal)'
+    }.`,
+    { details: { from, to, allowed: SETUP_TRANSITIONS[from] } },
+  );
+}
 
 export function assertSubscriptionTransition(
   from: SubscriptionStatus,
@@ -132,9 +206,15 @@ export function assertInvoiceTransition(from: InvoiceStatus, to: InvoiceStatus):
   );
 }
 
-/** A subscription only renews while it is in one of these states. */
+/**
+ * A subscription only renews while it is in one of these states.
+ *
+ * `trialing` counts: the trial's end *is* its next billing date, and a trial
+ * that stopped being scheduled would silently never convert -- which is the
+ * one thing a free-trial integration exists to test.
+ */
 export function isRenewable(status: SubscriptionStatus): boolean {
-  return status === 'active' || status === 'attention';
+  return status === 'active' || status === 'attention' || status === 'trialing';
 }
 
 /**

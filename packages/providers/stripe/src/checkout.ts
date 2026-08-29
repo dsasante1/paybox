@@ -81,3 +81,55 @@ export function renderCheckoutResult(options: {
 function formatCardNumber(digits: string): string {
   return digits.replace(/(\d{4})(?=\d)/g, '$1 ').trim();
 }
+
+/**
+ * The step-up page a SetupIntent's `next_action` redirects to (spec §45).
+ *
+ * A card that requires authentication parks the setup at `requires_action`
+ * and hands back a `redirect_to_url`. Advertising that URL without serving
+ * anything at it would be worse than omitting `next_action` entirely, so the
+ * emulator serves the confirmation the customer would see -- and, because the
+ * point is to exercise both branches, the refusal beside it.
+ *
+ * No money is involved: this authorises *storing* the instrument.
+ */
+export function renderSetupAuthenticationPage(options: {
+  setupId: string;
+  basePath: string;
+  last4: string | null;
+  error?: string | null;
+}): string {
+  const action = `${options.basePath}/setup/${options.setupId}/complete`;
+  const card = options.last4 ? `card ending ${options.last4}` : 'this card';
+
+  return renderHostedPage({
+    title: 'paybox — confirm your card',
+    ...(options.error ? { error: options.error } : {}),
+    body: `<div class="card">
+    <div class="amount">Confirm your card</div>
+    <div class="ref">Saving ${escapeHtml(card)} for future payments. No charge will be made now.</div>
+
+    <form method="POST" action="${escapeHtml(action)}">
+      <button class="pay" type="submit" name="outcome" value="approve">Confirm</button>
+    </form>
+    <form method="POST" action="${escapeHtml(action)}">
+      <button class="pay secondary" type="submit" name="outcome" value="reject">Cancel</button>
+    </form>
+  </div>`,
+  });
+}
+
+/** Shown once the customer answers the step-up. */
+export function renderSetupResult(options: {
+  approved: boolean;
+  redirectUrl: string | null;
+}): string {
+  return renderHostedResult({
+    title: 'paybox — card setup',
+    heading: options.approved ? 'Card saved' : 'Setup cancelled',
+    message: options.approved
+      ? 'Your card has been stored for future payments.'
+      : 'The card was not saved.',
+    redirectUrl: options.redirectUrl,
+  });
+}

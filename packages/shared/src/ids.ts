@@ -15,11 +15,14 @@ export const ID_PREFIXES = [
   'trf', // transfer
   'cus', // customer
   'aut', // stored authorization
+  'set', // instrument setup (card-on-file, no charge)
   'dva', // dedicated virtual account
   'pln', // plan
   'prd', // product
   'sub', // subscription
+  'sui', // subscription item
   'inv', // invoice
+  'ivi', // invoice line item
   'sac', // subaccount
   'spl', // transaction split
   'led', // balance ledger entry

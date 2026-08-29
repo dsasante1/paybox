@@ -105,6 +105,139 @@ export const refundCreateSchema = z.object({
   metadata,
 });
 
+/**
+ * Invoices you build by hand.
+ *
+ * A draft is assembled from invoice items, finalised (which is when the money
+ * becomes owed), then paid, voided or written off.
+ */
+export const invoiceCreateSchema = z.object({
+  customer: z.string().min(1),
+  subscription: z.string().optional(),
+  currency: z.string().min(3).max(3).optional(),
+  description: z.string().optional(),
+  /** Stripe's flag for "finalise this automatically". */
+  auto_advance: formBool,
+  collection_method: z.enum(['charge_automatically', 'send_invoice']).optional(),
+  days_until_due: z.union([z.number(), z.string()]).optional(),
+  metadata,
+});
+
+export const invoiceUpdateSchema = z.object({
+  description: z.string().optional(),
+  auto_advance: formBool,
+  days_until_due: z.union([z.number(), z.string()]).optional(),
+  metadata,
+});
+
+export const invoicePaySchema = z.object({
+  payment_method: z.string().optional(),
+  source: z.string().optional(),
+  /** Settle the invoice without taking money -- Stripe's "pay out of band". */
+  paid_out_of_band: formBool,
+});
+
+export const invoiceFinalizeSchema = z.object({ auto_advance: formBool });
+
+export const invoiceVoidSchema = z.object({});
+
+/**
+ * A line item.
+ *
+ * With no `invoice` the item is *pending*: it waits for the next invoice to
+ * be finalised, which is how Stripe carries a mid-cycle change forward onto
+ * the customer's next bill instead of raising one of its own.
+ */
+export const invoiceItemCreateSchema = z.object({
+  customer: z.string().min(1),
+  invoice: z.string().optional(),
+  subscription: z.string().optional(),
+  price: z.string().optional(),
+  /** Signed: a negative amount is a credit. Not the positive-only `amount`. */
+  amount: z.union([z.number(), z.string()]).optional(),
+  unit_amount: z.union([z.number(), z.string()]).optional(),
+  currency: z.string().min(3).max(3).optional(),
+  description: z.string().optional(),
+  quantity: z.union([z.number(), z.string()]).optional(),
+  period: z.object({ start: z.union([z.number(), z.string()]).optional(), end: z.union([z.number(), z.string()]).optional() }).optional(),
+  metadata,
+});
+
+/**
+ * SetupIntents: store an instrument without charging it.
+ *
+ * `usage` is Stripe's own field and matters -- an off-session mandate is the
+ * one that lets a merchant charge while the customer is away, which is the
+ * whole reason to run a setup rather than just a charge.
+ */
+export const setupIntentCreateSchema = z.object({
+  customer: z.string().optional(),
+  payment_method: z.string().optional(),
+  payment_method_data: paymentMethodData.optional(),
+  payment_method_types: z.array(z.string()).optional(),
+  usage: z.enum(['on_session', 'off_session']).optional(),
+  description: z.string().optional(),
+  confirm: formBool,
+  return_url: z.string().optional(),
+  metadata,
+});
+
+export const setupIntentUpdateSchema = z.object({
+  customer: z.string().optional(),
+  description: z.string().optional(),
+  payment_method: z.string().optional(),
+  metadata,
+});
+
+export const setupIntentConfirmSchema = z.object({
+  payment_method: z.string().optional(),
+  payment_method_data: paymentMethodData.optional(),
+  return_url: z.string().optional(),
+});
+
+export const setupIntentCancelSchema = z.object({
+  cancellation_reason: z.enum(['abandoned', 'requested_by_customer', 'duplicate']).optional(),
+});
+
+/**
+ * The legacy Charges API.
+ *
+ * Deprecated at Stripe in favour of PaymentIntents but still in wide use, and
+ * still in the specification (`PostCharges`). Synchronous: the response says
+ * whether the money moved, so a decline is a 402 rather than a 200 carrying a
+ * retryable object.
+ */
+export const chargeCreateSchema = z.object({
+  amount,
+  currency: z.string().min(3).max(3),
+  customer: z.string().optional(),
+  /** A stored instrument. paybox accepts its own `pm_` ids; see docs/stripe.md. */
+  source: z.string().optional(),
+  /** Inline card details, which this endpoint (unlike PaymentIntents) takes. */
+  card: cardData.optional(),
+  description: z.string().optional(),
+  receipt_email: z.string().optional(),
+  statement_descriptor: z.string().optional(),
+  transfer_group: z.string().optional(),
+  /** Defaults to true. False authorizes now and captures later. */
+  capture: formBool,
+  metadata,
+});
+
+export const chargeUpdateSchema = z.object({
+  customer: z.string().optional(),
+  description: z.string().optional(),
+  receipt_email: z.string().optional(),
+  transfer_group: z.string().optional(),
+  metadata,
+});
+
+export const chargeCaptureSchema = z.object({
+  amount: optionalAmount,
+  receipt_email: z.string().optional(),
+  statement_descriptor: z.string().optional(),
+});
+
 export const customerCreateSchema = z.object({
   email: z.string().email().optional(),
   name: z.string().optional(),
@@ -227,24 +360,58 @@ export const priceCreateSchema = z.object({
   metadata,
 });
 
+/** What to do about the part-period difference when a subscription changes. */
+const prorationBehavior = z
+  .enum(['create_prorations', 'none', 'always_invoice'])
+  .optional();
+
+const subscriptionItem = z.object({
+  /** Present when updating an existing item rather than adding one. */
+  id: z.string().optional(),
+  price: z.string().min(1),
+  quantity: z.union([z.number(), z.string()]).optional(),
+  metadata,
+});
+
 export const subscriptionCreateSchema = z.object({
   customer: z.string().min(1),
-  items: z
-    .array(
-      z.object({
-        price: z.string().min(1),
-        quantity: z.union([z.number(), z.string()]).optional(),
-      }),
-    )
-    .min(1),
+  items: z.array(subscriptionItem).min(1),
   default_payment_method: z.string().optional(),
+  /** Days of free trial from now. Stripe's convenience form of `trial_end`. */
+  trial_period_days: z.union([z.number(), z.string()]).optional(),
+  /** Absolute trial end as unix seconds, or the literal string `now`. */
+  trial_end: z.union([z.number(), z.string()]).optional(),
   metadata,
 });
 
 export const subscriptionUpdateSchema = z.object({
   cancel_at_period_end: formBool,
   default_payment_method: z.string().optional(),
+  /** The full desired set of prices. Items left out are removed. */
+  items: z.array(subscriptionItem.partial({ price: true })).optional(),
+  proration_behavior: prorationBehavior,
+  trial_end: z.union([z.number(), z.string()]).optional(),
   metadata,
+});
+
+/** The dedicated subscription-item routes. */
+export const subscriptionItemCreateSchema = z.object({
+  subscription: z.string().min(1),
+  price: z.string().min(1),
+  quantity: z.union([z.number(), z.string()]).optional(),
+  proration_behavior: prorationBehavior,
+  metadata,
+});
+
+export const subscriptionItemUpdateSchema = z.object({
+  price: z.string().optional(),
+  quantity: z.union([z.number(), z.string()]).optional(),
+  proration_behavior: prorationBehavior,
+  metadata,
+});
+
+export const subscriptionItemDeleteSchema = z.object({
+  proration_behavior: prorationBehavior,
 });
 
 export const subscriptionCancelSchema = z.object({

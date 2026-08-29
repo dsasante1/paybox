@@ -1,10 +1,18 @@
 export { expandFormBody, formBoolean } from './form.js';
 export {
+  applyExpansions,
+  assertExpandDepth,
+  expandPaths,
+  MAX_EXPAND_DEPTH,
+  type ExpandLoader,
+} from './expand.js';
+export {
   toStripeStatus,
   fromStripeStatus,
   toStripeChargeStatus,
   toStripeRefundStatus,
   cancellationReason,
+  toStripeSetupStatus,
   toStripeSubscriptionStatus,
   toStripeInvoiceStatus,
   toStripeRecurring,
@@ -25,12 +33,17 @@ export {
   stripeInstrumentResolver,
   STRIPE_PUBLISHED_CARDS,
 } from './instruments.js';
-export { stripeAuthorizationMinter } from './authorization.js';
+export {
+  stripeAuthorizationMinter,
+  stripeInstrumentDraft,
+  stripeSetupAuthorizationMinter,
+} from './authorization.js';
 export { StripeWebhookFormatter, STRIPE_API_VERSION } from './webhook.js';
 export {
   serializePaymentIntent,
   serializeCharge,
   serializeRefund,
+  serializeSetupIntent,
   serializeCustomer,
   serializePaymentMethod,
   serializeEvent,
@@ -38,7 +51,9 @@ export {
   serializeProduct,
   serializePrice,
   serializeSubscription,
+  serializeSubscriptionItem,
   serializeInvoice,
+  serializeInvoiceItem,
   serializeLineItems,
   stripeEventId,
   stripeId,

@@ -4,7 +4,9 @@ import type {
   DedicatedAccount,
   Dispute,
   DisputeStatus,
+  InstrumentSetup,
   Invoice,
+  InvoiceItem,
   InvoiceStatus,
   LedgerEntry,
   Metadata,
@@ -16,9 +18,11 @@ import type {
   ProviderId,
   Refund,
   RefundStatus,
+  SetupStatus,
   Split,
   Subaccount,
   Subscription,
+  SubscriptionItem,
   SubscriptionStatus,
   Transfer,
   TransferStatus,
@@ -227,8 +231,21 @@ export interface AuthorizationRepository {
   byCode(provider: ProviderId, code: string): Promise<Authorization | null>;
   /** Batch form of `byCode`, keyed by provider authorization code. */
   byCodes(provider: ProviderId, codes: readonly string[]): Promise<Map<string, Authorization>>;
-  /** Deduping lookup: one instrument charged twice yields one authorization. */
-  bySignature(provider: ProviderId, signature: string): Promise<Authorization | null>;
+  /**
+   * Deduping lookup, **scoped to one customer**.
+   *
+   * One customer saving the same card twice has one stored instrument. Two
+   * different customers saving the same card have two, because a stored
+   * instrument belongs to a customer at every provider we model -- Paystack
+   * mints a separate `authorization_code` per customer, and a Stripe
+   * PaymentMethod attaches to exactly one. Deduping across customers would
+   * hand one customer's saved card to another.
+   */
+  bySignature(
+    provider: ProviderId,
+    signature: string,
+    customerId: string,
+  ): Promise<Authorization | null>;
   /** Most recent first -- a subscription with no explicit authorization uses
    *  the customer's latest, which is what Paystack documents. */
   listByCustomer(customerId: string): Promise<Authorization[]>;
@@ -245,6 +262,17 @@ export interface DedicatedAccountRepository {
   byCustomer(customerId: string): Promise<DedicatedAccount | null>;
   update(id: string, patch: Partial<DedicatedAccount>): Promise<DedicatedAccount>;
   list(filter?: ListOptions & { provider?: ProviderId }): Promise<Page<DedicatedAccount>>;
+}
+
+export interface InstrumentSetupRepository {
+  insert(setup: InstrumentSetup): Promise<InstrumentSetup>;
+  byId(id: string): Promise<InstrumentSetup | null>;
+  byProviderSetupId(provider: ProviderId, id: string): Promise<InstrumentSetup | null>;
+  listByCustomer(customerId: string): Promise<InstrumentSetup[]>;
+  update(id: string, patch: Partial<InstrumentSetup>): Promise<InstrumentSetup>;
+  list(
+    filter?: ListOptions & { provider?: ProviderId; status?: SetupStatus; customerId?: string },
+  ): Promise<Page<InstrumentSetup>>;
 }
 
 export interface ProductRepository {
@@ -274,6 +302,19 @@ export interface SubscriptionRepository {
   ): Promise<Page<Subscription>>;
 }
 
+export interface SubscriptionItemRepository {
+  insert(item: SubscriptionItem): Promise<SubscriptionItem>;
+  byId(id: string): Promise<SubscriptionItem | null>;
+  byProviderItemId(provider: ProviderId, id: string): Promise<SubscriptionItem | null>;
+  /** In insertion order, so a subscription's prices read as they were added. */
+  listBySubscription(subscriptionId: string): Promise<SubscriptionItem[]>;
+  /** Batch form of `listBySubscription`, keyed by subscription id. */
+  listBySubscriptions(ids: readonly string[]): Promise<Map<string, SubscriptionItem[]>>;
+  update(id: string, patch: Partial<SubscriptionItem>): Promise<SubscriptionItem>;
+  delete(id: string): Promise<void>;
+  nextPosition(): Promise<number>;
+}
+
 export interface InvoiceRepository {
   insert(invoice: Invoice): Promise<Invoice>;
   byId(id: string): Promise<Invoice | null>;
@@ -282,8 +323,41 @@ export interface InvoiceRepository {
   /** Oldest first, so a billing history reads in the order it happened. */
   listBySubscription(subscriptionId: string): Promise<Invoice[]>;
   list(
-    filter?: ListOptions & { provider?: ProviderId; status?: InvoiceStatus },
+    filter?: ListOptions & {
+      provider?: ProviderId;
+      status?: InvoiceStatus;
+      customerId?: string;
+      subscriptionId?: string;
+    },
   ): Promise<Page<Invoice>>;
+}
+
+/**
+ * Invoice line items.
+ *
+ * `listPending` is the load-bearing query: items with no invoice yet, waiting
+ * to be swept onto the next one. That is how a mid-cycle change is carried
+ * forward rather than billed immediately.
+ */
+export interface InvoiceItemRepository {
+  insert(item: InvoiceItem): Promise<InvoiceItem>;
+  /** The next insertion position. Monotonic across the whole table. */
+  nextPosition(): Promise<number>;
+  byId(id: string): Promise<InvoiceItem | null>;
+  byProviderItemId(provider: ProviderId, id: string): Promise<InvoiceItem | null>;
+  /** Oldest first, so an invoice reads in the order it was assembled. */
+  listByInvoice(invoiceId: string): Promise<InvoiceItem[]>;
+  /** Batch form of `listByInvoice`, keyed by invoice id. */
+  listByInvoices(invoiceIds: readonly string[]): Promise<Map<string, InvoiceItem[]>>;
+  /** Unbilled items for a customer, optionally narrowed to one subscription. */
+  listPending(customerId: string, subscriptionId?: string | null): Promise<InvoiceItem[]>;
+  update(id: string, patch: Partial<InvoiceItem>): Promise<InvoiceItem>;
+  delete(id: string): Promise<void>;
+  /** Sum of a single invoice's lines. The invoice total is a fold over these. */
+  totalFor(invoiceId: string): Promise<number>;
+  list(
+    filter?: ListOptions & { provider?: ProviderId; customerId?: string; pending?: boolean },
+  ): Promise<Page<InvoiceItem>>;
 }
 
 export interface SubaccountRepository {
@@ -401,10 +475,13 @@ export interface Storage {
   readonly customers: CustomerRepository;
   readonly authorizations: AuthorizationRepository;
   readonly dedicatedAccounts: DedicatedAccountRepository;
+  readonly instrumentSetups: InstrumentSetupRepository;
   readonly products: ProductRepository;
   readonly plans: PlanRepository;
   readonly subscriptions: SubscriptionRepository;
+  readonly subscriptionItems: SubscriptionItemRepository;
   readonly invoices: InvoiceRepository;
+  readonly invoiceItems: InvoiceItemRepository;
   readonly subaccounts: SubaccountRepository;
   readonly splits: SplitRepository;
   readonly ledger: LedgerRepository;

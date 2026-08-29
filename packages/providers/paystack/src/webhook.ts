@@ -114,7 +114,9 @@ export class PaystackWebhookFormatter implements WebhookFormatter {
       const payment = invoice.paymentId
         ? await storage.payments.byId(invoice.paymentId)
         : null;
-      const subscription = await storage.subscriptions.byId(invoice.subscriptionId);
+      const subscription = invoice.subscriptionId
+      ? await storage.subscriptions.byId(invoice.subscriptionId)
+      : null;
       return {
         ...serializeInvoice(invoice, payment),
         ...(subscription ? { subscription: serializeSubscription(subscription) } : {}),

@@ -17,6 +17,7 @@ import {
   ScenarioRunner,
   SCENARIO_STEP_JOB,
   SUBSCRIPTION_CHARGE_JOB,
+  SUBSCRIPTION_TRIAL_ENDING_JOB,
   SUBSCRIPTION_INVOICE_JOB,
   SubscriptionRunner,
   type SimulatedOutcome,
@@ -39,6 +40,7 @@ import {
   StripeWebhookFormatter,
   generateStripeKeys,
   stripeAuthorizationMinter,
+  stripeSetupAuthorizationMinter,
   toStripeStatus,
 } from '@paybox/stripe';
 import type { PayboxConfig } from './config.js';
@@ -121,6 +123,16 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
     return null;
   };
 
+  /**
+   * The instrument a completed setup leaves behind.
+   *
+   * Only Stripe models a setup as its own resource today; Paystack reaches
+   * card-on-file by charging and keeping the code it returns, which the
+   * payment-path minter already covers.
+   */
+  const mintSetupAuthorization = (setup: Parameters<typeof stripeSetupAuthorizationMinter>[0]) =>
+    setup.provider === 'stripe' ? stripeSetupAuthorizationMinter(setup) : null;
+
   const engine = new PaymentEngine({
     storage,
     clock,
@@ -128,6 +140,7 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
     bus,
     providerStatus,
     mintAuthorization,
+    mintSetupAuthorization,
     enforceBalance: config.balance.enforce,
     openingBalance: config.balance.opening,
   });
@@ -208,6 +221,7 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
   scheduler.register(SCENARIO_STEP_JOB, scenarios.handleJob);
   scheduler.register(SUBSCRIPTION_INVOICE_JOB, subscriptions.handleInvoiceJob);
   scheduler.register(SUBSCRIPTION_CHARGE_JOB, subscriptions.handleChargeJob);
+  scheduler.register(SUBSCRIPTION_TRIAL_ENDING_JOB, subscriptions.handleTrialEndingJob);
   scheduler.register(PAYMENT_SIMULATE_JOB, async (job) => {
     const paymentId = String(job.payload.paymentId ?? '');
     const outcome = job.payload.outcome as SimulatedOutcome | undefined;
