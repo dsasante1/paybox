@@ -70,12 +70,24 @@ const REFUND_TRANSITIONS: Readonly<Record<RefundStatus, readonly RefundStatus[]>
   failed: [],
 };
 
+/**
+ * Money leaving a balance.
+ *
+ *   created ──> pending ──> processing ──> successful ──> reversed
+ *      │           │            │
+ *      └───────────┴──> cancelled | failed
+ *
+ * `cancelled` is reachable only before the money is on its way: once a payout
+ * is `processing` the merchant has missed their chance, which is exactly the
+ * race a cancel button has to handle.
+ */
 const TRANSFER_TRANSITIONS: Readonly<Record<TransferStatus, readonly TransferStatus[]>> = {
-  created: ['pending', 'processing', 'failed'],
-  pending: ['processing', 'successful', 'failed'],
+  created: ['pending', 'processing', 'failed', 'cancelled'],
+  pending: ['processing', 'successful', 'failed', 'cancelled'],
   processing: ['successful', 'failed', 'reversed'],
   successful: ['reversed'],
   failed: [],
+  cancelled: [],
   reversed: [],
 };
 

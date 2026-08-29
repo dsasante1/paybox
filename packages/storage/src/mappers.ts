@@ -93,6 +93,11 @@ export const toPayment = (row: PaymentRow): Payment => ({
   customerId: row.customer_id,
   callbackUrl: row.callback_url,
   amountRefunded: row.amount_refunded,
+  subaccountId: row.subaccount_id,
+  settlementMode: (row.settlement_mode as Payment['settlementMode']) ?? null,
+  platformFee: row.platform_fee,
+  platformFeeRefunded: row.platform_fee_refunded,
+  transferGroup: row.transfer_group,
   failureCode: row.failure_code,
   failureMessage: row.failure_message,
   metadata: readJson(row.metadata),
@@ -117,6 +122,11 @@ export const fromPayment = (payment: Payment): PaymentRow => ({
   customer_id: payment.customerId,
   callback_url: payment.callbackUrl,
   amount_refunded: payment.amountRefunded,
+  subaccount_id: payment.subaccountId,
+  settlement_mode: payment.settlementMode,
+  platform_fee: payment.platformFee,
+  platform_fee_refunded: payment.platformFeeRefunded,
+  transfer_group: payment.transferGroup,
   failure_code: payment.failureCode,
   failure_message: payment.failureMessage,
   metadata: writeJson(payment.metadata),
@@ -140,6 +150,13 @@ export function paymentPatch(patch: Partial<Payment>): Partial<PaymentRow> {
   if (patch.customerId !== undefined) out.customer_id = patch.customerId;
   if (patch.callbackUrl !== undefined) out.callback_url = patch.callbackUrl;
   if (patch.amountRefunded !== undefined) out.amount_refunded = patch.amountRefunded;
+  if (patch.subaccountId !== undefined) out.subaccount_id = patch.subaccountId;
+  if (patch.settlementMode !== undefined) out.settlement_mode = patch.settlementMode;
+  if (patch.platformFee !== undefined) out.platform_fee = patch.platformFee;
+  if (patch.platformFeeRefunded !== undefined) {
+    out.platform_fee_refunded = patch.platformFeeRefunded;
+  }
+  if (patch.transferGroup !== undefined) out.transfer_group = patch.transferGroup;
   if (patch.failureCode !== undefined) out.failure_code = patch.failureCode;
   if (patch.failureMessage !== undefined) out.failure_message = patch.failureMessage;
   if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
@@ -209,6 +226,11 @@ export const toTransfer = (row: TransferRow): Transfer => ({
   recipientBankCode: row.recipient_bank_code,
   reason: row.reason,
   failureReason: row.failure_reason,
+  sourceSubaccountId: row.source_subaccount_id,
+  destinationSubaccountId: row.destination_subaccount_id,
+  sourcePaymentId: row.source_payment_id,
+  transferGroup: row.transfer_group,
+  amountReversed: row.amount_reversed,
   metadata: readJson(row.metadata),
   createdAt: row.created_at,
   updatedAt: row.updated_at,
@@ -228,6 +250,11 @@ export const fromTransfer = (transfer: Transfer): TransferRow => ({
   recipient_bank_code: transfer.recipientBankCode,
   reason: transfer.reason,
   failure_reason: transfer.failureReason,
+  source_subaccount_id: transfer.sourceSubaccountId,
+  destination_subaccount_id: transfer.destinationSubaccountId,
+  source_payment_id: transfer.sourcePaymentId,
+  transfer_group: transfer.transferGroup,
+  amount_reversed: transfer.amountReversed,
   metadata: writeJson(transfer.metadata),
   created_at: transfer.createdAt,
   updated_at: transfer.updatedAt,
@@ -238,6 +265,8 @@ export function transferPatch(patch: Partial<Transfer>): Partial<TransferRow> {
   if (patch.status !== undefined) out.status = patch.status;
   if (patch.providerStatus !== undefined) out.provider_status = patch.providerStatus;
   if (patch.failureReason !== undefined) out.failure_reason = patch.failureReason;
+  if (patch.amountReversed !== undefined) out.amount_reversed = patch.amountReversed;
+  if (patch.transferGroup !== undefined) out.transfer_group = patch.transferGroup;
   if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
   if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
   return out;
@@ -784,6 +813,13 @@ export const toSubaccount = (row: SubaccountRow): Subaccount => ({
   primaryContactPhone: row.primary_contact_phone,
   currency: row.currency,
   active: row.active === 1,
+  accountType: row.account_type,
+  countryCode: row.country_code,
+  chargesEnabled: row.charges_enabled === 1,
+  payoutsEnabled: row.payouts_enabled === 1,
+  detailsSubmitted: row.details_submitted === 1,
+  requirements: readJson(row.requirements),
+  capabilities: readJson(row.capabilities),
   metadata: readJson(row.metadata),
   createdAt: row.created_at,
   updatedAt: row.updated_at,
@@ -803,6 +839,13 @@ export const fromSubaccount = (a: Subaccount): SubaccountRow => ({
   primary_contact_phone: a.primaryContactPhone,
   currency: a.currency,
   active: a.active ? 1 : 0,
+  account_type: a.accountType,
+  country_code: a.countryCode,
+  charges_enabled: a.chargesEnabled ? 1 : 0,
+  payouts_enabled: a.payoutsEnabled ? 1 : 0,
+  details_submitted: a.detailsSubmitted ? 1 : 0,
+  requirements: writeJson(a.requirements),
+  capabilities: writeJson(a.capabilities),
   metadata: writeJson(a.metadata),
   created_at: a.createdAt,
   updated_at: a.updatedAt,
@@ -823,6 +866,16 @@ export function subaccountPatch(patch: Partial<Subaccount>): Partial<SubaccountR
     out.primary_contact_phone = patch.primaryContactPhone;
   }
   if (patch.active !== undefined) out.active = patch.active ? 1 : 0;
+  if (patch.accountType !== undefined) out.account_type = patch.accountType;
+  if (patch.countryCode !== undefined) out.country_code = patch.countryCode;
+  if (patch.chargesEnabled !== undefined) out.charges_enabled = patch.chargesEnabled ? 1 : 0;
+  if (patch.payoutsEnabled !== undefined) out.payouts_enabled = patch.payoutsEnabled ? 1 : 0;
+  if (patch.detailsSubmitted !== undefined) {
+    out.details_submitted = patch.detailsSubmitted ? 1 : 0;
+  }
+  if (patch.requirements !== undefined) out.requirements = writeJson(patch.requirements);
+  if (patch.capabilities !== undefined) out.capabilities = writeJson(patch.capabilities);
+  if (patch.currency !== undefined) out.currency = patch.currency;
   if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
   if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
   return out;
@@ -866,6 +919,7 @@ export const toLedgerEntry = (row: LedgerEntryRow): LedgerEntry => ({
   amount: row.amount,
   reason: row.reason,
   resourceId: row.resource_id,
+  subaccountId: row.subaccount_id,
   createdAt: row.created_at,
 });
 
@@ -877,6 +931,7 @@ export const fromLedgerEntry = (entry: LedgerEntry): LedgerEntryRow => ({
   amount: entry.amount,
   reason: entry.reason,
   resource_id: entry.resourceId,
+  subaccount_id: entry.subaccountId,
   created_at: entry.createdAt,
 });
 

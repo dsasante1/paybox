@@ -64,6 +64,13 @@ export interface CreatePaymentInput {
   status?: PaymentStatus;
   /** Verbatim provider status string to echo back at the API boundary. */
   providerStatus?: string;
+  /** The marketplace participant this payment involves. */
+  subaccountId?: string | null;
+  /** How the money is arranged between the platform and that participant. */
+  settlementMode?: 'direct' | 'forwarded' | null;
+  /** The platform's cut, in minor units. */
+  platformFee?: number;
+  transferGroup?: string | null;
   /** Schedules a `payment.expire` job. Paystack links, Stripe intents and
    *  mobile-money prompts all expire; modelling it is the point (spec §39). */
   expiresInMs?: number | null;
@@ -188,6 +195,16 @@ export interface InvoiceItemDraft {
  */
 export type ProrationBehavior = 'create_prorations' | 'none' | 'always_invoice';
 
+/** One movement in a balance. `subaccountId` null means the platform's own. */
+export interface LedgerInput {
+  provider: ProviderId;
+  currency: string;
+  amount: number;
+  reason: string;
+  resourceId?: string | null;
+  subaccountId?: string | null;
+}
+
 function sumItems(items: readonly InvoiceItemDraft[]): number {
   return items.reduce(
     (total, item) => total + (item.amount ?? (item.unitAmount ?? 0) * (item.quantity ?? 1)),
@@ -296,6 +313,11 @@ export class PaymentEngine {
       customerId: input.customerId ?? null,
       callbackUrl: input.callbackUrl ?? null,
       amountRefunded: 0,
+      subaccountId: input.subaccountId ?? null,
+      settlementMode: input.settlementMode ?? null,
+      platformFee: Math.max(0, Math.trunc(input.platformFee ?? 0)),
+      platformFeeRefunded: 0,
+      transferGroup: input.transferGroup ?? null,
       failureCode: null,
       failureMessage: null,
       metadata: input.metadata ?? {},
@@ -404,13 +426,61 @@ export class PaymentEngine {
 
         // Money collected lands in the balance. Inside the transaction, so a
         // rolled-back success cannot leave a phantom credit behind.
-        await this.#ledgerIn(tx, 'credit', {
-          provider: updated.provider,
-          currency: updated.currency,
-          amount: updated.amount,
-          reason: 'charge',
-          resourceId: updated.id,
-        });
+        //
+        // On a *direct* charge the participant took the payment, so the money
+        // is theirs and the platform keeps only its fee: two credits, never
+        // one. Anything else -- an ordinary payment, or a forwarded one whose
+        // share moves separately -- lands wholly with the platform.
+        if (updated.settlementMode === 'direct' && updated.subaccountId) {
+          const fee = Math.min(updated.platformFee, updated.amount);
+          await this.#ledgerIn(tx, 'credit', {
+            provider: updated.provider,
+            currency: updated.currency,
+            amount: updated.amount - fee,
+            reason: 'charge',
+            resourceId: updated.id,
+            subaccountId: updated.subaccountId,
+          });
+          if (fee > 0) {
+            await this.#ledgerIn(tx, 'credit', {
+              provider: updated.provider,
+              currency: updated.currency,
+              amount: fee,
+              reason: 'application_fee',
+              resourceId: updated.id,
+            });
+          }
+        } else {
+          await this.#ledgerIn(tx, 'credit', {
+            provider: updated.provider,
+            currency: updated.currency,
+            amount: updated.amount,
+            reason: 'charge',
+            resourceId: updated.id,
+          });
+
+          // A forwarded charge passes its share on the moment it settles, and
+          // does so as a real transfer rather than a bare ledger pair -- so it
+          // appears in the transfer list, can be reversed, and fires the same
+          // events as any other movement between balances. Created inside this
+          // transaction so a rolled-back settlement cannot leave one behind.
+          if (updated.settlementMode === 'forwarded' && updated.subaccountId) {
+            const share = Math.max(0, updated.amount - updated.platformFee);
+            if (share > 0) {
+              const forwarded = await this.#createTransferIn(tx, {
+                provider: updated.provider,
+                amount: share,
+                currency: updated.currency,
+                status: 'successful',
+                reason: 'destination_charge',
+                destinationSubaccountId: updated.subaccountId,
+                sourcePaymentId: updated.id,
+                transferGroup: updated.transferGroup,
+              });
+              emitted.push(...forwarded.events);
+            }
+          }
+        }
       }
 
       return { result: updated, events: emitted };
@@ -576,13 +646,20 @@ export class PaymentEngine {
         updatedAt: now,
       });
 
-      // Refunded money leaves the balance.
+      // Refunded money leaves the balance of whoever received it.
+      //
+      // On a direct charge that is the connected account, and the platform's
+      // fee is *not* returned with it -- so a refunded direct charge can push
+      // a connected account negative. That is what really happens, and a
+      // marketplace has to handle it; hiding it here would only move the
+      // discovery to production.
       await this.#ledgerIn(tx, 'debit', {
         provider: updated.provider,
         currency: updated.currency,
         amount: updated.amount,
         reason: 'refund',
         resourceId: updated.id,
+        subaccountId: payment.settlementMode === 'direct' ? payment.subaccountId : null,
       });
       emitted.push(
         await this.#appendEvent(tx, {
@@ -631,7 +708,50 @@ export class PaymentEngine {
      * Defaults to refundable.
      */
     feeRefundable?: boolean;
+    /** Whose balance the money leaves. Null is the platform's own. */
+    sourceSubaccountId?: string | null;
+    /** Whose balance it lands in. Null means it left for a bank. */
+    destinationSubaccountId?: string | null;
+    sourcePaymentId?: string | null;
+    transferGroup?: string | null;
   }): Promise<Transfer> {
+    const { result, events } = await this.#storage.transaction((tx) =>
+      this.#createTransferIn(tx, input),
+    );
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
+  /**
+   * Transfer creation bound to an open transaction.
+   *
+   * Split out for the same reason `#createRefundIn` was: a destination charge
+   * creates its forwarding transfer *inside* the settlement transaction, and
+   * `Storage.transaction()` reentrancy is per instance -- calling the public
+   * method from inside another transaction would take the write lock twice and
+   * deadlock.
+   */
+  async #createTransferIn(
+    tx: Storage,
+    input: {
+      provider: ProviderId;
+      amount: number;
+      currency: string;
+      reference?: string;
+      recipientName?: string | null;
+      recipientAccount?: string | null;
+      recipientBankCode?: string | null;
+      reason?: string | null;
+      metadata?: Metadata;
+      status?: TransferStatus;
+      fee?: number;
+      feeRefundable?: boolean;
+      sourceSubaccountId?: string | null;
+      destinationSubaccountId?: string | null;
+      sourcePaymentId?: string | null;
+      transferGroup?: string | null;
+    },
+  ): Promise<{ result: Transfer; events: PayboxEvent[] }> {
     validateAmount(input.amount);
     const now = this.#clock.nowISO();
     const status = input.status ?? 'created';
@@ -649,6 +769,11 @@ export class PaymentEngine {
       recipientBankCode: input.recipientBankCode ?? null,
       reason: input.reason ?? null,
       failureReason: null,
+      sourceSubaccountId: input.sourceSubaccountId ?? null,
+      destinationSubaccountId: input.destinationSubaccountId ?? null,
+      sourcePaymentId: input.sourcePaymentId ?? null,
+      transferGroup: input.transferGroup ?? null,
+      amountReversed: 0,
       metadata: {
         ...(input.metadata ?? {}),
         ...(input.fee
@@ -662,62 +787,76 @@ export class PaymentEngine {
       updatedAt: now,
     };
 
-    const { result, events } = await this.#storage.transaction(async (tx) => {
-      // Check and reserve inside one transaction, so two transfers racing for
-      // the same funds cannot both pass the check.
-      //
-      // The fee is part of both halves: Paystack checks for "the transfer
-      // amount plus the transfer fee" and deducts both, so checking the amount
-      // alone would let a transfer through that the provider would refuse.
-      const fee = Math.max(0, Math.trunc(input.fee ?? 0));
-      const required = transfer.amount + fee;
-      if (this.#enforceBalance) {
-        const net = await tx.ledger.net(transfer.provider, transfer.currency);
-        const available = this.#openingBalance + net;
-        if (required > available) {
-          throw new PayboxError(
-            'insufficient_funds',
-            `Transfer of ${transfer.amount} plus a fee of ${fee} exceeds the ` +
-              `available balance of ${available} ${transfer.currency}.`,
-            {
-              details: {
-                amount: transfer.amount,
-                fee,
-                required,
-                available,
-                currency: transfer.currency,
-              },
+    // Check and reserve inside one transaction, so two transfers racing for
+    // the same funds cannot both pass the check.
+    //
+    // The fee is part of both halves: Paystack checks for "the transfer
+    // amount plus the transfer fee" and deducts both, so checking the amount
+    // alone would let a transfer through that the provider would refuse.
+    const fee = Math.max(0, Math.trunc(input.fee ?? 0));
+    const required = transfer.amount + fee;
+    const source = transfer.sourceSubaccountId;
+
+    if (this.#enforceBalance) {
+      // The *source* pot, which for a marketplace is not always the platform's.
+      const net = await tx.ledger.net(transfer.provider, transfer.currency, source);
+      const available = (source === null ? this.#openingBalance : 0) + net;
+      if (required > available) {
+        throw new PayboxError(
+          'balance_insufficient',
+          `Transfer of ${transfer.amount} plus a fee of ${fee} exceeds the ` +
+            `available balance of ${available} ${transfer.currency}.`,
+          {
+            details: {
+              amount: transfer.amount,
+              fee,
+              required,
+              available,
+              currency: transfer.currency,
+              subaccountId: source,
             },
-          );
-        }
+          },
+        );
       }
+    }
 
-      const created = await tx.transfers.insert(transfer);
-      // Reserve immediately rather than on success: a queued payout has
-      // already committed the funds, and waiting would let a second transfer
-      // spend the same money.
-      await this.#ledgerIn(tx, 'debit', {
-        provider: created.provider,
-        currency: created.currency,
-        amount: required,
-        reason: 'transfer',
-        resourceId: created.id,
-      });
-
-      const event = await this.#appendEvent(tx, {
-        type: `transfer.${status}`,
-        provider: created.provider,
-        resourceId: created.id,
-        resourceType: 'transfer',
-        data: transferEventData(created),
-        previousStatus: null,
-        currentStatus: created.status,
-      });
-      return { result: created, events: [event] };
+    const created = await tx.transfers.insert(transfer);
+    // Reserve immediately rather than on success: a queued payout has
+    // already committed the funds, and waiting would let a second transfer
+    // spend the same money.
+    await this.#ledgerIn(tx, 'debit', {
+      provider: created.provider,
+      currency: created.currency,
+      amount: required,
+      reason: 'transfer',
+      resourceId: created.id,
+      subaccountId: source,
     });
 
-    await this.#bus.emitAll(events);
-    return result;
+    // An internal move credits the other side now too, so the pair is written
+    // together and the books cannot balance halfway. A payout to a bank has no
+    // other side: the money has left.
+    if (created.destinationSubaccountId) {
+      await this.#ledgerIn(tx, 'credit', {
+        provider: created.provider,
+        currency: created.currency,
+        amount: created.amount,
+        reason: 'transfer',
+        resourceId: created.id,
+        subaccountId: created.destinationSubaccountId,
+      });
+    }
+
+    const event = await this.#appendEvent(tx, {
+      type: `transfer.${status}`,
+      provider: created.provider,
+      resourceId: created.id,
+      resourceType: 'transfer',
+      data: transferEventData(created),
+      previousStatus: null,
+      currentStatus: created.status,
+    });
+    return { result: created, events: [event] };
   }
 
   async transitionTransfer(
@@ -743,16 +882,37 @@ export class PaymentEngine {
       // A payout that did not happen releases what it reserved. The fee comes
       // back only where the provider gives it back -- keeping a
       // non-refundable fee is the whole point of the flag.
-      if (to === 'failed' || to === 'reversed') {
+      if (to === 'failed' || to === 'reversed' || to === 'cancelled') {
         const reservedFee = Math.max(0, Math.trunc(Number(updated.metadata.fee ?? 0)));
         const refundable = updated.metadata.fee_refundable !== false;
-        await this.#ledgerIn(tx, 'credit', {
-          provider: updated.provider,
-          currency: updated.currency,
-          amount: updated.amount + (refundable ? reservedFee : 0),
-          reason: `transfer_${to}`,
-          resourceId: updated.id,
-        });
+        // Only what has not already been sent back: a partial reversal has
+        // moved some of it already, and releasing the full amount here would
+        // credit the source twice.
+        const outstanding = Math.max(0, updated.amount - updated.amountReversed);
+        const release = outstanding + (refundable ? reservedFee : 0);
+
+        if (release > 0) {
+          await this.#ledgerIn(tx, 'credit', {
+            provider: updated.provider,
+            currency: updated.currency,
+            amount: release,
+            reason: `transfer_${to}`,
+            resourceId: updated.id,
+            subaccountId: updated.sourceSubaccountId,
+          });
+          // An internal move has to take it back off the other side too, or
+          // the marketplace's books stop balancing.
+          if (updated.destinationSubaccountId && outstanding > 0) {
+            await this.#ledgerIn(tx, 'debit', {
+              provider: updated.provider,
+              currency: updated.currency,
+              amount: outstanding,
+              reason: `transfer_${to}`,
+              resourceId: updated.id,
+              subaccountId: updated.destinationSubaccountId,
+            });
+          }
+        }
       }
       const event = await this.#appendEvent(tx, {
         type: `transfer.${to}`,
@@ -773,6 +933,108 @@ export class PaymentEngine {
   /* ---------------------------------------------------------------- *
    * Customers (spec §20)
    * ---------------------------------------------------------------- */
+
+  /**
+   * Send part or all of an internal transfer back.
+   *
+   * Only meaningful between balances: money that has left for a bank cannot be
+   * pulled back by the platform, which is exactly why Stripe offers reversals
+   * on transfers and not on payouts.
+   */
+  async reverseTransfer(transferId: string, amount?: number): Promise<Transfer> {
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const transfer = await tx.transfers.byId(transferId);
+      if (!transfer) {
+        throw new PayboxError('not_found', `No transfer with id ${transferId}.`);
+      }
+      if (!transfer.destinationSubaccountId) {
+        throw new PayboxError(
+          'validation_failed',
+          'Only a transfer between balances can be reversed. Money sent to a bank cannot ' +
+            'be pulled back.',
+        );
+      }
+      if (transfer.status === 'failed' || transfer.status === 'cancelled') {
+        throw new PayboxError(
+          'invalid_state_transition',
+          `Cannot reverse a transfer that is ${transfer.status}.`,
+        );
+      }
+
+      const remaining = transfer.amount - transfer.amountReversed;
+      const requested = amount ?? remaining;
+      if (requested <= 0) {
+        throw new PayboxError('validation_failed', 'Reversal must be greater than zero.');
+      }
+      if (requested > remaining) {
+        throw new PayboxError(
+          'refund_exceeds_amount',
+          `Reversal of ${requested} exceeds the ${remaining} still reversible on this transfer.`,
+          { details: { amount: transfer.amount, reversed: transfer.amountReversed } },
+        );
+      }
+
+      // Money cannot be pulled out of an account that has already spent it.
+      if (this.#enforceBalance) {
+        const available = await tx.ledger.net(
+          transfer.provider,
+          transfer.currency,
+          transfer.destinationSubaccountId,
+        );
+        if (requested > available) {
+          throw new PayboxError(
+            'balance_insufficient',
+            `Reversal of ${requested} exceeds the destination balance of ${available} ` +
+              `${transfer.currency}.`,
+            { details: { requested, available, currency: transfer.currency } },
+          );
+        }
+      }
+
+      const now = this.#clock.nowISO();
+      const reversed = transfer.amountReversed + requested;
+      const full = reversed >= transfer.amount;
+      const updated = await tx.transfers.update(transferId, {
+        amountReversed: reversed,
+        updatedAt: now,
+        ...(full && transfer.status !== 'reversed'
+          ? { status: 'reversed' as TransferStatus, providerStatus: 'reversed' }
+          : {}),
+      });
+
+      await this.transferBetweenBalances(tx, {
+        provider: updated.provider,
+        currency: updated.currency,
+        amount: requested,
+        from: updated.destinationSubaccountId,
+        to: updated.sourceSubaccountId,
+        reason: 'transfer_reversal',
+        resourceId: updated.id,
+      });
+
+      const event = await this.#appendEvent(tx, {
+        type: 'transfer.reversed',
+        provider: updated.provider,
+        resourceId: updated.id,
+        resourceType: 'transfer',
+        data: {
+          ...transferEventData(updated),
+          reversed_amount: requested,
+          amount_reversed: updated.amountReversed,
+        },
+        previousStatus: transfer.status,
+        currentStatus: updated.status,
+      });
+      return { result: updated, events: [event] };
+    });
+
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
+  async getTransfer(id: string): Promise<Transfer | null> {
+    return this.#storage.transfers.byId(id);
+  }
 
   async createCustomer(input: {
     provider: ProviderId;
@@ -2333,6 +2595,20 @@ export class PaymentEngine {
    * Marketplace: subaccounts, splits and the balance ledger
    * ---------------------------------------------------------------- */
 
+  /**
+   * What a freshly created account still owes before it can transact.
+   *
+   * Deliberately not empty. At Stripe an account created through the API is
+   * unusable until it submits details, and a developer whose integration
+   * assumes otherwise finds out in production. The emulator makes them find
+   * out here instead.
+   */
+  static readonly ONBOARDING_REQUIREMENTS: readonly string[] = [
+    'business_profile.url',
+    'external_account',
+    'tos_acceptance.date',
+  ];
+
   async createSubaccount(input: {
     provider: ProviderId;
     businessName: string;
@@ -2345,6 +2621,17 @@ export class PaymentEngine {
     primaryContactName?: string | null;
     primaryContactPhone?: string | null;
     providerSubaccountCode?: string;
+    accountType?: string | null;
+    countryCode?: string;
+    /**
+     * Whether the account can transact immediately.
+     *
+     * Paystack's subaccounts can; Stripe's connected accounts cannot until
+     * they have onboarded. Passed by the adapter rather than inferred from the
+     * provider, so the engine never learns which is which (spec §30).
+     */
+    onboarded?: boolean;
+    capabilities?: Metadata;
     metadata?: Metadata;
   }): Promise<Subaccount> {
     if (input.percentageCharge < 0 || input.percentageCharge > 100) {
@@ -2356,7 +2643,8 @@ export class PaymentEngine {
     }
 
     const now = this.#clock.nowISO();
-    return this.#storage.subaccounts.insert({
+    const onboarded = input.onboarded ?? true;
+    const subaccount: Subaccount = {
       id: this.#ids.next('sac'),
       provider: input.provider,
       providerSubaccountCode: input.providerSubaccountCode ?? this.#ids.token(12),
@@ -2370,10 +2658,241 @@ export class PaymentEngine {
       primaryContactPhone: input.primaryContactPhone ?? null,
       currency: input.currency.toUpperCase(),
       active: true,
+      accountType: input.accountType ?? null,
+      countryCode: (input.countryCode ?? 'NG').toUpperCase(),
+      chargesEnabled: onboarded,
+      payoutsEnabled: onboarded,
+      detailsSubmitted: onboarded,
+      requirements: onboarded ? emptyRequirements() : pendingRequirements(),
+      capabilities: input.capabilities ?? {},
       metadata: input.metadata ?? {},
       createdAt: now,
       updatedAt: now,
+    };
+
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const created = await tx.subaccounts.insert(subaccount);
+      const event = await this.#appendEvent(tx, {
+        type: 'subaccount.created',
+        provider: created.provider,
+        resourceId: created.id,
+        resourceType: 'subaccount',
+        data: subaccountEventData(created),
+        previousStatus: null,
+        currentStatus: created.chargesEnabled ? 'enabled' : 'pending',
+      });
+      return { result: created, events: [event] };
     });
+
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
+  async updateSubaccount(id: string, patch: Partial<Subaccount>): Promise<Subaccount> {
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const existing = await tx.subaccounts.byId(id);
+      if (!existing) throw new PayboxError('not_found', `No subaccount with id ${id}.`);
+
+      const updated = await tx.subaccounts.update(id, {
+        ...patch,
+        updatedAt: this.#clock.nowISO(),
+      });
+      const event = await this.#appendEvent(tx, {
+        type: 'subaccount.updated',
+        provider: updated.provider,
+        resourceId: updated.id,
+        resourceType: 'subaccount',
+        data: subaccountEventData(updated),
+        previousStatus: existing.chargesEnabled ? 'enabled' : 'pending',
+        currentStatus: updated.chargesEnabled ? 'enabled' : 'pending',
+      });
+      return { result: updated, events: [event] };
+    });
+
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
+  /**
+   * Finish onboarding: the account may now transact.
+   *
+   * The one transition that matters in a Connect integration, because before
+   * it a connected account looks complete and silently refuses every charge.
+   */
+  async completeOnboarding(id: string): Promise<Subaccount> {
+    const existing = await this.#storage.subaccounts.byId(id);
+    if (!existing) throw new PayboxError('not_found', `No subaccount with id ${id}.`);
+    return this.updateSubaccount(id, {
+      chargesEnabled: true,
+      payoutsEnabled: true,
+      detailsSubmitted: true,
+      requirements: emptyRequirements(),
+      capabilities: Object.fromEntries(
+        Object.keys(existing.capabilities).map((key) => [key, 'active']),
+      ),
+    });
+  }
+
+  /**
+   * Refuse an account.
+   *
+   * Terminal in practice: a rejected account keeps its rows so the history
+   * stays auditable, but can neither charge nor be paid out.
+   */
+  async rejectSubaccount(id: string, reason: string): Promise<Subaccount> {
+    const existing = await this.#storage.subaccounts.byId(id);
+    if (!existing) throw new PayboxError('not_found', `No subaccount with id ${id}.`);
+    return this.updateSubaccount(id, {
+      active: false,
+      chargesEnabled: false,
+      payoutsEnabled: false,
+      requirements: { ...emptyRequirements(), disabled_reason: `rejected.${reason}` },
+      capabilities: Object.fromEntries(
+        Object.keys(existing.capabilities).map((key) => [key, 'inactive']),
+      ),
+    });
+  }
+
+  /**
+   * Give back part of the platform's cut.
+   *
+   * A separate movement from refunding the charge, because it is a separate
+   * decision: refunding a customer does not oblige the platform to give up its
+   * fee, and Stripe keeps the two apart for exactly that reason.
+   */
+  async refundPlatformFee(paymentId: string, amount?: number): Promise<Payment> {
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const payment = await this.#requirePayment(tx, paymentId);
+      if (payment.platformFee <= 0) {
+        throw new PayboxError(
+          'validation_failed',
+          `Payment ${paymentId} carries no platform fee to refund.`,
+        );
+      }
+      if (!payment.subaccountId) {
+        throw new PayboxError(
+          'validation_failed',
+          `Payment ${paymentId} involves no connected account.`,
+        );
+      }
+
+      const remaining = payment.platformFee - payment.platformFeeRefunded;
+      const requested = amount ?? remaining;
+      if (requested <= 0) {
+        throw new PayboxError('validation_failed', 'Fee refund must be greater than zero.');
+      }
+      if (requested > remaining) {
+        throw new PayboxError(
+          'refund_exceeds_amount',
+          `Fee refund of ${requested} exceeds the ${remaining} still refundable.`,
+          { details: { platformFee: payment.platformFee, refunded: payment.platformFeeRefunded } },
+        );
+      }
+
+      const now = this.#clock.nowISO();
+      const updated = await tx.payments.update(payment.id, {
+        platformFeeRefunded: payment.platformFeeRefunded + requested,
+        updatedAt: now,
+      });
+
+      // The fee returns to whoever bore it -- but only to the extent they
+      // still hold the money it was taken out of.
+      //
+      // On a *direct* charge the account bore it outright, so all of it moves.
+      // On a *forwarded* charge the platform kept the fee out of money it
+      // collected, and the account's share travelled as a transfer: if that
+      // transfer has since been reversed, the platform already holds
+      // everything and there is nothing left to move. Paying the fee across
+      // anyway would hand the account money out of a charge it was fully
+      // reversed out of.
+      const movable = await this.#feeRefundShare(tx, updated, requested);
+      if (movable > 0) {
+        await this.transferBetweenBalances(tx, {
+          provider: updated.provider,
+          currency: updated.currency,
+          amount: movable,
+          from: null,
+          to: updated.subaccountId,
+          reason: 'application_fee_refund',
+          resourceId: updated.id,
+        });
+      }
+
+      const event = await this.#appendEvent(tx, {
+        type: 'application_fee.refunded',
+        provider: updated.provider,
+        resourceId: updated.id,
+        resourceType: 'payment',
+        data: {
+          payment_id: updated.id,
+          amount: requested,
+          fee: updated.platformFee,
+          fee_refunded: updated.platformFeeRefunded,
+          subaccount_id: updated.subaccountId,
+        },
+        previousStatus: updated.status,
+        currentStatus: updated.status,
+      });
+      return { result: updated, events: [event] };
+    });
+
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
+  /**
+   * How much of a fee refund actually moves between balances.
+   *
+   * See the comment at the call site: a forwarded charge whose transfer has
+   * been reversed leaves nothing to move, and a partially reversed one moves
+   * proportionally.
+   */
+  async #feeRefundShare(tx: Storage, payment: Payment, requested: number): Promise<number> {
+    if (payment.settlementMode !== 'forwarded') return requested;
+
+    const transfers = await tx.transfers.list({ limit: 500 });
+    const forwarded = transfers.items.find((row) => row.sourcePaymentId === payment.id);
+    if (!forwarded || forwarded.amount <= 0) return requested;
+
+    const standing = Math.max(0, forwarded.amount - forwarded.amountReversed);
+    return Math.floor((requested * standing) / forwarded.amount);
+  }
+
+  async getSubaccount(id: string): Promise<Subaccount | null> {
+    return this.#storage.subaccounts.byId(id);
+  }
+
+  /**
+   * Refuse to act for an account that has not finished onboarding.
+   *
+   * Called by adapters before anything that moves money on a connected
+   * account's behalf, so the refusal is identical wherever it comes from.
+   */
+  assertChargeableAccount(subaccount: Subaccount, label?: string): void {
+    // The adapter passes the handle the developer actually sent -- `acct_...`
+    // for Stripe -- because an error naming an internal code they have never
+    // seen sends them looking for the wrong thing. The engine still knows
+    // nothing about what those handles look like (spec §30).
+    const name = label ?? subaccount.providerSubaccountCode;
+    if (!subaccount.active) {
+      throw new PayboxError(
+        'validation_failed',
+        `Account ${name} is rejected and cannot process charges.`,
+        { details: { subaccountId: subaccount.id } },
+      );
+    }
+    if (!subaccount.chargesEnabled) {
+      throw new PayboxError(
+        'validation_failed',
+        `Account ${name} cannot currently process charges: onboarding is incomplete.`,
+        {
+          details: {
+            subaccountId: subaccount.id,
+            requirements: subaccount.requirements,
+          },
+        },
+      );
+    }
   }
 
   /**
@@ -2443,43 +2962,79 @@ export class PaymentEngine {
     return { entries, merchant: amount - allocated };
   }
 
-  /** Current balance for a currency, including the opening test float. */
-  async getBalance(provider: ProviderId, currency: string): Promise<number> {
-    const net = await this.#storage.ledger.net(provider, currency.toUpperCase());
-    return this.#openingBalance + net;
+  /**
+   * Current balance for one owner's pot, including the opening test float.
+   *
+   * The float belongs to the **platform** only. A connected account starts at
+   * zero, because it has genuinely earned nothing -- handing every connected
+   * account a free float would let a marketplace pay out money nobody paid in,
+   * which is exactly the bug this balance model exists to catch.
+   */
+  async getBalance(
+    provider: ProviderId,
+    currency: string,
+    subaccountId: string | null = null,
+  ): Promise<number> {
+    const net = await this.#storage.ledger.net(provider, currency.toUpperCase(), subaccountId);
+    return (subaccountId === null ? this.#openingBalance : 0) + net;
   }
 
-  async creditBalance(input: {
-    provider: ProviderId;
-    currency: string;
-    amount: number;
-    reason: string;
-    resourceId?: string | null;
-  }): Promise<LedgerEntry> {
+  async creditBalance(input: LedgerInput): Promise<LedgerEntry> {
     return this.#appendLedger('credit', input);
   }
 
-  async debitBalance(input: {
-    provider: ProviderId;
-    currency: string;
-    amount: number;
-    reason: string;
-    resourceId?: string | null;
-  }): Promise<LedgerEntry> {
+  async debitBalance(input: LedgerInput): Promise<LedgerEntry> {
     return this.#appendLedger('debit', input);
+  }
+
+  /**
+   * Move money from one owner's pot to another, atomically.
+   *
+   * Two entries, never one: a debit from the source and a credit to the
+   * destination, in the same transaction. A single entry would make the
+   * marketplace's books stop balancing the moment anything went wrong halfway.
+   */
+  async transferBetweenBalances(
+    tx: Storage,
+    input: {
+      provider: ProviderId;
+      currency: string;
+      amount: number;
+      from: string | null;
+      to: string | null;
+      reason: string;
+      resourceId?: string | null;
+    },
+  ): Promise<void> {
+    if (input.from === input.to) {
+      throw new PayboxError(
+        'validation_failed',
+        'A balance transfer needs two different owners.',
+      );
+    }
+    await this.#ledgerIn(tx, 'debit', {
+      provider: input.provider,
+      currency: input.currency,
+      amount: input.amount,
+      reason: input.reason,
+      resourceId: input.resourceId ?? null,
+      subaccountId: input.from,
+    });
+    await this.#ledgerIn(tx, 'credit', {
+      provider: input.provider,
+      currency: input.currency,
+      amount: input.amount,
+      reason: input.reason,
+      resourceId: input.resourceId ?? null,
+      subaccountId: input.to,
+    });
   }
 
   /** Ledger append bound to an open transaction. */
   async #ledgerIn(
     tx: Storage,
     direction: LedgerEntry['direction'],
-    input: {
-      provider: ProviderId;
-      currency: string;
-      amount: number;
-      reason: string;
-      resourceId?: string | null;
-    },
+    input: LedgerInput,
   ): Promise<void> {
     await tx.ledger.append({
       id: this.#ids.next('led'),
@@ -2489,19 +3044,14 @@ export class PaymentEngine {
       amount: input.amount,
       reason: input.reason,
       resourceId: input.resourceId ?? null,
+      subaccountId: input.subaccountId ?? null,
       createdAt: this.#clock.nowISO(),
     });
   }
 
   async #appendLedger(
     direction: LedgerEntry['direction'],
-    input: {
-      provider: ProviderId;
-      currency: string;
-      amount: number;
-      reason: string;
-      resourceId?: string | null;
-    },
+    input: LedgerInput,
   ): Promise<LedgerEntry> {
     validateAmount(input.amount);
     return this.#storage.ledger.append({
@@ -2512,6 +3062,7 @@ export class PaymentEngine {
       amount: input.amount,
       reason: input.reason,
       resourceId: input.resourceId ?? null,
+      subaccountId: input.subaccountId ?? null,
       createdAt: this.#clock.nowISO(),
     });
   }
@@ -2853,6 +3404,42 @@ function setupEventData(setup: InstrumentSetup): Metadata {
  */
 function setupToPaymentStatus(status: SetupStatus): PaymentStatus {
   return status === 'cancelled' ? 'cancelled' : (status as PaymentStatus);
+}
+
+function subaccountEventData(subaccount: Subaccount): Metadata {
+  return {
+    id: subaccount.id,
+    subaccount_code: subaccount.providerSubaccountCode,
+    business_name: subaccount.businessName,
+    currency: subaccount.currency,
+    charges_enabled: subaccount.chargesEnabled,
+    payouts_enabled: subaccount.payoutsEnabled,
+    details_submitted: subaccount.detailsSubmitted,
+  };
+}
+
+/** The requirements block of an account that owes nothing. */
+function emptyRequirements(): Metadata {
+  return {
+    alternatives: [],
+    current_deadline: null,
+    currently_due: [],
+    disabled_reason: null,
+    errors: [],
+    eventually_due: [],
+    past_due: [],
+    pending_verification: [],
+  };
+}
+
+/** The requirements block of an account that has not onboarded yet. */
+function pendingRequirements(): Metadata {
+  return {
+    ...emptyRequirements(),
+    currently_due: [...PaymentEngine.ONBOARDING_REQUIREMENTS],
+    eventually_due: [...PaymentEngine.ONBOARDING_REQUIREMENTS],
+    disabled_reason: 'requirements.past_due',
+  };
 }
 
 function dedicatedAccountEventData(account: DedicatedAccount): Metadata {

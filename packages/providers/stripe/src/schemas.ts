@@ -50,6 +50,24 @@ const paymentMethodData = z.object({
   metadata,
 });
 
+/** Splitting a charge with a connected account. */
+export const connectChargeFields = {
+  application_fee_amount: z.union([z.number(), z.string()]).optional(),
+  transfer_group: z.string().optional(),
+  on_behalf_of: z.string().optional(),
+  transfer_data: z
+    .object({
+      destination: z.string().min(1),
+      amount: z.union([z.number(), z.string()]).optional(),
+    })
+    .optional(),
+};
+
+export const applicationFeeRefundSchema = z.object({
+  amount: z.union([z.number(), z.string()]).optional(),
+  metadata,
+});
+
 export const paymentIntentCreateSchema = z.object({
   amount,
   currency: z.string().min(3).max(3),
@@ -65,6 +83,7 @@ export const paymentIntentCreateSchema = z.object({
   confirm: formBool,
   return_url: z.string().optional(),
   setup_future_usage: z.enum(['on_session', 'off_session']).optional(),
+  ...connectChargeFields,
   expand: z.array(z.string()).optional(),
 });
 
@@ -103,6 +122,89 @@ export const refundCreateSchema = z.object({
   amount: optionalAmount,
   reason: z.enum(['duplicate', 'fraudulent', 'requested_by_customer']).optional(),
   metadata,
+});
+
+/* ---------------------------------------------------------------- *
+ * Connect
+ * ---------------------------------------------------------------- */
+
+/**
+ * Creating a connected account.
+ *
+ * `capabilities` arrives as `capabilities[card_payments][requested]=true`,
+ * which the form expander turns into a nested object before this runs.
+ */
+export const accountCreateSchema = z.object({
+  type: z.enum(['standard', 'express', 'custom']).optional(),
+  country: z.string().min(2).max(2).optional(),
+  email: z.string().email().optional(),
+  default_currency: z.string().min(3).max(3).optional(),
+  business_type: z.enum(['individual', 'company', 'non_profit', 'government_entity']).optional(),
+  business_profile: z
+    .object({ name: z.string().optional(), url: z.string().optional() })
+    .optional(),
+  capabilities: z.record(z.string(), z.object({ requested: formBool }).optional()).optional(),
+  metadata,
+});
+
+export const accountUpdateSchema = z.object({
+  email: z.string().email().optional(),
+  business_type: z.enum(['individual', 'company', 'non_profit', 'government_entity']).optional(),
+  business_profile: z
+    .object({ name: z.string().optional(), url: z.string().optional() })
+    .optional(),
+  capabilities: z.record(z.string(), z.object({ requested: formBool }).optional()).optional(),
+  default_currency: z.string().min(3).max(3).optional(),
+  metadata,
+});
+
+export const accountRejectSchema = z.object({
+  reason: z.enum(['fraud', 'terms_of_service', 'other']),
+});
+
+/** Moving money to a connected account. */
+export const transferCreateSchema = z.object({
+  amount,
+  currency: z.string().min(3).max(3),
+  destination: z.string().min(1),
+  description: z.string().optional(),
+  source_transaction: z.string().optional(),
+  transfer_group: z.string().optional(),
+  metadata,
+});
+
+export const transferUpdateSchema = z.object({
+  description: z.string().optional(),
+  metadata,
+});
+
+export const transferReversalSchema = z.object({
+  amount: z.union([z.number(), z.string()]).optional(),
+  description: z.string().optional(),
+  refund_application_fee: formBool,
+  metadata,
+});
+
+/** Money leaving a balance for a bank. */
+export const payoutCreateSchema = z.object({
+  amount,
+  currency: z.string().min(3).max(3),
+  description: z.string().optional(),
+  statement_descriptor: z.string().optional(),
+  method: z.enum(['standard', 'instant']).optional(),
+  metadata,
+});
+
+export const payoutUpdateSchema = z.object({ metadata });
+
+export const accountLinkCreateSchema = z.object({
+  account: z.string().min(1),
+  type: z
+    .enum(['account_onboarding', 'account_update'])
+    .optional()
+    .default('account_onboarding'),
+  refresh_url: z.string().optional(),
+  return_url: z.string().optional(),
 });
 
 /**
@@ -218,9 +320,9 @@ export const chargeCreateSchema = z.object({
   description: z.string().optional(),
   receipt_email: z.string().optional(),
   statement_descriptor: z.string().optional(),
-  transfer_group: z.string().optional(),
   /** Defaults to true. False authorizes now and captures later. */
   capture: formBool,
+  ...connectChargeFields,
   metadata,
 });
 

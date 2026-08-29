@@ -704,4 +704,95 @@ export const MIGRATIONS: readonly Migration[] = [
         WHERE signature IS NOT NULL;
     `,
   },
+  {
+    id: '0014_connected_accounts',
+    sql: `
+      -- A connected account is not usable the moment it is created.
+      --
+      -- At Stripe it must submit details first; until then charges_enabled is
+      -- false and requirements says what is missing. That gap is the single
+      -- most common thing a Connect integration gets wrong in production, so
+      -- the emulator models it rather than handing back a working account.
+      --
+      -- Existing rows are Paystack subaccounts, which have no such lifecycle
+      -- and are usable at once: they backfill to fully enabled, so nothing
+      -- about Paystack's behaviour changes.
+      ALTER TABLE subaccounts ADD COLUMN account_type TEXT;
+      ALTER TABLE subaccounts ADD COLUMN country_code TEXT NOT NULL DEFAULT 'NG';
+      ALTER TABLE subaccounts ADD COLUMN charges_enabled INTEGER NOT NULL DEFAULT 1;
+      ALTER TABLE subaccounts ADD COLUMN payouts_enabled INTEGER NOT NULL DEFAULT 1;
+      ALTER TABLE subaccounts ADD COLUMN details_submitted INTEGER NOT NULL DEFAULT 1;
+      ALTER TABLE subaccounts ADD COLUMN requirements TEXT NOT NULL DEFAULT '{}';
+      ALTER TABLE subaccounts ADD COLUMN capabilities TEXT NOT NULL DEFAULT '{}';
+    `,
+  },
+  {
+    id: '0015_ledger_owner',
+    sql: `
+      -- The balance ledger gains an owner.
+      --
+      -- Until now there was one pot of money per (provider, currency).
+      -- Connect is several: the platform's, and one per connected account.
+      -- Every Connect flow -- a direct charge, an application fee, a transfer,
+      -- a payout -- is a movement between two of them, so the ledger needs to
+      -- know which pot each entry belongs to before any of it can be modelled.
+      --
+      -- NULL means the platform, which is what every existing row is. The
+      -- balance stays a fold over an append-only ledger; it just folds per
+      -- owner now.
+      ALTER TABLE balance_ledger
+        ADD COLUMN subaccount_id TEXT REFERENCES subaccounts(id) ON DELETE RESTRICT;
+      CREATE INDEX idx_balance_ledger_owner
+        ON balance_ledger (provider, currency, subaccount_id);
+    `,
+  },
+  {
+    id: '0016_marketplace_payments',
+    sql: `
+      -- Which marketplace participant a payment involves, and how.
+      --
+      -- settlement_mode is the load-bearing column. There are two genuinely
+      -- different arrangements and they move money differently:
+      --
+      --   direct     the participant took the payment; the platform keeps only
+      --              its fee. Stripe calls this a direct charge, made with the
+      --              Stripe-Account header.
+      --   forwarded  the platform took the payment and passes a share on. What
+      --              Stripe calls a destination charge, and what a Paystack
+      --              split resembles.
+      --
+      -- NULL for an ordinary payment involving no participant at all.
+      ALTER TABLE payments
+        ADD COLUMN subaccount_id TEXT REFERENCES subaccounts(id) ON DELETE SET NULL;
+      ALTER TABLE payments ADD COLUMN settlement_mode TEXT;
+      -- The platform's cut. Stripe calls it an application fee.
+      ALTER TABLE payments ADD COLUMN platform_fee INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE payments ADD COLUMN platform_fee_refunded INTEGER NOT NULL DEFAULT 0;
+      -- Ties charges and transfers that belong to one piece of business.
+      ALTER TABLE payments ADD COLUMN transfer_group TEXT;
+      CREATE INDEX idx_payments_subaccount ON payments (subaccount_id);
+      CREATE INDEX idx_payments_transfer_group ON payments (transfer_group);
+    `,
+  },
+  {
+    id: '0017_transfers_between_balances',
+    sql: `
+      -- A transfer already models "money leaves a balance and may fail".
+      -- Moving funds to a connected account is the same shape of problem, so
+      -- it reuses the mechanism rather than growing a second one: the only new
+      -- facts are which balance it left and which it landed in.
+      --
+      -- destination NULL means it went to a bank, which is every existing row.
+      ALTER TABLE transfers
+        ADD COLUMN source_subaccount_id TEXT REFERENCES subaccounts(id) ON DELETE RESTRICT;
+      ALTER TABLE transfers
+        ADD COLUMN destination_subaccount_id TEXT REFERENCES subaccounts(id) ON DELETE RESTRICT;
+      ALTER TABLE transfers
+        ADD COLUMN source_payment_id TEXT REFERENCES payments(id) ON DELETE SET NULL;
+      ALTER TABLE transfers ADD COLUMN transfer_group TEXT;
+      ALTER TABLE transfers ADD COLUMN amount_reversed INTEGER NOT NULL DEFAULT 0;
+      CREATE INDEX idx_transfers_destination ON transfers (destination_subaccount_id);
+      CREATE INDEX idx_transfers_group ON transfers (transfer_group);
+    `,
+  },
 ];

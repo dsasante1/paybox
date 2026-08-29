@@ -133,3 +133,65 @@ export function renderSetupResult(options: {
     redirectUrl: options.redirectUrl,
   });
 }
+
+/**
+ * The Connect onboarding page an account link points at (spec §45).
+ *
+ * Stripe hosts a multi-step form collecting business details, bank accounts
+ * and identity documents. None of that can mean anything locally, and asking a
+ * developer to fill in a fake one would waste their time -- so the emulator
+ * serves the *decision* the form ends in: onboard, or walk away. What matters
+ * for an integration is the state change and the redirect, not the fields.
+ */
+export function renderOnboardingPage(options: {
+  accountId: string;
+  businessName: string;
+  basePath: string;
+  requirements: readonly string[];
+  error?: string | null;
+}): string {
+  const action = `${options.basePath}/connect/onboard/${options.accountId}/complete`;
+  const rows = options.requirements
+    .map((requirement) => `<tr><td><code>${escapeHtml(requirement)}</code></td></tr>`)
+    .join('');
+
+  return renderHostedPage({
+    title: 'paybox — connect onboarding',
+    ...(options.error ? { error: options.error } : {}),
+    body: `<div class="card">
+    <div class="amount">Set up payouts</div>
+    <div class="ref">${escapeHtml(options.businessName)} — ${escapeHtml(options.accountId)}</div>
+
+    <p class="muted">Stripe collects business details, a bank account and identity
+    documents here. None of that can mean anything locally, so paybox serves the
+    decision the form ends in rather than a fake form.</p>
+
+    <details open>
+      <summary>Still required</summary>
+      <table><tbody>${rows || '<tr><td>Nothing outstanding.</td></tr>'}</tbody></table>
+    </details>
+
+    <form method="POST" action="${escapeHtml(action)}">
+      <button class="pay" type="submit" name="outcome" value="complete">Complete onboarding</button>
+    </form>
+    <form method="POST" action="${escapeHtml(action)}">
+      <button class="pay secondary" type="submit" name="outcome" value="abandon">Leave for now</button>
+    </form>
+  </div>`,
+  });
+}
+
+/** Shown once the account holder answers, before the redirect. */
+export function renderOnboardingResult(options: {
+  completed: boolean;
+  redirectUrl: string | null;
+}): string {
+  return renderHostedResult({
+    title: 'paybox — connect onboarding',
+    heading: options.completed ? 'Onboarding complete' : 'Onboarding incomplete',
+    message: options.completed
+      ? 'This account can now accept charges and receive payouts.'
+      : 'This account still cannot accept charges. Send another account link to finish.',
+    redirectUrl: options.redirectUrl,
+  });
+}

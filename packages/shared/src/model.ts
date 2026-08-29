@@ -40,6 +40,24 @@ export interface Payment {
   /** Where the developer wants the payer sent after checkout. */
   callbackUrl: string | null;
   amountRefunded: number;
+  /** The marketplace participant this payment involves, if any. */
+  subaccountId: string | null;
+  /**
+   * How the money is arranged between the platform and that participant.
+   *
+   *   direct     The participant took the payment; the platform keeps only its
+   *              fee. Stripe's direct charge.
+   *   forwarded  The platform took the payment and passes a share on. Stripe's
+   *              destination charge; a Paystack split is the same idea.
+   *
+   * Null for an ordinary payment involving no participant.
+   */
+  settlementMode: 'direct' | 'forwarded' | null;
+  /** The platform's cut, in minor units. Stripe calls it an application fee. */
+  platformFee: number;
+  platformFeeRefunded: number;
+  /** Ties charges and transfers that belong to one piece of business. */
+  transferGroup: string | null;
   /** Set once the payment reaches a terminal successful/failed state. */
   failureCode: string | null;
   failureMessage: string | null;
@@ -74,6 +92,20 @@ export interface Refund {
   updatedAt: string;
 }
 
+/**
+ * Money leaving a balance.
+ *
+ * One mechanism for two things a marketplace does, because they are the same
+ * shape of problem -- reserve now, settle later, and possibly fail:
+ *
+ *   destinationSubaccountId set   An internal move between balances. Stripe
+ *                                 calls this a Transfer.
+ *   destinationSubaccountId null  Money going to a bank. Stripe calls this a
+ *                                 Payout; Paystack calls it a transfer.
+ *
+ * `sourceSubaccountId` is null for the platform's own balance, which is where
+ * every non-marketplace payout comes from.
+ */
 export interface Transfer {
   id: string;
   provider: ProviderId;
@@ -88,6 +120,16 @@ export interface Transfer {
   recipientBankCode: string | null;
   reason: string | null;
   failureReason: string | null;
+  /** Whose balance the money leaves. Null is the platform's own. */
+  sourceSubaccountId: string | null;
+  /** Whose balance it lands in. Null means it left for a bank. */
+  destinationSubaccountId: string | null;
+  /** The charge that funded it, where a provider tracks that. */
+  sourcePaymentId: string | null;
+  /** Ties charges and transfers that belong to one piece of business. */
+  transferGroup: string | null;
+  /** How much has been sent back. Reversals may be partial. */
+  amountReversed: number;
   metadata: Metadata;
   createdAt: string;
   updatedAt: string;
@@ -442,6 +484,14 @@ export interface InvoiceItem {
  *
  * Canonical: Stripe calls it a connected account, Flutterwave a subaccount.
  * The bank details are synthetic and nothing is ever settled to them for real.
+ *
+ * The onboarding fields exist because at Stripe an account is **not usable the
+ * moment it is created**. It has to submit details first, and until it does,
+ * `chargesEnabled` is false and `requirements` says what is missing. That gap
+ * is the single most common thing a Connect integration gets wrong in
+ * production, so the emulator models it rather than handing back an account
+ * that works immediately. Paystack has no such lifecycle, and its adapter
+ * creates subaccounts already enabled.
  */
 export interface Subaccount {
   id: string;
@@ -458,6 +508,18 @@ export interface Subaccount {
   primaryContactPhone: string | null;
   currency: string;
   active: boolean;
+  /** How much of the relationship the platform owns. Null where unmodelled. */
+  accountType: string | null;
+  countryCode: string;
+  /** False until onboarding completes: the account cannot accept payments. */
+  chargesEnabled: boolean;
+  /** False until onboarding completes: money cannot leave for a bank. */
+  payoutsEnabled: boolean;
+  detailsSubmitted: boolean;
+  /** What the account still owes before it can transact. */
+  requirements: Metadata;
+  /** Which capabilities are active, e.g. `card_payments`, `transfers`. */
+  capabilities: Metadata;
   metadata: Metadata;
   createdAt: string;
   updatedAt: string;
@@ -504,6 +566,15 @@ export interface LedgerEntry {
   reason: string;
   /** The payment, refund or transfer that caused the movement. */
   resourceId: string | null;
+  /**
+   * Whose money this is. Null means the platform's own balance.
+   *
+   * A marketplace is several pots, not one: the platform's, and one per
+   * connected account. Every movement between them is two entries -- a debit
+   * from one owner and a credit to another -- so the pair can always be
+   * reconciled and neither can go missing on its own.
+   */
+  subaccountId: string | null;
   createdAt: string;
 }
 

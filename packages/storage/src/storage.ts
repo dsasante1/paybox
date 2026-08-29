@@ -1338,12 +1338,21 @@ class SqliteStorage implements Storage {
       await this.#db.insertInto('balance_ledger').values(map.fromLedgerEntry(entry)).execute();
       return entry;
     },
-    net: async (provider, currency) => {
+    net: async (provider, currency, subaccountId) => {
+      // One pot per owner. `IS NULL` rather than `= NULL` for the platform:
+      // SQL equality against NULL is never true, and getting it wrong would
+      // report every balance as zero.
       const row = await sql<{ net: number }>`
         SELECT COALESCE(SUM(CASE WHEN direction = 'credit' THEN amount ELSE -amount END), 0)
                AS net
           FROM balance_ledger
-         WHERE provider = ${provider} AND currency = ${currency}
+         WHERE provider = ${provider}
+           AND currency = ${currency}
+           AND ${
+             subaccountId === null
+               ? sql`subaccount_id IS NULL`
+               : sql`subaccount_id = ${subaccountId}`
+           }
       `.execute(this.#db);
       return Number(row.rows[0]?.net ?? 0);
     },
@@ -1361,6 +1370,16 @@ class SqliteStorage implements Storage {
         query = query.where('currency', '=', filter.currency);
         count = count.where('currency', '=', filter.currency);
       }
+      // Undefined means every owner; null means the platform's own pot.
+      if (filter && 'subaccountId' in filter) {
+        if (filter.subaccountId === null) {
+          query = query.where('subaccount_id', 'is', null);
+          count = count.where('subaccount_id', 'is', null);
+        } else if (filter.subaccountId !== undefined) {
+          query = query.where('subaccount_id', '=', filter.subaccountId);
+          count = count.where('subaccount_id', '=', filter.subaccountId);
+        }
+      }
       const rows = await query
         .orderBy('created_at', 'desc')
         .orderBy('id', 'desc')
@@ -1370,13 +1389,15 @@ class SqliteStorage implements Storage {
       const total = await count.executeTakeFirst();
       return { items: rows.map(map.toLedgerEntry), total: Number(total?.total ?? 0) };
     },
-    currencies: async (provider) => {
-      const rows = await this.#db
+    currencies: async (provider, subaccountId) => {
+      let query = this.#db
         .selectFrom('balance_ledger')
         .select('currency')
         .distinct()
-        .where('provider', '=', provider)
-        .execute();
+        .where('provider', '=', provider);
+      if (subaccountId === null) query = query.where('subaccount_id', 'is', null);
+      else if (subaccountId !== undefined) query = query.where('subaccount_id', '=', subaccountId);
+      const rows = await query.execute();
       return rows.map((r) => r.currency);
     },
   };

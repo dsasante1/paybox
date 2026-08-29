@@ -10,7 +10,9 @@ import type {
   Plan,
   Product,
   Refund,
+  Subaccount,
   Subscription,
+  Transfer,
   SubscriptionItem,
 } from '@paybox/shared';
 import {
@@ -200,7 +202,7 @@ export function serializePaymentIntent(payment: Payment, options: SerializeInten
     amount_capturable: payment.status === 'authorized' ? payment.amount : 0,
     amount_received: payment.status === 'successful' ? payment.amount : 0,
     application: null,
-    application_fee_amount: null,
+    application_fee_amount: payment.platformFee > 0 ? payment.platformFee : null,
     automatic_payment_methods: null,
     canceled_at: reason ? unix(payment.updatedAt) : null,
     cancellation_reason: reason,
@@ -216,7 +218,7 @@ export function serializePaymentIntent(payment: Payment, options: SerializeInten
     livemode: false,
     metadata: payment.metadata,
     next_action: nextAction(payment, options.baseUrl ?? '', options.basePath ?? ''),
-    on_behalf_of: null,
+    on_behalf_of: payment.subaccountId ? stripeId('acct', payment.subaccountId) : null,
     payment_method: payment.paymentMethod ? stripeId('pm', payment.id) : null,
     payment_method_options: {},
     payment_method_types: ['card'],
@@ -228,8 +230,16 @@ export function serializePaymentIntent(payment: Payment, options: SerializeInten
     statement_descriptor: null,
     statement_descriptor_suffix: null,
     status,
-    transfer_data: null,
-    transfer_group: null,
+    // A forwarded charge names where the money is going; a direct one does
+    // not, because the connected account already has it.
+    transfer_data:
+      payment.settlementMode === 'forwarded' && payment.subaccountId
+        ? {
+            amount: null,
+            destination: stripeId('acct', payment.subaccountId),
+          }
+        : null,
+    transfer_group: payment.transferGroup,
   };
 }
 
@@ -249,8 +259,8 @@ export function serializeCharge(
     amount_captured: payment.status === 'successful' ? payment.amount : 0,
     amount_refunded: refunded,
     application: null,
-    application_fee: null,
-    application_fee_amount: null,
+    application_fee: payment.platformFee > 0 ? stripeId('fee', payment.id) : null,
+    application_fee_amount: payment.platformFee > 0 ? payment.platformFee : null,
     balance_transaction: payment.status === 'successful' ? stripeId('txn', payment.id) : null,
     billing_details: billingDetails(options.customer),
     calculated_statement_descriptor: null,
@@ -297,8 +307,17 @@ export function serializeCharge(
     review: null,
     shipping: null,
     status,
-    transfer_data: null,
-    transfer_group: null,
+    // A forwarded charge names where the money is going; a direct one does
+    // not, because the connected account already has it.
+    transfer_data:
+      payment.settlementMode === 'forwarded' && payment.subaccountId
+        ? {
+            amount: null,
+            destination: stripeId('acct', payment.subaccountId),
+          }
+        : null,
+    transfer_group: payment.transferGroup,
+    on_behalf_of: payment.subaccountId ? stripeId('acct', payment.subaccountId) : null,
   };
 }
 
@@ -848,5 +867,290 @@ export function serializeInvoice(
     subscription: options.subscription ? stripeId('sub', options.subscription.id) : null,
     subtotal: invoice.amount,
     total: invoice.amount,
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * Connect
+ * ------------------------------------------------------------------ */
+
+/**
+ * A connected account.
+ *
+ * `charges_enabled` and `requirements` are the fields that matter: a freshly
+ * created account has the first false and the second non-empty, and stays that
+ * way until it onboards. An emulator that handed back a working account would
+ * hide the exact failure a Connect integration most often ships with.
+ */
+export function serializeAccount(subaccount: Subaccount) {
+  const requirements = subaccount.requirements as Record<string, unknown>;
+  return {
+    id: stripeId('acct', subaccount.id),
+    object: 'account' as const,
+    business_profile: {
+      mcc: null,
+      name: subaccount.businessName,
+      support_address: null,
+      support_email: subaccount.primaryContactEmail,
+      support_phone: subaccount.primaryContactPhone,
+      support_url: null,
+      url: (subaccount.metadata.business_url as string | undefined) ?? null,
+    },
+    business_type: (subaccount.metadata.business_type as string | undefined) ?? null,
+    capabilities: subaccount.capabilities,
+    charges_enabled: subaccount.chargesEnabled,
+    country: subaccount.countryCode,
+    created: unix(subaccount.createdAt),
+    default_currency: subaccount.currency.toLowerCase(),
+    details_submitted: subaccount.detailsSubmitted,
+    email: subaccount.primaryContactEmail,
+    external_accounts: {
+      object: 'list' as const,
+      data: subaccount.accountNumber
+        ? [
+            {
+              id: stripeId('ba', subaccount.id),
+              object: 'bank_account' as const,
+              account: stripeId('acct', subaccount.id),
+              // Synthetic, like every account number in the emulator: no money
+              // can move through it (spec §29).
+              account_holder_name: subaccount.businessName,
+              bank_name: subaccount.settlementBank,
+              country: subaccount.countryCode,
+              currency: subaccount.currency.toLowerCase(),
+              default_for_currency: true,
+              last4: subaccount.accountNumber.slice(-4),
+              status: 'new',
+            },
+          ]
+        : [],
+      has_more: false,
+      url: `/v1/accounts/${stripeId('acct', subaccount.id)}/external_accounts`,
+    },
+    livemode: false,
+    metadata: subaccount.metadata,
+    payouts_enabled: subaccount.payoutsEnabled,
+    requirements: {
+      alternatives: requirements.alternatives ?? [],
+      current_deadline: requirements.current_deadline ?? null,
+      currently_due: requirements.currently_due ?? [],
+      disabled_reason: requirements.disabled_reason ?? null,
+      errors: requirements.errors ?? [],
+      eventually_due: requirements.eventually_due ?? [],
+      past_due: requirements.past_due ?? [],
+      pending_verification: requirements.pending_verification ?? [],
+    },
+    settings: {
+      payouts: { schedule: { interval: 'manual' }, statement_descriptor: null },
+    },
+    tos_acceptance: {
+      date: subaccount.detailsSubmitted ? unix(subaccount.updatedAt) : null,
+    },
+    type: subaccount.accountType ?? 'standard',
+  };
+}
+
+/**
+ * An onboarding link.
+ *
+ * Short-lived at Stripe and short-lived here: the expiry is real virtual time,
+ * so `time advance` past it and the link stops working, which is the failure a
+ * developer needs to have seen once.
+ */
+export function serializeAccountLink(options: {
+  url: string;
+  createdISO: string;
+  expiresISO: string;
+}) {
+  return {
+    object: 'account_link' as const,
+    created: unix(options.createdISO),
+    expires_at: unix(options.expiresISO),
+    url: options.url,
+  };
+}
+
+/**
+ * A balance.
+ *
+ * `available` is what can be paid out now and `pending` what has not settled.
+ * paybox settles instantly, so `pending` is always empty -- stated in
+ * docs/stripe.md rather than faked with a plausible-looking number, because a
+ * developer testing "wait for funds to become available" needs to know that
+ * wait does not exist here.
+ */
+export function serializeBalance(
+  amounts: readonly { currency: string; amount: number }[],
+) {
+  const entries = amounts.map(({ currency, amount }) => ({
+    amount,
+    currency: currency.toLowerCase(),
+    source_types: { card: amount },
+  }));
+  return {
+    object: 'balance' as const,
+    available: entries,
+    connect_reserved: [],
+    livemode: false,
+    pending: entries.map((entry) => ({ ...entry, amount: 0, source_types: { card: 0 } })),
+  };
+}
+
+/**
+ * An application fee.
+ *
+ * Derived from the payment rather than stored as its own row: the fee is a
+ * property of one charge and has no life apart from it, exactly as `pi_` and
+ * `ch_` are two views of one payment. The id is derived the same way, so it is
+ * stable under a fixed seed.
+ */
+export function serializeApplicationFee(payment: Payment) {
+  const id = stripeId('fee', payment.id);
+  return {
+    id,
+    object: 'application_fee' as const,
+    account: payment.subaccountId ? stripeId('acct', payment.subaccountId) : null,
+    amount: payment.platformFee,
+    amount_refunded: payment.platformFeeRefunded,
+    application: null,
+    balance_transaction: stripeId('txn', payment.id),
+    charge: stripeId('ch', payment.id),
+    created: unix(payment.createdAt),
+    currency: payment.currency.toLowerCase(),
+    livemode: false,
+    originating_transaction: null,
+    refunded: payment.platformFeeRefunded >= payment.platformFee && payment.platformFee > 0,
+    refunds: {
+      object: 'list' as const,
+      data:
+        payment.platformFeeRefunded > 0
+          ? [
+              {
+                id: stripeId('fr', payment.id),
+                object: 'fee_refund' as const,
+                amount: payment.platformFeeRefunded,
+                balance_transaction: null,
+                created: unix(payment.updatedAt),
+                currency: payment.currency.toLowerCase(),
+                fee: id,
+                metadata: {},
+              },
+            ]
+          : [],
+      has_more: false,
+      url: `/v1/application_fees/${id}/refunds`,
+    },
+  };
+}
+
+/**
+ * A Transfer: money moved from the platform to a connected account.
+ *
+ * Distinct from a Payout, which leaves for a bank. paybox models both with one
+ * canonical Transfer because they are the same shape of problem -- reserve
+ * now, settle later, possibly fail -- and tells them apart by whether there is
+ * a destination balance.
+ */
+export function serializeTransfer(transfer: Transfer) {
+  const id = stripeId('tr', transfer.id);
+  return {
+    id,
+    object: 'transfer' as const,
+    amount: transfer.amount,
+    amount_reversed: transfer.amountReversed,
+    balance_transaction: stripeId('txn', transfer.id),
+    created: unix(transfer.createdAt),
+    currency: transfer.currency.toLowerCase(),
+    description: transfer.reason,
+    destination: transfer.destinationSubaccountId
+      ? stripeId('acct', transfer.destinationSubaccountId)
+      : null,
+    // paybox does not mint a separate charge on the connected account for a
+    // destination charge; docs/stripe.md records that.
+    destination_payment: null,
+    livemode: false,
+    metadata: transfer.metadata,
+    reversals: {
+      object: 'list' as const,
+      data:
+        transfer.amountReversed > 0
+          ? [
+              {
+                id: stripeId('trr', transfer.id),
+                object: 'transfer_reversal' as const,
+                amount: transfer.amountReversed,
+                balance_transaction: null,
+                created: unix(transfer.updatedAt),
+                currency: transfer.currency.toLowerCase(),
+                destination_payment_refund: null,
+                metadata: {},
+                source_refund: null,
+                transfer: id,
+              },
+            ]
+          : [],
+      has_more: false,
+      url: `/v1/transfers/${id}/reversals`,
+    },
+    reversed: transfer.amountReversed >= transfer.amount && transfer.amount > 0,
+    source_transaction: transfer.sourcePaymentId
+      ? stripeId('ch', transfer.sourcePaymentId)
+      : null,
+    source_type: 'card',
+    transfer_group: transfer.transferGroup,
+  };
+}
+
+/**
+ * Payout status: canonical -> Stripe.
+ *
+ * `reversed` has no Stripe equivalent -- a payout that comes back is `failed`
+ * there -- so it maps to failed rather than inventing a status.
+ */
+export function toStripePayoutStatus(status: Transfer['status']): string {
+  switch (status) {
+    case 'successful':
+      return 'paid';
+    case 'processing':
+      return 'in_transit';
+    case 'cancelled':
+      return 'canceled';
+    case 'failed':
+    case 'reversed':
+      return 'failed';
+    default:
+      return 'pending';
+  }
+}
+
+/** A Payout: money leaving a balance for a bank. */
+export function serializePayout(transfer: Transfer) {
+  return {
+    id: stripeId('po', transfer.id),
+    object: 'payout' as const,
+    amount: transfer.amount,
+    application_fee: null,
+    application_fee_amount: null,
+    // paybox settles instantly, so a payout arrives the moment it succeeds.
+    arrival_date: unix(transfer.updatedAt),
+    automatic: false,
+    balance_transaction: stripeId('txn', transfer.id),
+    created: unix(transfer.createdAt),
+    currency: transfer.currency.toLowerCase(),
+    description: transfer.reason,
+    destination: stripeId('ba', transfer.sourceSubaccountId ?? transfer.id),
+    failure_balance_transaction: null,
+    failure_code: transfer.failureReason,
+    failure_message: transfer.failureReason,
+    livemode: false,
+    metadata: transfer.metadata,
+    method: 'standard',
+    original_payout: null,
+    reconciliation_status: 'not_applicable',
+    reversed_by: null,
+    source_type: 'card',
+    statement_descriptor: null,
+    status: toStripePayoutStatus(transfer.status),
+    type: 'bank_account',
   };
 }
