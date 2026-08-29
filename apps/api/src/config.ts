@@ -76,6 +76,7 @@ const DEFAULTS: PayboxConfig = {
     paystack: { enabled: true },
     stripe: { enabled: true },
     flutterwave: { enabled: true },
+    kora: { enabled: true },
   },
   security: { allowAnyKey: false },
   simulation: { autoAdvance: true, autoAdvanceDelayMs: 3_000 },

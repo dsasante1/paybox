@@ -1126,7 +1126,15 @@ export const toJob = (row: JobRow): Job => ({
   updatedAt: row.updated_at,
 });
 
-export const fromJob = (job: Job): JobRow => ({
+/**
+ * `sequence` is assigned by the repository, not the caller.
+ *
+ * It exists only to give `claimDue` a deterministic tiebreak when several jobs
+ * share a `run_at` -- which under the frozen clock is every job scheduled in
+ * the same instant. Keeping it out of the domain `Job` means no adapter has to
+ * know about it, and none can get it wrong.
+ */
+export const fromJob = (job: Job, sequence: number): JobRow => ({
   id: job.id,
   kind: job.kind,
   payload: writeJson(job.payload),
@@ -1137,6 +1145,7 @@ export const fromJob = (job: Job): JobRow => ({
   lease_expires_at: job.leaseExpiresAt,
   last_error: job.lastError,
   group_key: job.groupKey,
+  sequence,
   created_at: job.createdAt,
   updated_at: job.updatedAt,
 });

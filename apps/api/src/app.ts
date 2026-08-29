@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import { stripePlugin } from '@paybox/stripe';
 import { flutterwavePlugin } from '@paybox/flutterwave';
+import { koraPlugin } from '@paybox/kora';
 import { paystackPlugin, fail } from '@paybox/paystack';
 import type { PayboxContext } from './context.js';
 import { controlApiPlugin } from './control-api.js';
@@ -182,6 +183,44 @@ export async function buildApp(context: PayboxContext): Promise<FastifyInstance>
         });
       },
       { prefix: '/flutterwave' },
+    );
+  }
+
+  if (context.config.providers.kora?.enabled !== false) {
+    await app.register(
+      async (scope) => {
+        await scope.register(networkPlugin, {
+          simulator: context.network,
+          // Kora's envelope: a boolean status, unlike Flutterwave's string.
+          errorBody: (status) => ({
+            status: false,
+            message:
+              status === 429
+                ? 'Too many requests'
+                : 'The provider is temporarily unavailable (simulated by paybox).',
+            data: null,
+          }),
+        });
+        await scope.register(idempotencyPlugin, {
+          storage: context.storage,
+          clock: context.clock,
+          provider: 'kora',
+        });
+        await scope.register(koraPlugin, {
+          engine: context.engine,
+          simulator: context.simulator,
+          storage: context.storage,
+          clock: context.clock,
+          ids: context.ids,
+          baseUrl: context.baseUrl,
+          basePath: '/kora',
+          secretKey: context.koraKeys.secretKey,
+          allowAnyKey: context.config.security.allowAnyKey,
+          autoAdvance: context.config.simulation.autoAdvance,
+          autoAdvanceDelayMs: context.config.simulation.autoAdvanceDelayMs,
+        });
+      },
+      { prefix: '/kora' },
     );
   }
 

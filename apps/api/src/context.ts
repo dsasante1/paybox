@@ -47,6 +47,7 @@ import {
   FlutterwaveWebhookFormatter,
   generateFlutterwaveKeys,
 } from '@paybox/flutterwave';
+import { KoraWebhookFormatter, generateKoraKeys } from '@paybox/kora';
 import type { PayboxConfig } from './config.js';
 import { PayboxLogger, type LogEntry } from './logger.js';
 import { NetworkSimulator } from './network.js';
@@ -74,6 +75,8 @@ export interface PayboxContext {
    * encryption key a direct card charge's payload is encrypted with.
    */
   flutterwaveKeys: { secretKey: string; publicKey: string; encryptionKey: string };
+  /** Kora's secret key doubles as the card-payload encryption key. */
+  koraKeys: { secretKey: string; publicKey: string };
   baseUrl: string;
   shutdown(): Promise<void>;
 }
@@ -197,6 +200,7 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
   dispatcher.register(new PaystackWebhookFormatter());
   dispatcher.register(new StripeWebhookFormatter({ basePath: '/stripe' }));
   dispatcher.register(new FlutterwaveWebhookFormatter({ version: 'v3' }));
+  dispatcher.register(new KoraWebhookFormatter());
   dispatcher.attachTo(bus);
 
   // Structured event log (spec §42) and a bus-level error boundary, so a
@@ -294,6 +298,7 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
   const keys = generateLocalKeys(ids.token(20));
   const stripeKeys = generateStripeKeys(ids.token(20));
   const flutterwaveKeys = generateFlutterwaveKeys(ids.token(20));
+  const koraKeys = generateKoraKeys(ids.token(20));
 
   return {
     config,
@@ -313,6 +318,7 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
     keys,
     stripeKeys,
     flutterwaveKeys,
+    koraKeys,
     baseUrl,
     async shutdown() {
       await scheduler.stop();

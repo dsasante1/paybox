@@ -13,7 +13,7 @@ export function printBanner(options: {
   sourcePath: string | null;
 }): void {
   const { context, warnings, sourcePath } = options;
-  const { config, baseUrl, keys, stripeKeys, flutterwaveKeys } = context;
+  const { config, baseUrl, keys, stripeKeys, flutterwaveKeys, koraKeys } = context;
   const out = (line = '') => process.stdout.write(`${line}\n`);
 
   out();
@@ -29,7 +29,8 @@ export function printBanner(options: {
   out(`    Paystack   ${baseUrl}/paystack   partial — see docs/paystack.md`);
   out(`    Stripe     ${baseUrl}/stripe     partial — see docs/stripe.md`);
   out(`    Flutterwave ${baseUrl}/flutterwave partial — see docs/flutterwave.md`);
-  for (const id of ['kora']) {
+  out(`    Kora       ${baseUrl}/kora        partial — see docs/kora.md`);
+  for (const id of [] as string[]) {
     out(`    ${id.padEnd(10)} not implemented yet`);
   }
   out();
@@ -38,11 +39,13 @@ export function printBanner(options: {
   out(`    Stripe     ${stripeKeys.secretKey}`);
   out(`    Flutterwave ${flutterwaveKeys.secretKey}`);
   out(`    Flutterwave encryption key ${flutterwaveKeys.encryptionKey}`);
+  out(`    Kora       ${koraKeys.secretKey}`);
   out();
   out('  Point your app at the emulator:');
   out(`    PAYSTACK_BASE_URL=${baseUrl}/paystack`);
   out(`    STRIPE_API_BASE=${baseUrl}/stripe`);
   out(`    FLW_BASE_URL=${baseUrl}/flutterwave`);
+  out(`    KORA_BASE_URL=${baseUrl}/kora`);
   out();
 
   if (config.freezeClock) {
