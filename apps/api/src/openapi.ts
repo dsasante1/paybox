@@ -28,7 +28,9 @@ export function buildOpenApiDocument(context: PayboxContext): Record<string, unk
       version: VERSION,
       description:
         'Provider-compatible payment APIs served from localhost. No real money moves. ' +
-        'Provider routes mirror the upstream contract; /api/* is the emulator control plane.',
+        'Provider routes mirror the upstream contract; /api/* is the emulator control plane. ' +
+        'This document is a hand-curated sample, not the full surface: each adapter\'s ' +
+        'contract is docs/<provider>.md, and `paybox coverage` lists every route served.',
     },
     servers: [{ url: context.baseUrl }],
     components: {

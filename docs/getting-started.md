@@ -150,7 +150,9 @@ application.
   every delivery with its response, and buttons for retry, replay, time and
   chaos. [Dashboard](dashboard.md).
 - **CLI** — `paybox payment get order_1`, `paybox events`, `paybox jobs`.
-- **API docs** <http://127.0.0.1:8080/docs> — the OpenAPI reference.
+- **API docs** <http://127.0.0.1:8080/docs> — an interactive reference over
+  a hand-curated sample of the surface. The contracts in `docs/<provider>.md`
+  are the complete statement.
 
 ## Four things a sandbox cannot do
 
