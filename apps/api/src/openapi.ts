@@ -1,3 +1,4 @@
+import { VERSION } from '@paybox/shared';
 import type { PayboxContext } from './context.js';
 
 /**
@@ -24,7 +25,7 @@ export function buildOpenApiDocument(context: PayboxContext): Record<string, unk
     openapi: '3.1.0',
     info: {
       title: 'paybox — local payment infrastructure emulator',
-      version: '0.1.0',
+      version: VERSION,
       description:
         'Provider-compatible payment APIs served from localhost. No real money moves. ' +
         'Provider routes mirror the upstream contract; /api/* is the emulator control plane.',

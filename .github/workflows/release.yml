@@ -153,7 +153,9 @@ jobs:
 
       # DOCKERHUB_IMAGE is a repository *variable* (it is a name, not a
       # secret); DOCKERHUB_USERNAME and DOCKERHUB_TOKEN are secrets, the token
-      # being a Docker Hub personal access token with read/write scope.
+      # being a Docker Hub personal access token with read/write/delete scope:
+      # the push needs read/write, the description step below needs delete
+      # as well (with a narrower token it fails with "Forbidden").
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:

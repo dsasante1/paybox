@@ -1,5 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify';
-import { PayboxError, formatAmount, type PaymentStatus } from '@paybox/shared';
+import { PayboxError, VERSION, formatAmount, type PaymentStatus } from '@paybox/shared';
 import { parseDuration } from '@paybox/core';
 import type { SimulatedOutcome } from '@paybox/simulator';
 import type { PayboxContext } from './context.js';
@@ -37,7 +37,7 @@ export const controlApiPlugin: FastifyPluginAsync<{ context: PayboxContext }> = 
 
   fastify.get('/health', async () => ({
     status: 'ok',
-    version: '0.1.0',
+    version: VERSION,
     time: clock.nowISO(),
     clock: clock.state(),
   }));

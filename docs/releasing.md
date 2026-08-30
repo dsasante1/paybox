@@ -91,8 +91,11 @@ would break the manual publish above).
 1. A Docker Hub account. The Docker ID is the namespace in the image name
    (`dsasante1` → `dsasante1/paybox`), so match the GitHub name. Turn on 2FA.
 2. A personal access token: **Account settings → Personal access tokens →
-   Generate**, scope **Read & Write**. Note its expiry; when it lapses the
-   image job fails at login and nothing else is affected.
+   Generate**, scope **Read, Write, Delete**. Pushing needs read/write; the
+   step that refreshes the Docker Hub overview page needs delete as well,
+   and with a narrower token it fails quietly and the page stays blank. Note
+   the token's expiry; when it lapses the image job fails at login and
+   nothing else is affected.
 3. On this repository, **Settings → Secrets and variables → Actions**:
 
 | Tab | Name | Value |

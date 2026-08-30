@@ -8,3 +8,4 @@ export * from './model.js';
 export * from './hosted-page.js';
 export * from './coverage.js';
 export * from './coverage-report.js';
+export * from './version.js';
