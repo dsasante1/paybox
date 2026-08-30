@@ -9,7 +9,10 @@ is the definitive list of what either can do.
   body on a POST is accepted.
 - Canonical vocabulary throughout — `successful`, not `success`.
 - Amounts are integer minor units.
-- Interactive reference: `GET /docs` (Scalar over `GET /openapi.json`).
+- Interactive reference: `GET /docs` — Scalar, served from the emulator
+  itself (no CDN; works offline), over a **hand-curated sample** of thirteen
+  routes. The complete surface is each provider's contract
+  (`docs/<provider>.md`) and `paybox coverage`; this page is not it.
 
 Every route below is relative to the emulator base, `http://127.0.0.1:8080`
 by default.
@@ -393,5 +396,5 @@ stream.addEventListener('event', (e) => console.log(JSON.parse(e.data).type));
 |---|---|
 | `GET /` | redirects to the dashboard |
 | `GET /dashboard` | the single-page dashboard |
-| `GET /docs` | interactive API reference |
-| `GET /openapi.json` | the OpenAPI 3.1 document behind it |
+| `GET /docs` | the Scalar API reference, self-hosted, over a hand-curated 13-route sample of the surface |
+| `GET /openapi.json` | the OpenAPI 3.1 document behind it (also at `/docs/openapi.json` and `/docs/openapi.yaml`) |

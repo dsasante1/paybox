@@ -1,5 +1,6 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
+import scalarApiReference from '@scalar/fastify-api-reference';
 import { stripePlugin } from '@paybox/stripe';
 import { flutterwavePlugin, flutterwaveV4Plugin } from '@paybox/flutterwave';
 import { koraPlugin } from '@paybox/kora';
@@ -351,9 +352,21 @@ export async function buildApp(context: PayboxContext): Promise<FastifyInstance>
 
   app.get('/openapi.json', async () => buildOpenApiDocument(context));
 
-  app.get('/docs', async (_request, reply) =>
-    reply.type('text/html').send(scalarPage(context.baseUrl)),
-  );
+  // The interactive reference (spec §44). The plugin ships Scalar's viewer
+  // inside its own package and serves it from `/docs/js/scalar.js`, so
+  // nothing loads from a CDN and the page works offline, like the dashboard.
+  // It is handed the document above directly rather than a URL to fetch, so
+  // it also renders under `app.inject()`, where nothing is listening.
+  //
+  // Declared as a dependency from the first commit and never registered:
+  // until this, `/docs` served a pretty-printed JSON dump of the document.
+  await app.register(scalarApiReference, {
+    routePrefix: '/docs',
+    configuration: {
+      pageTitle: 'paybox API reference',
+      content: () => buildOpenApiDocument(context),
+    },
+  });
 
   app.get('/dashboard', async (_request, reply) =>
     reply.type('text/html').send(renderDashboard(context)),
@@ -364,22 +377,3 @@ export async function buildApp(context: PayboxContext): Promise<FastifyInstance>
   return app;
 }
 
-/** Scalar reads the OpenAPI document from our own origin; nothing external. */
-function scalarPage(baseUrl: string): string {
-  return `<!doctype html><html><head><meta charset="utf-8">
-<title>paybox API reference</title>
-<meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body><script id="api-reference" data-url="${baseUrl}/openapi.json"></script>
-<script>
-  // No CDN: render a readable fallback if the bundled viewer is unavailable.
-  if (!window.Scalar) {
-    fetch('/openapi.json').then(r => r.json()).then(doc => {
-      document.body.innerHTML =
-        '<h1 style="font:600 20px system-ui;padding:24px 24px 0">' + doc.info.title + '</h1>' +
-        '<p style="font:14px system-ui;padding:0 24px;color:#555">' + doc.info.description + '</p>' +
-        '<pre style="font:12px ui-monospace;padding:24px;white-space:pre-wrap">' +
-        JSON.stringify(doc, null, 2) + '</pre>';
-    });
-  }
-</script></body></html>`;
-}
