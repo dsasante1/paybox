@@ -38,11 +38,11 @@ contract (`tests/coverage-drift.test.ts`) and the determinism rules
 
 ## What GitHub enforces
 
-`main` is protected. A pull request cannot merge until `verify (node 22)` and
-`verify (node 24)` have passed; force-pushes to `main` and deletion of it are
-refused; and *"Do not allow bypassing the above settings"* is on, so the rule
-binds administrators too — without that box an admin can still merge red,
-which is most of the gap.
+`main` is protected. A pull request cannot merge until `verify (node 22)`,
+`verify (node 24)` and `image` have passed; force-pushes to `main` and
+deletion of it are refused; and *"Do not allow bypassing the above settings"*
+is on, so the rule binds administrators too — without that box an admin can
+still merge red, which is most of the gap.
 
 Deliberately **off**: *require pull request reviews*. On a solo repo it only
 means reaching for `--admin` to get past it, and a rule everyone routinely
