@@ -170,6 +170,64 @@ Four differences from v4 specifically:
 4. **No customer list, update or delete**, and no destination resolution on
    transfers.
 
+### v4 webhooks
+
+Verified **2026-08-30** against the guide at
+`developer.flutterwave.com/docs/webhooks` (one complete `charge.completed`
+delivery) and the reference pages generated from Flutterwave's OpenAPI
+document — `reference/charge_completed_webhook`, `transfer_disburse_webhook`,
+`transfer_reversal_webhook`, `refund_completed_webhook` — which give each
+payload's schema.
+
+**A delivery is shaped and signed by the API that created the resource.**
+Everything the v4 API creates is marked as such at creation; its webhooks are
+v4's whatever endpoint they go to, and a v3-created resource on the same
+endpoint still gets v3's. One `--provider flutterwave` endpoint therefore
+serves both APIs, each delivery in its own shape with its own signature.
+
+| Canonical event | v4 `type` | `data` |
+| --- | --- | --- |
+| `payment.successful`, `payment.failed` | `charge.completed` | the charge, with `customer` and `payment_method` expanded |
+| `transfer.successful`, `transfer.failed` | `transfer.disburse` | the transfer; `status` is `SUCCESSFUL` or `FAILED` |
+| `transfer.reversed` | `transfer.reversal` | the transfer plus a `reversal` block |
+| `refund.successful` | `refund.completed` | the refund; `status: succeeded` |
+
+Signature: **`flutterwave-signature`**, base64 HMAC-SHA256 over the raw body
+under the endpoint's secret hash. Envelope: `{ webhook_id, timestamp, type,
+data }`, with `timestamp` in epoch milliseconds.
+
+What is transcribed and what is not, plainly:
+
+- **`webhook_id` vs `id`.** The guide's example names the envelope's first
+  field `id`; all four reference schemas name it `webhook_id`. paybox follows
+  the schema, as the Paystack adapter follows its OpenAPI document over prose.
+  A handler that reads `id` from a real delivery will not find it here. The
+  discrepancy is Flutterwave's, and it is recorded rather than papered over.
+- **A settled charge is `succeeded`**, as the guide's example shows — not
+  v3's `successful`. `processor_response` is `{ code: "00", type: "approved" }`
+  for an approval, as shown; for a decline `type` is the issuer response the
+  scenario key asked for and `code` is `null`, because no declined code is
+  documented and inventing one would be worse than the gap.
+- **`charge.completed` on failure is v3's rule applied to v4.** v3's docs are
+  explicit that a failure is also `charge.completed`; v4's reference types
+  `data.status` as free text and shows no failure example. Unverified for v4.
+- **Transfer payloads carry the subset the emulator can ground**: `id`,
+  `type: bank`, `source_currency`, `destination_currency` (equal — no FX),
+  `amount`, `reference`, `status`, `disburse_datetime`, `fee` (zero), `meta`.
+  A failed transfer adds `provider_response.message`; a reversal adds
+  `reversal.reversal_datetime`, `initial_status` and `reconciliation_status`.
+  Recipient objects (`bank`, `mobile_money`, …), `debit_information`,
+  `payment_information`, `proof` and `reconciliation_type` are absent: v4
+  transfers here resolve no destination, and those fields have no honest
+  value.
+- **`order.authorization` is not emitted.** paybox models no orders.
+- **Retries** follow paybox's configured policy, not Flutterwave's documented
+  three attempts at thirty-minute intervals with a sixty-second timeout.
+- **`meta` never carries emulator state.** The scenario a charge was created
+  under, the instrument that paid it and the API version are kept on the
+  resource internally and stripped from every `meta` the v4 API or a v4
+  webhook echoes.
+
 ## Safety
 
 No live key is ever accepted: `FLWSECK-…` and `FLWPUBK-…` are refused with HTTP

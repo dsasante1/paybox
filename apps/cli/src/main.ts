@@ -612,7 +612,7 @@ webhook
   .command('add <url>')
   .description('Register a webhook endpoint')
   .option('--provider <provider>', 'provider id', 'paystack')
-  .option('--secret <secret>', 'signing secret (defaults to the local test key)')
+  .option('--secret <secret>', "signing secret (default: one shaped the way this provider's verifier expects)")
   .action(async (url: string, options: { provider: string; secret?: string }) => {
     const endpoint = await client().post<WebhookEndpoint>('/api/webhooks/endpoints', {
       url,

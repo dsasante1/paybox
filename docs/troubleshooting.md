@@ -135,14 +135,16 @@ exact bytes it sends, so it fails here too. Beyond that, per provider:
 | Paystack | HMAC-SHA512, hex, keyed with the **secret key**; raw body |
 | Stripe | `t=…,v1=…`; HMAC-SHA256 over `${t}.${body}`; the endpoint secret you registered with `--secret`; **timestamp tolerance vs a frozen/advanced clock** |
 | Flutterwave v3 | `verif-hash` equals the endpoint secret, verbatim — no HMAC |
-| Flutterwave v4 | the server delivers **v3-shaped, `verif-hash`** webhooks for v4 resources too; `flutterwave-signature` (base64 HMAC-SHA256) is implemented but not sent yet |
+| Flutterwave v4 | `flutterwave-signature`, HMAC-SHA256, **base64**, over the raw body — on resources the v4 API created; a v3-created resource on the same endpoint keeps `verif-hash` |
 | Kora | signs `JSON.stringify(body.data)` **only**, hex |
 | WeWire | `{id}.{timestamp}.{body}`; key is the **base64-decoded** part after `whsec_`; tolerance vs the clock |
 | Wise | RSA-SHA256, base64, against the PEM from `GET /wise/paybox/webhook-public-key` (authenticated) |
 
-And the trap that catches every non-Paystack provider: **the endpoint secret
-defaults to the Paystack local key.** Register Stripe, Flutterwave, Kora and
-WeWire endpoints with `--secret <what your verifier holds>`.
+And make sure your verifier holds **the endpoint's secret**, not a key you
+assumed: `paybox webhook add` prints it, the dashboard copies it, and
+`GET /api/webhooks/endpoints` returns it. If you supplied none, it was
+generated in the shape that provider's verifier expects (`whsec_…` for Stripe
+and WeWire, the local key for Paystack, Kora and Flutterwave).
 
 **A retry never happens.** Retries are jobs on virtual time. Under a frozen
 clock, `paybox time advance 30s` runs the default ladder; the `paystack`

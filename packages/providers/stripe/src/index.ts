@@ -21,7 +21,11 @@ export {
   type StripeChargeStatus,
 } from './status.js';
 export { toStripeError, type StripeErrorType, type StripeErrorResponse } from './errors.js';
-export { assertStripeCredentials, generateStripeKeys } from './auth.js';
+export {
+  assertStripeCredentials,
+  generateStripeKeys,
+  generateStripeWebhookSecret,
+} from './auth.js';
 export {
   signStripePayload,
   stripeSignatureHeaders,

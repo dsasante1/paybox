@@ -9,6 +9,16 @@ export interface FormattedWebhook {
   body: unknown;
   /** Extra provider headers beyond the signature. */
   headers?: Record<string, string>;
+  /**
+   * Which of a provider's wire formats this webhook is in, for a provider
+   * that has more than one. Flutterwave's v3 and v4 differ in envelope *and*
+   * signature scheme, and both are served under one provider id. The
+   * dispatcher hands this back to `sign()` as `SigningContext.variant`, so
+   * the formatter can pick the signature that matches the body it built
+   * without the two halves agreeing through shared state. Omit it for a
+   * provider with one format.
+   */
+  variant?: string;
 }
 
 export interface FormatterContext {
@@ -30,6 +40,15 @@ export interface SigningContext {
   timestamp: number;
   /** Which attempt this is, 0-indexed. */
   attempt: number;
+  /**
+   * The `variant` the formatter returned from `format()`, for a provider
+   * with more than one wire format. Present when a fresh delivery is signed.
+   * Absent when a stored delivery is re-signed per attempt
+   * (`resignsPerAttempt`), which recomputes from the stored bytes alone: no
+   * provider needs both today, and one that did would have to persist the
+   * variant on the delivery row.
+   */
+  variant?: string;
 }
 
 /**

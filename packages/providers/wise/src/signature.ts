@@ -23,6 +23,14 @@ import { createPrivateKey, createPublicKey, createSign, createVerify, type KeyOb
  *   X-Test-Notification present, `true`, only on subscription test messages
  */
 export const WISE_SIGNATURE_HEADER = 'X-Signature-SHA256';
+
+/**
+ * What a Wise endpoint stores as its "secret". Wise signs with its private
+ * key, so a subscriber holds no shared secret at all; the endpoint row still
+ * has a `secret` column, and this is the value that says, on inspection,
+ * that it is unused rather than leaving a key there that verifies nothing.
+ */
+export const WISE_UNUSED_SECRET = 'wise-rsa-signed';
 export const WISE_DELIVERY_HEADER = 'X-Delivery-Id';
 export const WISE_TEST_HEADER = 'X-Test-Notification';
 

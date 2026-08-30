@@ -9,7 +9,10 @@ is the definitive list of what either can do.
   body on a POST is accepted.
 - Canonical vocabulary throughout — `successful`, not `success`.
 - Amounts are integer minor units.
-- Interactive reference: `GET /docs` (Scalar over `GET /openapi.json`).
+- Interactive reference: `GET /docs` — Scalar, served from the emulator
+  itself (no CDN; works offline), over a **hand-curated sample** of thirteen
+  routes. The complete surface is each provider's contract
+  (`docs/<provider>.md`) and `paybox coverage`; this page is not it.
 
 Every route below is relative to the emulator base, `http://127.0.0.1:8080`
 by default.
@@ -255,16 +258,27 @@ reads and controls them.
   ```json
   { "url": "http://localhost:3000/webhooks/paystack",
     "provider": "paystack",
-    "secret": "optional — defaults to the Paystack local secret key",
+    "secret": "optional — see the defaults below",
     "eventTypes": ["charge.success"],
     "description": "optional" }
   ```
 
-  `provider` defaults to `paystack`; an endpoint only ever receives its own
-  provider's events. `eventTypes` are **provider** event names; empty means
-  everything that provider emits. `secret` is what deliveries are signed with
-  — pass one shaped the way your verifier expects (`whsec_…` for Stripe or
-  WeWire; ignored by Wise, which signs with RSA). 201.
+  `provider` defaults to `paystack` and must be one of the six; an unknown
+  value is a 400 rather than an endpoint nothing can ever match. An endpoint
+  only ever receives its own provider's events. `eventTypes` are **provider**
+  event names; empty means everything that provider emits. `secret` is what
+  deliveries are signed with; omit it and the endpoint gets one shaped the
+  way that provider's verifier expects:
+
+  | Provider | Default secret |
+  |---|---|
+  | Paystack, Kora | that provider's local secret key — what they sign with |
+  | Flutterwave | the local Flutterwave secret key, standing in for the merchant-chosen hash |
+  | Stripe | a fresh `whsec_local…` per endpoint |
+  | WeWire | a fresh `whsec_<base64>` per endpoint, so Standard Webhooks libraries can decode it |
+  | Wise | `wise-rsa-signed` — unused; Wise signs with RSA |
+
+  The response carries the secret in full. 201.
 - `PATCH /api/webhooks/endpoints/:id` — any of `url`, `secret`, `enabled`,
   `eventTypes`, `description`.
 - `DELETE /api/webhooks/endpoints/:id` — 204.
@@ -382,5 +396,5 @@ stream.addEventListener('event', (e) => console.log(JSON.parse(e.data).type));
 |---|---|
 | `GET /` | redirects to the dashboard |
 | `GET /dashboard` | the single-page dashboard |
-| `GET /docs` | interactive API reference |
-| `GET /openapi.json` | the OpenAPI 3.1 document behind it |
+| `GET /docs` | the Scalar API reference, self-hosted, over a hand-curated 13-route sample of the surface |
+| `GET /openapi.json` | the OpenAPI 3.1 document behind it (also at `/docs/openapi.json` and `/docs/openapi.yaml`) |

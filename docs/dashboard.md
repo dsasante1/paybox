@@ -31,10 +31,10 @@ method and canonical status. Click one for the detail view:
 
 ### Webhooks
 
-- **Endpoints** — register one by URL, remove one, and see the (truncated)
-  signing secret each uses. The form registers a **Paystack** endpoint with
-  the default secret; for another provider or a custom secret use
-  `paybox webhook add --provider … --secret …` or the API.
+- **Endpoints** — register one: pick the provider, enter the URL, and
+  optionally a signing secret (blank gets one shaped the way that provider's
+  verifier expects). The table shows each endpoint's provider and secret;
+  click a secret to copy it for your verifier. Remove with the button.
 - **Failure simulation** — the same knobs as `paybox webhook fail` and
   `paybox webhook chaos`: forced outcome (`none` to clear it), failure rate,
   duplicate delivery, out-of-order delivery. Chaos latency is API-only.

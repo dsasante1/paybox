@@ -25,6 +25,7 @@ export {
   signWisePayload,
   verifyWiseSignature,
   wiseSignatureHeaders,
+  WISE_UNUSED_SECRET,
 } from './signature.js';
 export {
   LOCAL_USER_ID,
