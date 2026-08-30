@@ -15,6 +15,7 @@ import {
   type SubscriptionRunner,
 } from '@paybox/simulator';
 import { assertFlutterwaveCredentials } from './auth.js';
+import { flutterwaveAuthorizationMinter } from './authorization.js';
 import { toFlutterwaveError } from './errors.js';
 import { decryptPayload } from './encryption.js';
 import {
@@ -146,7 +147,25 @@ export const flutterwavePlugin: FastifyPluginAsync<FlutterwavePluginOptions> = a
   }
 
   async function decorate(payment: Payment) {
-    return serializeTransaction(payment, { customer: await customerFor(payment) });
+    return serializeTransaction(payment, {
+      customer: await customerFor(payment),
+      token: await tokenFor(payment),
+    });
+  }
+
+  /**
+   * The card token a settled charge minted, if any.
+   *
+   * The token is derived from the instrument and the customer, so the minter
+   * names it deterministically; it is reported only once the authorization
+   * row actually exists, which is after a successful charge.
+   */
+  async function tokenFor(payment: Payment): Promise<string | null> {
+    if (payment.paymentMethod !== 'card') return null;
+    const code = flutterwaveAuthorizationMinter(payment)?.providerAuthorizationCode;
+    if (!code) return null;
+    const authorization = await storage.authorizations.byCode(PROVIDER, code);
+    return authorization?.active ? authorization.providerAuthorizationCode : null;
   }
 
   /** Find or create the customer a charge names, keyed on email. */

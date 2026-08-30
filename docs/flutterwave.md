@@ -44,7 +44,7 @@ comes from.
 | `GET /flutterwave/checkout/{tx_ref}` | **Emulator-only** | The hosted page; see below. |
 | `GET /flutterwave/3ds/{tx_ref}` | **Emulator-only** | The page `meta.authorization.redirect` points at. |
 | `POST /v3/payment-plans`, `GET`/`PUT /v3/payment-plans/{id}`, `GET /v3/payment-plans` | **Partially compatible** | `quarterly` is refused; see below. |
-| `POST /v3/tokenized-charges` | **Compatible** | Card-on-file; no step-up, as intended. |
+| `POST /v3/tokenized-charges` | **Compatible** | Card-on-file; no step-up, as intended. Takes the `card.token` a settled card charge returns on `/charges`, `/validate-charge` and `/verify` (null until the charge settles). |
 | `POST /v3/subaccounts`, `GET /v3/subaccounts`, `GET /v3/subaccounts/{id}` | **Partially compatible** | No update or delete. |
 | `POST /v3/virtual-account-numbers`, `GET /v3/virtual-account-numbers/{ref}` | **Partially compatible** | One account per customer; no BVN check. |
 | `GET /v3/banks/{country}` | **Partially compatible** | A fixed list for NG, GH and KE. |

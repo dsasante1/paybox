@@ -13,7 +13,17 @@ export function printBanner(options: {
   sourcePath: string | null;
 }): void {
   const { context, warnings, sourcePath } = options;
-  const { config, baseUrl, keys, stripeKeys, flutterwaveKeys, koraKeys, wewireKeys, wiseKeys } = context;
+  const {
+    config,
+    baseUrl,
+    keys,
+    stripeKeys,
+    flutterwaveKeys,
+    flutterwaveV4,
+    koraKeys,
+    wewireKeys,
+    wiseKeys,
+  } = context;
   const out = (line = '') => process.stdout.write(`${line}\n`);
 
   out();
@@ -41,6 +51,10 @@ export function printBanner(options: {
   out(`    Stripe     ${stripeKeys.secretKey}`);
   out(`    Flutterwave ${flutterwaveKeys.secretKey}`);
   out(`    Flutterwave encryption key ${flutterwaveKeys.encryptionKey}`);
+  // v4 authenticates with OAuth client credentials, not a key; without these
+  // two lines the token endpoint could not be used at all.
+  out(`    Flutterwave v4 client_id ${flutterwaveV4.clientId}`);
+  out(`    Flutterwave v4 client_secret ${flutterwaveV4.clientSecret}`);
   out(`    Kora       ${koraKeys.secretKey}`);
   out(`    WeWire     ${wewireKeys.secretKey}`);
   out(`    Wise       ${wiseKeys.apiToken}`);

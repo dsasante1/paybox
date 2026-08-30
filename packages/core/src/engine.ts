@@ -808,6 +808,22 @@ export class PaymentEngine {
       updatedAt: now,
     };
 
+    // A reference is the handle a payout is looked up by, and unique per
+    // provider. Refuse a reuse here, the way createPayment does, rather than
+    // let the storage constraint surface as a 500 -- WeWire's statement-text
+    // references are routinely repeated, and that is a 409 the client can act
+    // on, not an internal error.
+    if (input.reference !== undefined) {
+      const existing = await tx.transfers.byReference(input.provider, input.reference);
+      if (existing) {
+        throw new PayboxError(
+          'duplicate_reference',
+          `A transfer with reference "${input.reference}" already exists.`,
+          { details: { reference: input.reference, existingId: existing.id } },
+        );
+      }
+    }
+
     // Check and reserve inside one transaction, so two transfers racing for
     // the same funds cannot both pass the check.
     //

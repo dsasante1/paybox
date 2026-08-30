@@ -87,7 +87,7 @@ The **Charge** is different: charges are immutable attempt records, and
 | `DELETE /v1/accounts/{id}` | **Partially compatible** | Rejects rather than removes; see below. |
 | `POST /v1/account_links` | **Compatible** | Expiry is real virtual time. |
 | `GET /stripe/connect/onboard/{id}` | **Emulator-only** | The onboarding page; see below. |
-| `GET /v1/balance` | **Partially compatible** | Scoped by `Stripe-Account`; `pending` always empty. |
+| `GET /v1/balance` | **Partially compatible** | Scoped by `Stripe-Account`; `pending` always zero. |
 | `GET /v1/application_fees`, `GET /v1/application_fees/{id}` | **Compatible** | |
 | `POST`/`GET /v1/application_fees/{id}/refunds` | **Partially compatible** | No update; no metadata on a fee refund. |
 | `POST /v1/transfers`, `GET /v1/transfers`, `GET`/`POST /v1/transfers/{id}` | **Compatible** | |
@@ -416,9 +416,9 @@ expected to react.
 
    Application fees are derived from the charge that carries them rather than
    stored as their own rows, the same way `pi_` and `ch_` are two views of one
-   payment. `GET /v1/balance` reports `pending` as always empty: paybox settles
-   instantly, and a developer testing "wait for funds to become available"
-   needs to know that wait does not exist here.
+   payment. `GET /v1/balance` reports `pending` as a zero-amount entry per
+   currency: paybox settles instantly, and a developer testing "wait for funds
+   to become available" needs to know that wait does not exist here.
 22. **Transfers and payouts share one mechanism.** Stripe has two words for
    money leaving a balance — a **Transfer** to a connected account and a
    **Payout** to a bank — and paybox models both with one canonical resource,

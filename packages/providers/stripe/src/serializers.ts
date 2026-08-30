@@ -847,6 +847,10 @@ export function serializeInvoice(
     currency: invoice.currency.toLowerCase(),
     customer: stripeId('cus', invoice.customerId),
     customer_email: options.customer?.email ?? null,
+    // Kept on metadata (the canonical invoice has no description column) and
+    // reported here, as Stripe's invoice object does; it used to be stored and
+    // never read back.
+    description: (invoice.metadata.description as string | undefined) ?? null,
     due_date: unix(invoice.dueAt),
     hosted_invoice_url: null,
     invoice_pdf: null,

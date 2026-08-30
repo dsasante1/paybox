@@ -19,7 +19,7 @@ import { expandFormBody, formBoolean } from './form.js';
 import { applyExpansions, assertExpandDepth, expandPaths } from './expand.js';
 import { assertStripeCredentials } from './auth.js';
 import { toStripeError } from './errors.js';
-import { stripeInstrumentResolver } from './instruments.js';
+import { maskedInstrumentIdentifier, stripeInstrumentResolver } from './instruments.js';
 import { stripeAuthorizationMinter, stripeInstrumentDraft } from './authorization.js';
 import { fromStripeRecurring, fromStripeStatus } from './status.js';
 import {
@@ -455,14 +455,19 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
         ...(body.receipt_email ? { receipt_email: body.receipt_email } : {}),
         ...(body.capture_method ? { capture_method: body.capture_method } : {}),
       },
-      status: inlineCard ? 'pending' : 'created',
+      // Always born `created`: Stripe emits `payment_intent.created` for every
+      // intent, confirmed inline or not, and that webhook comes from the
+      // canonical `payment.created` event. An inline instrument then moves it
+      // to `pending` (requires_confirmation) in its own step.
+      status: 'created',
     });
+    const ready = inlineCard ? await engine.transitionPayment(payment.id, 'pending') : payment;
 
     if (body.confirm && inlineCard) {
-      const confirmed = await confirmPayment(payment, inlineCard.number);
+      const confirmed = await confirmPayment(ready, inlineCard.number);
       return reply.send(await decorate(confirmed));
     }
-    return reply.send(await decorate(payment));
+    return reply.send(await decorate(ready));
   });
 
   /**
@@ -510,7 +515,7 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
       if (!inlineCard && body.payment_method) {
         const authorization = await loadAuthorization(body.payment_method);
         engine.assertChargeable(authorization);
-        number = authorization.last4;
+        number = maskedInstrumentIdentifier(authorization);
         details = authorizationDetails(authorization);
       }
 
@@ -529,7 +534,10 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
       }
 
       const fresh = await loadPayment(request.params.intent);
-      const confirmed = await confirmPayment(fresh, number ?? (fresh.paymentMethodDetails.last4 as string | null));
+      const confirmed = await confirmPayment(
+        fresh,
+        number ?? maskedInstrumentIdentifier(fresh.paymentMethodDetails),
+      );
       return reply.send(await decorate(confirmed));
     },
   );
@@ -788,6 +796,9 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
       const body = transferUpdateSchema.parse(request.body ?? {});
       const transfer = await loadTransfer(request.params.transfer, 'transfer');
       const updated = await storage.transfers.update(transfer.id, {
+        // `description` lives on the canonical `reason`, which is what the
+        // serializer reads back; it used to be accepted and dropped.
+        ...(body.description !== undefined ? { reason: body.description } : {}),
         metadata: { ...transfer.metadata, ...(body.metadata ?? {}) },
         updatedAt: clock.nowISO(),
       });
@@ -1420,8 +1431,7 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
         );
       }
 
-      const number =
-        instrument?.number ?? (setup.instrument.last4 as string | undefined) ?? null;
+      const number = instrument?.number ?? maskedInstrumentIdentifier(setup.instrument);
       return reply.send(await decorateSetup(await confirmSetup(setup, number)));
     },
   );
@@ -1751,9 +1761,11 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
       metadata: { invoice_code: open.providerInvoiceCode, subscription_id: subscriptionId },
       status: 'pending',
     });
-    const { outcome } = resolveInstrument(authorization.last4, authorization.channel, {
-      resolver: stripeInstrumentResolver,
-    });
+    const { outcome } = resolveInstrument(
+      maskedInstrumentIdentifier(authorization),
+      authorization.channel,
+      { resolver: stripeInstrumentResolver },
+    );
     const settled = await simulator.apply(payment.id, outcome);
     await engine.transitionInvoice(
       open.id,
@@ -2241,9 +2253,11 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
         status: 'pending',
       });
 
-      const { outcome } = resolveInstrument(authorization.last4, authorization.channel, {
-        resolver: stripeInstrumentResolver,
-      });
+      const { outcome } = resolveInstrument(
+        maskedInstrumentIdentifier(authorization),
+        authorization.channel,
+        { resolver: stripeInstrumentResolver },
+      );
       const settled = await simulator.apply(payment.id, outcome);
 
       const updated =
@@ -2829,7 +2843,7 @@ export const stripePlugin: FastifyPluginAsync<StripePluginOptions> = async (
     if (body.source) {
       const authorization = await loadAuthorization(body.source);
       engine.assertChargeable(authorization);
-      number = authorization.last4;
+      number = maskedInstrumentIdentifier(authorization);
       details = authorizationDetails(authorization);
     } else if (body.card) {
       number = body.card.number;

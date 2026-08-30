@@ -35,7 +35,7 @@ is not configurable** (spec §29).
 | `GET /v1/wallets` | **Partially compatible** | Shape inferred — see below. |
 | `GET /v1/subcustomers/{id}/wallets` | **Partially compatible** | Same caveat. |
 | `GET /v1/rates` | **Partially compatible** | A fixed table, not market data — see below. |
-| `GET /v1/rates/{pair}` | **Partially compatible** | Accepts `USD-GHS` or `USD/GHS`. |
+| `GET /v1/rates/{pair}` | **Partially compatible** | Accepts `USD-GHS`, or `USD/GHS` with the slash URL-encoded (`USD%2FGHS`). |
 | `POST /v1/rates/conversion/preview` | **Partially compatible** | `fee` is always 0. |
 | `POST /v1/beneficiaries` | **Compatible** | Real IBAN, BIC, sort-code and ABA checksums. |
 | `GET /v1/beneficiaries`, `GET /v1/beneficiaries/{id}` | **Compatible** | |
@@ -229,9 +229,10 @@ Two endpoints exist here that WeWire does not have. Both are namespaced under
 
 - **`POST /wewire/paybox/wallets/credit`** — put money in a wallet. WeWire funds
   a wallet by someone paying into a virtual account, which cannot happen
-  locally. Without this a fresh emulator has a zero balance and every payout
-  fails on `INSUFFICIENT_BALANCE`, so the whole payout flow would be
-  untestable.
+  locally. A fresh emulator starts every wallet at the opening test float
+  (`balance.opening`, which applies to every provider and currency — set it to
+  `0` to start empty and reach `INSUFFICIENT_BALANCE` from the first payout);
+  this endpoint is how a test stages a specific balance on top of that.
 - **`GET /wewire/paybox/ghana-codes`** — the mobile-money and GhIPSS bank code
   tables. WeWire publishes these as a documentation page, not an endpoint.
 

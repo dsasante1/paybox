@@ -130,6 +130,13 @@ export interface SerializeTransactionOptions {
   customer?: Customer | null;
   /** Flutterwave charges the merchant a fee; shown as `app_fee`. */
   appFee?: number;
+  /**
+   * The card-on-file token, once a charge has minted one. Flutterwave returns
+   * it as `card.token` on verify, and it is the input `/tokenized-charges`
+   * takes -- so a card charge that never exposed it left that endpoint with
+   * nothing reachable to call it with.
+   */
+  token?: string | null;
 }
 
 /** A transaction, as `/charges`, `/validate-charge` and `/verify` return it. */
@@ -163,7 +170,9 @@ export function serializeTransaction(
     created_at: stamp(payment.createdAt),
     account_id: 27468,
     customer: customerBlock(payment, options.customer),
-    ...(payment.paymentMethod === 'card' ? { card: cardBlock(payment) } : {}),
+    ...(payment.paymentMethod === 'card'
+      ? { card: { ...cardBlock(payment), token: options.token ?? null } }
+      : {}),
   };
 }
 

@@ -1030,7 +1030,9 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
         (r: Refund) => r.providerRefundId,
         (limit, offset) => storage.refunds.list({ limit, offset }),
       );
-      if (match) return match;
+      // The scan covers every provider's refunds; a hashed id that happens to
+      // collide with another adapter's must not be served as ours.
+      if (match && match.provider === PROVIDER) return match;
     }
     throw new PayboxError('not_found', `Refund ${handle} not found.`);
   }
@@ -1094,10 +1096,9 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
 
   fastify.get<{ Params: { id: string } }>('/refund/:id', async (request, reply) => {
     authenticate(request);
-    const refund =
-      (await storage.refunds.byId(request.params.id)) ??
-      (await storage.refunds.byProviderRefundId(PROVIDER, request.params.id));
-    if (!refund) throw new PayboxError('not_found', `Refund ${request.params.id} not found.`);
+    // Paystack addresses a refund by the numeric id it returned on creation;
+    // `requireRefund` resolves that as well as the code and the paybox id.
+    const refund = await requireRefund(request.params.id);
     const payment = await storage.payments.byId(refund.paymentId);
     return reply.send(ok('Refund retrieved', serializeRefund(refund, payment)));
   });
@@ -1836,8 +1837,20 @@ export const paystackPlugin: FastifyPluginAsync<PaystackPluginOptions> = async (
     const code = handle.replace(/^SPL_/, '');
     const split =
       (await storage.splits.byCode(PROVIDER, code)) ?? (await storage.splits.byId(handle));
-    if (!split) throw new PayboxError('not_found', `Split ${handle} not found.`);
-    return split;
+    if (split) return split;
+
+    // Paystack addresses a split by the numeric id it returned on creation,
+    // which is what `GET /split/{id}` documents; resolve that too.
+    const numeric = Number(handle);
+    if (Number.isFinite(numeric)) {
+      const match = await findByNumericId(
+        numeric,
+        (row: { providerSplitCode: string }) => row.providerSplitCode,
+        (limit, offset) => storage.splits.list({ limit, offset }),
+      );
+      if (match) return match;
+    }
+    throw new PayboxError('not_found', `Split ${handle} not found.`);
   }
 
   fastify.get<{ Params: { id: string } }>('/split/:id', async (request, reply) => {

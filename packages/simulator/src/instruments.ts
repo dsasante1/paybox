@@ -77,6 +77,9 @@ const DEFAULT: InstrumentResolution = {
 /** Every outcome name, for validating the metadata escape hatch below. */
 const OUTCOME_NAMES = new Set(Object.values(SUFFIX_OUTCOMES).map((r) => r.outcome));
 
+/** The same names, for anything that validates an outcome a user typed. */
+export const SIMULATED_OUTCOMES: readonly SimulatedOutcome[] = [...OUTCOME_NAMES];
+
 /**
  * The emulator-only override: `metadata.paybox_outcome` on a charge.
  *
