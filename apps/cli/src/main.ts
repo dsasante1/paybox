@@ -13,6 +13,7 @@ import type {
 } from '@paybox/shared';
 import type { Job, WebhookDelivery, WebhookEndpoint } from '@paybox/core';
 import {
+  VERSION,
   entriesByStatus,
   renderSummaryLine,
   toRows,
@@ -34,7 +35,6 @@ import {
   statusColour,
   table,
 } from './render.js';
-import { VERSION } from './version.js';
 
 const DEFAULT_URL = process.env.PAYBOX_URL ?? 'http://127.0.0.1:8080';
 

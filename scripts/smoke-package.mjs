@@ -85,6 +85,15 @@ try {
       return response?.ok === true;
     }, 20_000, () => server.exitCode !== null);
 
+    // The server must report the same version as the package it shipped in.
+    // 0.1.1 shipped with /api/health still saying 0.1.0 because the string
+    // was hardcoded in the API while only the CLI read the stamped value.
+    step('/api/health reports the package version');
+    const health = await (await fetch(`${url}/api/health`)).json();
+    if (health.version !== manifest.version) {
+      throw new Error(`/api/health says "${health.version}", package.json says "${manifest.version}"`);
+    }
+
     step('paybox status against the running server');
     execFileSync(bin, ['status', '--url', url], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] });
   } finally {
