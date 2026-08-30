@@ -161,15 +161,28 @@ paybox network latency 3000
 
 ## Documentation
 
+The [documentation index](docs/README.md) maps every page to a question.
+The ones most people need first:
+
 | | |
 |---|---|
-| [Getting started](docs/getting-started.md) | Install, configure, first payment |
-| [Architecture](docs/architecture.md) | How it works and why it is built this way |
-| [Paystack compatibility](docs/paystack.md) | Exactly what is and is not implemented |
+| [Getting started](docs/getting-started.md) | Install, point an app at it, first payment, first webhook |
+| [Concepts](docs/concepts.md) | Canonical statuses, the event log, virtual time, determinism |
+| [Providers](docs/providers.md) | Base URL, credential, webhook verification and SDK settings for each of the six |
+| [Contracts](docs/paystack.md) | What each adapter does and does not implement: [Paystack](docs/paystack.md), [Stripe](docs/stripe.md), [Flutterwave](docs/flutterwave.md), [Kora](docs/kora.md), [WeWire](docs/wewire.md), [Wise](docs/wise.md) |
+| [Test instruments](docs/test-instruments.md) | Which card or phone number produces which outcome |
+| [Payment lifecycle](docs/payment-lifecycle.md) | Statuses, transitions, refunds, transfers, subscriptions, disputes |
+| [Time control](docs/time.md) | What `time advance` runs, and what it does not |
 | [Webhooks](docs/webhooks.md) | Signing, retries, replay, failure simulation |
 | [Scenarios](docs/scenarios.md) | Reusable multi-step flows |
 | [CLI](docs/cli.md) | Every command |
+| [Control API](docs/control-api.md) | Every `/api` route the CLI and dashboard use |
+| [Configuration](docs/configuration.md) | Every key and environment variable |
+| [Testing with paybox](docs/testing.md) | A complete automated test, CI blocks, and a recipe per failure mode |
+| [Dashboard](docs/dashboard.md) | The five views and the live event stream |
+| [Troubleshooting](docs/troubleshooting.md) | Symptoms and what to do |
 | [Docker](docs/docker.md) | The published image, compose, CI services |
+| [Architecture](docs/architecture.md) | How it works and why it is built this way |
 | [Releasing](docs/releasing.md) | How a tag becomes an npm package and a container image |
 | [Security](SECURITY.md) | The safety guarantees and their limits |
 
