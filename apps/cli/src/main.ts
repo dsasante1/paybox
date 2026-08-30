@@ -82,9 +82,24 @@ program
     const app = await buildApp(context);
     context.scheduler.start();
 
+    // Ctrl+C lands here. Announce both phases: app.close() waits for
+    // in-flight requests (a simulated-latency response can hold it open for
+    // the full latency), and a silent wait reads as "Ctrl+C did not work".
+    // A second Ctrl+C skips the wait; 130 (128 + SIGINT) marks the stop as
+    // forced rather than clean.
+    let stopping = false;
     const stop = async () => {
+      if (stopping) {
+        process.stdout.write('force quitting.\n');
+        process.exit(130);
+      }
+      stopping = true;
+      process.stdout.write(
+        '\npaybox is stopping — finishing in-flight work… (Ctrl+C again to force quit)\n',
+      );
       await app.close();
       await context.shutdown();
+      process.stdout.write('paybox stopped.\n');
       process.exit(0);
     };
     process.on('SIGINT', () => void stop());
