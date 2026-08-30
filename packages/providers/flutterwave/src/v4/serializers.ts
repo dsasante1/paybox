@@ -1,4 +1,4 @@
-import type { Customer, Authorization, Payment, Refund, Transfer } from '@paybox/shared';
+import type { Customer, Authorization, Metadata, Payment, Refund, Transfer } from '@paybox/shared';
 import { toKoraLikeId } from './ids.js';
 import { toFlutterwaveStatus } from '../status.js';
 
@@ -26,8 +26,25 @@ export function v4Ok<T>(status: V4EnvelopeStatus, message: string, data: T) {
 }
 
 /** v4 timestamps are RFC 3339 with nanosecond-ish precision and a Z. */
-function stamp(iso: string): string {
+export function stamp(iso: string): string {
   return new Date(iso).toISOString().replace('Z', '000Z');
+}
+
+/**
+ * The `meta` a client sees.
+ *
+ * paybox keeps a few keys of its own on a resource's metadata -- the
+ * scenario a charge was created under, the instrument that paid it, the API
+ * version that created it -- so it can answer later requests faithfully.
+ * Those are emulator state, not the client's metadata, and echoing them
+ * would put keys in `meta` that Flutterwave never would.
+ */
+export function publicMeta(metadata: Metadata): Metadata {
+  return Object.fromEntries(
+    Object.entries(metadata).filter(
+      ([key]) => !key.startsWith('paybox_') && !key.startsWith('v4_'),
+    ),
+  );
 }
 
 function nameBlock(customer: Customer | null | undefined) {
@@ -54,7 +71,7 @@ export function serializeV4Customer(customer: Customer) {
     phone: customer.phone
       ? { country_code: null, number: customer.phone }
       : { country_code: null, number: null },
-    meta: customer.metadata,
+    meta: publicMeta(customer.metadata),
     created_datetime: stamp(customer.createdAt),
   };
 }
@@ -78,7 +95,7 @@ export function serializeV4PaymentMethod(authorization: Authorization) {
     customer_id: authorization.customerId
       ? toKoraLikeId('cus', authorization.customerId)
       : null,
-    meta: authorization.metadata,
+    meta: publicMeta(authorization.metadata),
     created_datetime: stamp(authorization.createdAt),
   };
 }
@@ -131,7 +148,7 @@ export function serializeV4Charge(payment: Payment, options: SerializeV4ChargeOp
       type: options.processorResponse ?? 'approved',
     },
     next_action: options.nextAction ?? null,
-    meta: payment.metadata,
+    meta: publicMeta(payment.metadata),
     created_datetime: stamp(payment.createdAt),
   };
 }
@@ -143,7 +160,7 @@ export function serializeV4Refund(refund: Refund, payment: Payment | null) {
     amount: refund.amount / 100,
     currency: refund.currency,
     status: refund.status === 'successful' ? 'succeeded' : refund.status,
-    meta: refund.metadata,
+    meta: publicMeta(refund.metadata),
     created_datetime: stamp(refund.createdAt),
   };
 }
@@ -163,7 +180,7 @@ export function serializeV4Transfer(transfer: Transfer) {
             ? 'failed'
             : 'pending',
     narration: transfer.reason,
-    meta: transfer.metadata,
+    meta: publicMeta(transfer.metadata),
     created_datetime: stamp(transfer.createdAt),
   };
 }

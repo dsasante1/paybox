@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp, buildContext, loadConfig, type PayboxContext } from '@paybox/api';
 import { RecordingTransport } from '@paybox/webhooks';
-import { parseScenarioKey, outcomeForIssuer, ISSUER_RESPONSES } from '@paybox/flutterwave';
+import { parseScenarioKey, outcomeForIssuer, ISSUER_RESPONSES, verifyV4Signature } from '@paybox/flutterwave';
 
 /**
  * Flutterwave v4 — a second, genuinely different API from the same provider.
@@ -17,6 +17,7 @@ import { parseScenarioKey, outcomeForIssuer, ISSUER_RESPONSES } from '@paybox/fl
  */
 let app: FastifyInstance;
 let context: PayboxContext;
+let transport: RecordingTransport;
 
 const V4 = '/flutterwave/v4';
 
@@ -26,7 +27,8 @@ beforeEach(async () => {
   process.env.PAYBOX_START_AT = '2026-06-01T00:00:00.000Z';
   process.env.PAYBOX_SEED = 'flw-v4';
   const { config } = loadConfig();
-  context = await buildContext({ config, transport: new RecordingTransport(), logSink: () => {} });
+  transport = new RecordingTransport();
+  context = await buildContext({ config, transport, logSink: () => {} });
   app = await buildApp(context);
   await app.ready();
 });
@@ -472,5 +474,141 @@ describe('v3 and v4 side by side', () => {
       headers: { authorization: `Bearer ${await token()}` },
     });
     expect(withV4Token.statusCode).toBe(401);
+  });
+});
+
+describe('webhooks', () => {
+  async function endpoint() {
+    await app.inject({
+      method: 'POST',
+      url: '/api/webhooks/endpoints',
+      payload: {
+        url: 'http://localhost:9999/hook',
+        provider: 'flutterwave',
+        secret: 'v4-secret-hash',
+        eventTypes: [],
+      },
+    });
+  }
+  const parsed = () => transport.sent.map((r) => ({ headers: r.headers, raw: r.body, body: JSON.parse(r.body) }));
+  const ofType = (type: string) => parsed().find((s) => s.body.type === type);
+
+  it('delivers a v4 charge in the v4 envelope, signed with flutterwave-signature', async () => {
+    await endpoint();
+    const { customerId, methodId } = await customerAndCard();
+    const charge = (
+      await post(`${V4}/charges`, {
+        reference: 'wh-v4-1',
+        currency: 'NGN',
+        amount: 100,
+        customer_id: customerId,
+        payment_method_id: methodId,
+        redirect_url: 'https://example.com/return',
+        meta: { order: '1' },
+      })
+    ).json();
+    expect(charge.status).toBe('success');
+    // Emulator state never reaches the client's `meta`.
+    expect(charge.data.meta).toEqual({ order: '1' });
+    await advance('5s');
+
+    const sent = ofType('charge.completed');
+    expect(sent).toBeDefined();
+    expect(sent!.headers['verif-hash']).toBeUndefined();
+    expect(verifyV4Signature(sent!.raw, sent!.headers['flutterwave-signature'], 'v4-secret-hash')).toBe(true);
+    expect(verifyV4Signature(sent!.raw, sent!.headers['flutterwave-signature'], 'wrong')).toBe(false);
+
+    const { body } = sent!;
+    expect(body.webhook_id).toMatch(/^wbk_[A-Za-z0-9]{10}$/);
+    expect(body.timestamp).toBe(Date.parse('2026-06-01T00:00:00.000Z'));
+    expect(body.data.id).toBe(charge.data.id);
+    expect(body.data.status).toBe('succeeded');
+    expect(body.data.reference).toBe('wh-v4-1');
+    expect(body.data.redirect_url).toBe('https://example.com/return');
+    expect(body.data.customer.id).toBe(customerId);
+    expect(body.data.payment_method.id).toBe(methodId);
+    expect(body.data.payment_method.type).toBe('card');
+    expect(body.data.processor_response).toEqual({ code: '00', type: 'approved' });
+    expect(body.data.meta).toEqual({ order: '1' });
+  });
+
+  it('reports a v4 decline as charge.completed with status failed', async () => {
+    await endpoint();
+    const { customerId, methodId } = await customerAndCard();
+    await post(
+      `${V4}/charges`,
+      { reference: 'wh-v4-2', currency: 'NGN', amount: 100, customer_id: customerId, payment_method_id: methodId },
+      'scenario:noauth&issuer:insufficient_funds',
+    );
+    await advance('5s');
+
+    const sent = ofType('charge.completed');
+    expect(sent!.body.data.status).toBe('failed');
+    expect(sent!.body.data.processor_response).toEqual({ code: null, type: 'insufficient_funds' });
+  });
+
+  it('delivers v4 transfers as transfer.disburse and transfer.reversal', async () => {
+    await endpoint();
+    await post(`${V4}/transfers`, { reference: 'wh-tr-ok', amount: 500, currency: 'NGN' }, 'scenario:successful');
+    await post(`${V4}/transfers`, { reference: 'wh-tr-bad', amount: 500, currency: 'NGN' }, 'scenario:failed');
+    await post(`${V4}/transfers`, { reference: 'wh-tr-rev', amount: 500, currency: 'NGN' }, 'scenario:reversed');
+    await advance('5s');
+
+    const all = parsed();
+    const ok = all.find((s) => s.body.type === 'transfer.disburse' && s.body.data.reference === 'wh-tr-ok');
+    expect(ok!.body.data).toMatchObject({ status: 'SUCCESSFUL', source_currency: 'NGN', destination_currency: 'NGN' });
+    expect(ok!.body.data.id).toMatch(/^trf_/);
+    const bad = all.find((s) => s.body.type === 'transfer.disburse' && s.body.data.reference === 'wh-tr-bad');
+    expect(bad!.body.data.status).toBe('FAILED');
+    expect(bad!.body.data.provider_response.message).toBeTruthy();
+    const rev = all.find((s) => s.body.type === 'transfer.reversal');
+    expect(rev!.body.data.reference).toBe('wh-tr-rev');
+    expect(rev!.body.data.reversal).toMatchObject({ initial_status: 'SUCCESSFUL', reconciliation_status: 'REVERSED' });
+    for (const s of all) expect(s.headers['flutterwave-signature']).toBeDefined();
+  });
+
+  it('delivers a v4 refund as refund.completed', async () => {
+    await endpoint();
+    const { customerId, methodId } = await customerAndCard();
+    const charge = (
+      await post(`${V4}/charges`, { reference: 'wh-v4-3', currency: 'NGN', amount: 100, customer_id: customerId, payment_method_id: methodId })
+    ).json();
+    await post(`${V4}/charges/${charge.data.id}/refund`, {});
+    await advance('5s');
+
+    const sent = ofType('refund.completed');
+    expect(sent).toBeDefined();
+    expect(sent!.body.data).toMatchObject({ charge_id: charge.data.id, status: 'succeeded' });
+    expect(sent!.body.data.id).toMatch(/^rfd_/);
+    expect(sent!.body.data.amount_refunded).toBeGreaterThan(0);
+  });
+
+  it('still delivers a v3 resource with verif-hash on the same endpoint', async () => {
+    await endpoint();
+    const created = await app.inject({
+      method: 'POST',
+      url: '/flutterwave/v3/payments',
+      headers: {
+        authorization: `Bearer ${context.flutterwaveKeys.secretKey}`,
+        'content-type': 'application/json',
+      },
+      payload: {
+        tx_ref: 'wh-v3-1',
+        amount: '10.00',
+        currency: 'NGN',
+        redirect_url: 'https://example.com/return',
+        customer: { email: 'v3@example.com' },
+      },
+    });
+    expect(created.statusCode).toBe(200);
+    const { items } = (await app.inject({ method: 'GET', url: '/api/payments?reference=wh-v3-1' })).json();
+    await app.inject({ method: 'POST', url: `/api/payments/${items[0].id}/simulate`, payload: { outcome: 'success' } });
+    await advance('5s');
+
+    const sent = parsed().find((s) => s.body.event === 'charge.completed');
+    expect(sent).toBeDefined();
+    expect(sent!.headers['verif-hash']).toBe('v4-secret-hash');
+    expect(sent!.headers['flutterwave-signature']).toBeUndefined();
+    expect(sent!.body.webhook_id).toBeUndefined();
   });
 });

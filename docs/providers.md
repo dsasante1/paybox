@@ -240,13 +240,14 @@ keyed with the secret hash:
 const expected = createHmac('sha256', secretHash).update(rawBody).digest('base64');
 ```
 
-**What the server actually sends today is v3.** The running emulator
-registers one Flutterwave webhook formatter, in v3 mode, for the whole
-provider — so a webhook for a charge created through the v4 API arrives in the
-**v3 shape with `verif-hash`**, not with `flutterwave-signature`. The v4 scheme
-is implemented and covered by tests, but no delivery uses it yet. Register a
-single endpoint with `--provider flutterwave` and verify it the v3 way.
-Contract: [flutterwave.md → v4 specifics](flutterwave.md#v4-specifics).
+Register one endpoint with `--provider flutterwave`: a delivery is shaped and
+signed by the API that **created the resource**. A v4 charge arrives as
+`{ "webhook_id": "wbk_…", "timestamp": …, "type": "charge.completed", "data": { … } }`
+with `flutterwave-signature`; a v3 charge on the same endpoint keeps
+`verif-hash` and the v3 envelope. v4 events: `charge.completed`,
+`transfer.disburse`, `transfer.reversal`, `refund.completed`. What is
+transcribed from Flutterwave's schemas and what could not be grounded is
+listed in [flutterwave.md → v4 webhooks](flutterwave.md#v4-webhooks).
 
 ## Kora
 

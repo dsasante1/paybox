@@ -33,6 +33,7 @@ import {
   v4Ok,
   type V4NextAction,
 } from './serializers.js';
+import { markV4 } from './version.js';
 
 export interface FlutterwaveV4PluginOptions {
   engine: PaymentEngine;
@@ -379,11 +380,14 @@ export const flutterwaveV4Plugin: FastifyPluginAsync<FlutterwaveV4PluginOptions>
             },
           }
         : {}),
-      metadata: {
+      metadata: markV4({
         ...(body.meta ?? {}),
         v4_scenario: key.scenario,
         v4_issuer: key.issuer,
-      },
+        // Which stored instrument paid, so the webhook's `payment_method.id`
+        // is the same `pmd_` id the API handed out for it.
+        ...(method ? { v4_payment_method: method.id } : {}),
+      }),
       status: 'pending',
     });
 
@@ -526,7 +530,7 @@ export const flutterwaveV4Plugin: FastifyPluginAsync<FlutterwaveV4PluginOptions>
     const refund = await engine.createRefund({
       paymentId: payment.id,
       ...(body.amount !== undefined ? { amount: body.amount } : {}),
-      metadata: body.meta ?? {},
+      metadata: markV4(body.meta ?? {}),
     });
     const settled = await engine.transitionRefund(refund.id, 'successful');
     return reply.send(v4Ok('success', 'Refund created', serializeV4Refund(settled, payment)));
@@ -555,7 +559,7 @@ export const flutterwaveV4Plugin: FastifyPluginAsync<FlutterwaveV4PluginOptions>
       reference: body.reference,
       reason: body.narration ?? null,
       status: 'pending',
-      metadata: body.meta ?? {},
+      metadata: markV4(body.meta ?? {}),
     });
 
     if (key.transfer === 'successful') {

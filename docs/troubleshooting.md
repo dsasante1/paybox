@@ -135,7 +135,7 @@ exact bytes it sends, so it fails here too. Beyond that, per provider:
 | Paystack | HMAC-SHA512, hex, keyed with the **secret key**; raw body |
 | Stripe | `t=…,v1=…`; HMAC-SHA256 over `${t}.${body}`; the endpoint secret you registered with `--secret`; **timestamp tolerance vs a frozen/advanced clock** |
 | Flutterwave v3 | `verif-hash` equals the endpoint secret, verbatim — no HMAC |
-| Flutterwave v4 | the server delivers **v3-shaped, `verif-hash`** webhooks for v4 resources too; `flutterwave-signature` (base64 HMAC-SHA256) is implemented but not sent yet |
+| Flutterwave v4 | `flutterwave-signature`, HMAC-SHA256, **base64**, over the raw body — on resources the v4 API created; a v3-created resource on the same endpoint keeps `verif-hash` |
 | Kora | signs `JSON.stringify(body.data)` **only**, hex |
 | WeWire | `{id}.{timestamp}.{body}`; key is the **base64-decoded** part after `whsec_`; tolerance vs the clock |
 | Wise | RSA-SHA256, base64, against the PEM from `GET /wise/paybox/webhook-public-key` (authenticated) |

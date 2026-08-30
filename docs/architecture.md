@@ -316,6 +316,33 @@ lesson is the same one the `InvoiceLeadTimes` injection taught: when two
 providers disagree, the disagreement belongs on the resource, not in a
 conditional in `core`.
 
+## One provider, two wire formats
+
+Flutterwave forced the third case: a provider whose two live APIs differ in
+**both** the envelope and the signature scheme, served under one provider id.
+The dispatcher keeps one formatter per provider, and `sign()` is a pure
+function of bytes and secret with no view of the resource — so a formatter
+that had built a v4 body had no way to sign it as v4, and for a while every
+Flutterwave delivery went out as v3.
+
+The fix is two small things, and both are general:
+
+- **The version is recorded on the resource.** `v4/version.ts` marks
+  everything the v4 API creates with `paybox_api_version: 'v4'` in its
+  metadata, the way the WeWire adapter records a payout's corridor. The
+  formatter reads the marker back; nothing in `packages/core` learns that an
+  API version exists, and `publicMeta` strips the marker from every `meta`
+  the v4 API echoes.
+- **`format()` names the format it built.** `FormattedWebhook.variant` is
+  handed back to `sign()` as `SigningContext.variant`, so the two halves of
+  one wire format agree without shared state. A provider with one format
+  omits it and nothing changes.
+
+The variant is not persisted on the delivery row: a stored delivery re-signed
+per attempt (`resignsPerAttempt`) gets none. Neither Flutterwave signature
+changes between attempts, and no provider needs both today; one that did
+would have to persist it, and this is where.
+
 ## A `transfer.settle` job, and why transfers needed one
 
 Until WeWire, transfers had no scheduled settlement path — they were moved by

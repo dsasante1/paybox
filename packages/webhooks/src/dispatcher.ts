@@ -155,6 +155,7 @@ export class WebhookDispatcher {
               ...formatter.sign(rawBody, endpoint.secret, {
                 timestamp: this.#clock.now(),
                 attempt: 0,
+                ...(webhook.variant !== undefined ? { variant: webhook.variant } : {}),
               }),
             }),
           );
