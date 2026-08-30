@@ -13,10 +13,18 @@ async function main(): Promise<void> {
 
   context.scheduler.start();
 
+  // Announce both phases: app.close() waits for in-flight requests (a
+  // simulated-latency response can hold it open for the full latency), and a
+  // silent wait reads as "Ctrl+C did not work".
+  let stopping = false;
   const shutdown = async (signal: string) => {
+    if (stopping) return;
+    stopping = true;
     context.logger.info('emulator.shutdown', { signal });
+    process.stdout.write('\npaybox is stopping — finishing in-flight work…\n');
     await app.close();
     await context.shutdown();
+    process.stdout.write('paybox stopped.\n');
     process.exit(0);
   };
   process.on('SIGINT', () => void shutdown('SIGINT'));
