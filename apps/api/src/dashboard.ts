@@ -225,17 +225,24 @@ async function openPayment(id) {
 }
 
 async function renderWebhooks() {
-  const [{ endpoints }, deliveries, chaos] = await Promise.all([
-    api('/webhooks/endpoints'), api('/webhooks/deliveries?limit=100'), api('/webhooks/chaos')]);
+  const [{ endpoints }, deliveries, chaos, { providers }] = await Promise.all([
+    api('/webhooks/endpoints'), api('/webhooks/deliveries?limit=100'), api('/webhooks/chaos'),
+    api('/providers')]);
+  const enabled = providers.filter(p => p.enabled);
   $('view-webhooks').innerHTML = \`
     <div class="panel"><h2>Endpoints</h2>
       <div class="controls">
+        <label class="f">Provider <select id="wh-provider">\${enabled.map(p =>
+          \`<option value="\${esc(p.id)}">\${esc(p.id)}</option>\`).join('')}</select></label>
         <input id="wh-url" placeholder="http://localhost:3000/webhooks/paystack" style="flex:1;min-width:280px">
+        <input id="wh-secret" placeholder="signing secret — leave blank for the provider's default" style="flex:1;min-width:240px">
         <button class="act primary" id="wh-add">Register endpoint</button>
       </div>
+      <div class="empty" style="text-align:left;padding-top:0">An endpoint receives every event for its provider.
+        Leave the secret blank to get one shaped the way that provider's verifier expects; click a secret below to copy it.</div>
       \${endpoints.length ? \`<table><thead><tr><th>URL</th><th>Provider</th><th>Secret</th><th></th></tr></thead><tbody>
         \${endpoints.map(e => \`<tr><td class="mono">\${esc(e.url)}</td><td>\${esc(e.provider)}</td>
-        <td class="mono muted">\${esc(e.secret.slice(0,22))}…</td>
+        <td><button class="act mono" data-copy="\${esc(e.secret)}" title="\${esc(e.secret)}">\${esc(e.secret.slice(0,22))}… copy</button></td>
         <td><button class="act" data-del="\${e.id}">Remove</button></td></tr>\`).join('')}</tbody></table>\`
         : '<div class="empty">No endpoints. Register one above and every matching event will be delivered to it.</div>'}
     </div>
@@ -261,8 +268,18 @@ async function renderWebhooks() {
     </div>\`;
   $('wh-add').onclick = async () => {
     const url = $('wh-url').value.trim(); if (!url) return;
-    await api('/webhooks/endpoints', {method:'POST', body:{url}}); render();
+    const secret = $('wh-secret').value.trim();
+    try {
+      await api('/webhooks/endpoints', {method:'POST',
+        body:{url, provider:$('wh-provider').value, ...(secret ? {secret} : {})}});
+    } catch (e) { alert(e.message); return; }
+    render();
   };
+  $('wh-provider').onchange = () => {
+    $('wh-url').placeholder = 'http://localhost:3000/webhooks/' + $('wh-provider').value; };
+  document.querySelectorAll('[data-copy]').forEach(b => b.onclick = () => {
+    navigator.clipboard?.writeText(b.dataset.copy).then(() => { b.textContent = 'copied'; setTimeout(render, 800); });
+  });
   $('chaos-save').onclick = async () => {
     await api('/webhooks/chaos', {method:'POST', body:{
       forceOutcome: $('chaos-outcome').value || null,

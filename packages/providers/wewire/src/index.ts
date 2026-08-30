@@ -3,6 +3,7 @@ export {
   generateWewireKeys,
   WEWIRE_KEY_HEADER,
   type WewireAuthOptions,
+  generateWewireWebhookSecret,
 } from './auth.js';
 export {
   toWewireStatus,

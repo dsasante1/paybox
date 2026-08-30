@@ -66,3 +66,14 @@ export function assertWewireCredentials(
 export function generateWewireKeys(token: string): { secretKey: string } {
   return { secretKey: `sk_test_local_${token}` };
 }
+
+/**
+ * A local webhook endpoint secret in Standard Webhooks form: `whsec_` and
+ * base64. The reference libraries base64-decode whatever follows the prefix
+ * to obtain the HMAC key (standardwebhooks.com, read 2026-08-29), so a secret
+ * that is not valid base64 -- a raw `sk_test_` key, say -- is unusable to
+ * them. The emulator therefore issues one of the shape they expect.
+ */
+export function generateWewireWebhookSecret(token: string): string {
+  return `whsec_${Buffer.from(token, 'utf8').toString('base64')}`;
+}

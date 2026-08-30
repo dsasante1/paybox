@@ -11,7 +11,9 @@ The pattern is the same everywhere:
 2. use the **local credential** printed by the banner (`paybox status`
    prints them all; `GET /api/providers` returns them as JSON);
 3. register a **webhook endpoint for that provider** —
-   `paybox webhook add <url> --provider <id> --secret <what your verifier expects>`.
+   `paybox webhook add <url> --provider <id>`. It prints the signing secret,
+   generated in the shape that provider's verifier expects; pass `--secret`
+   to choose your own.
 
 | Provider | Base URL | Credential | Sent as |
 |---|---|---|---|
@@ -142,15 +144,17 @@ connected account. `expand[]` works.
 
 **Webhook** — `stripe-signature: t=<unix seconds>,v1=<hex>`, HMAC-SHA256 over
 `${t}.${rawBody}` keyed with the endpoint secret, **re-signed on every delivery
-attempt** with the virtual instant. Register the endpoint with the secret your
-verifier holds:
+attempt** with the virtual instant. Register the endpoint; paybox issues a
+`whsec_…` secret and prints it (or pass `--secret` to use your own):
 
 ```bash
-paybox webhook add http://localhost:3000/webhooks/stripe --provider stripe --secret whsec_local_test
+paybox webhook add http://localhost:3000/webhooks/stripe --provider stripe
+#  ✓ http://localhost:3000/webhooks/stripe
+#    signing secret  whsec_local…
 ```
 
 ```js
-const event = stripe.webhooks.constructEvent(rawBody, req.headers['stripe-signature'], 'whsec_local_test');
+const event = stripe.webhooks.constructEvent(rawBody, req.headers['stripe-signature'], process.env.STRIPE_WEBHOOK_SECRET);
 ```
 
 Under a frozen or advanced clock, the signature's timestamp is the *virtual*
@@ -187,7 +191,8 @@ step-ups; `/validate-charge` honours OTPs `5548` and `6648`.
 **Webhook** — `verif-hash`, which is the secret hash **verbatim**. There is no
 HMAC and the body is not signed; that is Flutterwave v3's real scheme,
 reproduced rather than improved. Register the endpoint with the hash your app
-compares against:
+compares against (without `--secret`, the local Flutterwave secret key stands
+in for it):
 
 ```bash
 paybox webhook add http://localhost:3000/webhooks/flw --provider flutterwave --secret my-secret-hash
@@ -302,7 +307,8 @@ part after `whsec_`**, not the literal secret; a secret without the prefix is
 used as raw bytes. Re-signed per attempt; five-minute tolerance.
 
 ```bash
-paybox webhook add http://localhost:3000/webhooks/wewire --provider wewire --secret whsec_$(openssl rand -base64 24)
+paybox webhook add http://localhost:3000/webhooks/wewire --provider wewire
+#    signing secret  whsec_…        # base64 after the prefix, as the libraries expect
 ```
 
 ```js

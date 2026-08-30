@@ -140,9 +140,11 @@ exact bytes it sends, so it fails here too. Beyond that, per provider:
 | WeWire | `{id}.{timestamp}.{body}`; key is the **base64-decoded** part after `whsec_`; tolerance vs the clock |
 | Wise | RSA-SHA256, base64, against the PEM from `GET /wise/paybox/webhook-public-key` (authenticated) |
 
-And the trap that catches every non-Paystack provider: **the endpoint secret
-defaults to the Paystack local key.** Register Stripe, Flutterwave, Kora and
-WeWire endpoints with `--secret <what your verifier holds>`.
+And make sure your verifier holds **the endpoint's secret**, not a key you
+assumed: `paybox webhook add` prints it, the dashboard copies it, and
+`GET /api/webhooks/endpoints` returns it. If you supplied none, it was
+generated in the shape that provider's verifier expects (`whsec_…` for Stripe
+and WeWire, the local key for Paystack, Kora and Flutterwave).
 
 **A retry never happens.** Retries are jobs on virtual time. Under a frozen
 clock, `paybox time advance 30s` runs the default ladder; the `paystack`

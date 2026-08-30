@@ -99,3 +99,15 @@ export function generateStripeKeys(token: string): {
     publishableKey: `pk_test_local${token}`,
   };
 }
+
+/**
+ * A local webhook endpoint secret, in the shape Stripe issues one: `whsec_`
+ * and a token. Stripe signs webhooks with a per-endpoint secret that is
+ * *not* the API key (docs.stripe.com/webhooks, read 2026-08-28), and a
+ * developer's `constructEvent` call is handed exactly that string -- so the
+ * emulator issues one of the same shape rather than reusing the key.
+ * Labelled `local` like every credential here (spec §29).
+ */
+export function generateStripeWebhookSecret(token: string): string {
+  return `whsec_local${token}`;
+}

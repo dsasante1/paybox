@@ -255,16 +255,27 @@ reads and controls them.
   ```json
   { "url": "http://localhost:3000/webhooks/paystack",
     "provider": "paystack",
-    "secret": "optional — defaults to the Paystack local secret key",
+    "secret": "optional — see the defaults below",
     "eventTypes": ["charge.success"],
     "description": "optional" }
   ```
 
-  `provider` defaults to `paystack`; an endpoint only ever receives its own
-  provider's events. `eventTypes` are **provider** event names; empty means
-  everything that provider emits. `secret` is what deliveries are signed with
-  — pass one shaped the way your verifier expects (`whsec_…` for Stripe or
-  WeWire; ignored by Wise, which signs with RSA). 201.
+  `provider` defaults to `paystack` and must be one of the six; an unknown
+  value is a 400 rather than an endpoint nothing can ever match. An endpoint
+  only ever receives its own provider's events. `eventTypes` are **provider**
+  event names; empty means everything that provider emits. `secret` is what
+  deliveries are signed with; omit it and the endpoint gets one shaped the
+  way that provider's verifier expects:
+
+  | Provider | Default secret |
+  |---|---|
+  | Paystack, Kora | that provider's local secret key — what they sign with |
+  | Flutterwave | the local Flutterwave secret key, standing in for the merchant-chosen hash |
+  | Stripe | a fresh `whsec_local…` per endpoint |
+  | WeWire | a fresh `whsec_<base64>` per endpoint, so Standard Webhooks libraries can decode it |
+  | Wise | `wise-rsa-signed` — unused; Wise signs with RSA |
+
+  The response carries the secret in full. 201.
 - `PATCH /api/webhooks/endpoints/:id` — any of `url`, `secret`, `enabled`,
   `eventTypes`, `description`.
 - `DELETE /api/webhooks/endpoints/:id` — 204.

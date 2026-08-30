@@ -1,13 +1,18 @@
 import type { FastifyPluginAsync } from 'fastify';
 import {
+  PROVIDERS,
   PayboxError,
   VERSION,
   formatAmount,
   type ClockState,
   type PaymentStatus,
+  type ProviderId,
 } from '@paybox/shared';
 import { parseDuration } from '@paybox/core';
 import type { SimulatedOutcome } from '@paybox/simulator';
+import { generateStripeWebhookSecret } from '@paybox/stripe';
+import { generateWewireWebhookSecret } from '@paybox/wewire';
+import { WISE_UNUSED_SECRET } from '@paybox/wise';
 import type { PayboxContext } from './context.js';
 
 /**
@@ -424,12 +429,22 @@ export const controlApiPlugin: FastifyPluginAsync<{ context: PayboxContext }> = 
   }>('/webhooks/endpoints', async (request, reply) => {
     const body = request.body;
     if (!body?.url) throw new PayboxError('validation_failed', 'A webhook url is required.');
+    const provider = (body.provider ?? 'paystack') as ProviderId;
+    // A typo here used to create an endpoint that silently never received
+    // anything, because no event's provider ever matched it.
+    if (!PROVIDERS.includes(provider)) {
+      throw new PayboxError(
+        'validation_failed',
+        `Unknown provider "${String(body.provider)}". Known: ${PROVIDERS.join(', ')}.`,
+        { details: { provider: body.provider, known: PROVIDERS } },
+      );
+    }
     const now = clock.nowISO();
     const endpoint = await storage.webhooks.createEndpoint({
       id: context.ids.next('whe'),
-      provider: (body.provider ?? 'paystack') as 'paystack',
+      provider,
       url: body.url,
-      secret: body.secret ?? context.keys.secretKey,
+      secret: body.secret ?? defaultWebhookSecret(provider),
       enabled: true,
       eventTypes: body.eventTypes ?? [],
       description: body.description ?? null,
@@ -649,6 +664,37 @@ export const controlApiPlugin: FastifyPluginAsync<{ context: PayboxContext }> = 
     logger.warn('emulator.reset', {});
     return { status: 'reset' };
   });
+
+  /**
+   * The signing secret an endpoint gets when the caller supplies none.
+   *
+   * What a verifier expects is provider knowledge. Paystack and Kora sign
+   * with the merchant's secret key; Flutterwave v3 compares against a hash
+   * the merchant chose, for which the local secret key stands in; Stripe
+   * issues a separate `whsec_` endpoint secret; WeWire's Standard Webhooks
+   * libraries base64-decode whatever follows `whsec_`, so a raw key is
+   * unusable to them; and Wise signs with RSA and has no secret at all.
+   *
+   * Every provider used to default to the Paystack key -- a secret that
+   * verified nowhere but Paystack -- which was the single most common reason
+   * a non-Paystack webhook failed to verify against the emulator.
+   */
+  function defaultWebhookSecret(provider: ProviderId): string {
+    switch (provider) {
+      case 'paystack':
+        return context.keys.secretKey;
+      case 'stripe':
+        return generateStripeWebhookSecret(context.ids.token(24));
+      case 'flutterwave':
+        return context.flutterwaveKeys.secretKey;
+      case 'kora':
+        return context.koraKeys.secretKey;
+      case 'wewire':
+        return generateWewireWebhookSecret(context.ids.token(24));
+      case 'wise':
+        return WISE_UNUSED_SECRET;
+    }
+  }
 
   async function requirePayment(handle: string) {
     const payment =

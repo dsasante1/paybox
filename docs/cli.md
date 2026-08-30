@@ -175,15 +175,20 @@ settle over virtual time instead.
 
 ```bash
 paybox webhook add http://localhost:3000/webhooks/paystack
-paybox webhook add http://localhost:3000/webhooks/stripe --provider stripe --secret whsec_local
+paybox webhook add http://localhost:3000/webhooks/stripe --provider stripe
+#  ✓ http://localhost:3000/webhooks/stripe
+#    signing secret  whsec_local…
+paybox webhook add http://localhost:3000/webhooks/stripe --provider stripe --secret whsec_mine
 paybox webhook endpoints
 ```
 
 An endpoint receives every event **for its provider** (`--provider` defaults
-to `paystack`). `--secret` is what deliveries are signed with; it defaults to
-the Paystack local secret key for every provider, so pass the value your
-verifier holds for anything else. Filtering by event type (`eventTypes`) and
-disabling an endpoint are available on the API (`PATCH /api/webhooks/endpoints/:id`).
+to `paystack`; an unknown provider is refused). `--secret` is what deliveries
+are signed with; leave it out and the endpoint gets one shaped the way that
+provider's verifier expects — the local key for Paystack, Kora and
+Flutterwave, a fresh `whsec_…` for Stripe and WeWire — and the command prints
+it. Filtering by event type (`eventTypes`) and disabling an endpoint are
+available on the API (`PATCH /api/webhooks/endpoints/:id`).
 
 ```bash
 paybox webhook list

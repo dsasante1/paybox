@@ -15,7 +15,7 @@ import { toWiseError } from './errors.js';
 import { toMajor, toMinor } from './money.js';
 import { derivedUuid, numericId, resolveNumeric } from './ids.js';
 import { WISE_FEE_MINOR, allRates, rateFor } from './rates.js';
-import { WISE_TEST_PUBLIC_KEY } from './signature.js';
+import { WISE_UNUSED_SECRET, WISE_TEST_PUBLIC_KEY } from './signature.js';
 import {
   SIMULATABLE_STATUSES,
   canonicalForSimulation,
@@ -1076,7 +1076,7 @@ export const wisePlugin: FastifyPluginAsync<WisePluginOptions> = async (fastify,
         url: body.delivery.url,
         // Wise signs with its private key; there is no shared secret. The
         // stored value is unused for signing and is recorded as such.
-        secret: 'wise-rsa-signed',
+        secret: WISE_UNUSED_SECRET,
         enabled: true,
         eventTypes: [body.trigger_on],
         description: body.name,
