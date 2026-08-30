@@ -14,7 +14,7 @@ paybox --json <command>                        # raw JSON instead of tables
 paybox start                       # start the emulator (foreground)
 paybox start --port 9000 --freeze  # frozen clock — deterministic runs
 paybox start --seed ci-run-1       # identical seed ⇒ identical ids
-paybox status
+paybox status                      # url, clock, counts, and every test credential issued
 paybox reset --yes                 # delete all local state
 paybox seed                        # generate representative test data
 paybox logs -n 100
@@ -149,7 +149,10 @@ paybox time unfreeze
 ```
 
 `advance` runs every job that comes due **before it returns** — webhook retries,
-payment expiries, scenario steps. Nothing sleeps.
+payment expiries, scenario steps. Nothing sleeps. `freeze`, `unfreeze` and
+`set` wait the same way, so a `freeze` can never catch the scheduler
+mid-job. Virtual time only moves forward: `set` or `freeze` to an instant
+earlier than the current one is refused (HTTP 400 from `/api/time`).
 
 ## Network
 

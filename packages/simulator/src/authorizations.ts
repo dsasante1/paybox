@@ -39,12 +39,17 @@ export function authorizationOutcome(
   authorization: Authorization,
   resolver?: InstrumentResolver | null,
 ): SimulatedOutcome {
-  // A stored authorization keeps only the masked last four, so a provider's
-  // published full-number table cannot match it. That is fine: the outcome was
-  // already decided when the card was first charged, and the suffix convention
-  // reproduces it. The resolver is still offered for providers whose test
-  // instruments are distinguishable from four digits alone.
-  return resolveInstrument(authorization.last4, authorization.channel, {
+  // A stored authorization keeps only the masked BIN and last four, so a
+  // provider's published full-number table cannot match it on its own. The
+  // two fragments are handed over joined (`bin` + zeros + `last4`): the suffix
+  // convention still reads the last four, and a provider resolver that keys
+  // its published table by BIN and last four -- Stripe's, Flutterwave's -- can
+  // recover the documented outcome rather than falling through to "success".
+  const identifier =
+    authorization.bin && authorization.last4
+      ? `${authorization.bin}${'0'.repeat(6)}${authorization.last4}`
+      : authorization.last4;
+  return resolveInstrument(identifier, authorization.channel, {
     ...(resolver ? { resolver } : {}),
   }).outcome;
 }

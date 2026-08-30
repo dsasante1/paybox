@@ -1,5 +1,11 @@
 import type { FastifyPluginAsync } from 'fastify';
-import { PayboxError, VERSION, formatAmount, type PaymentStatus } from '@paybox/shared';
+import {
+  PayboxError,
+  VERSION,
+  formatAmount,
+  type ClockState,
+  type PaymentStatus,
+} from '@paybox/shared';
 import { parseDuration } from '@paybox/core';
 import type { SimulatedOutcome } from '@paybox/simulator';
 import type { PayboxContext } from './context.js';
@@ -79,9 +85,18 @@ export const controlApiPlugin: FastifyPluginAsync<{ context: PayboxContext }> = 
    * `implemented` set is the single place that judgement lives, so a new
    * adapter cannot be announced here without being added deliberately.
    */
-  const IMPLEMENTED: Record<string, { status: string; keys: Record<string, string> }> = {
+  const IMPLEMENTED: Record<string, { status: string; keys: Record<string, unknown> }> = {
     paystack: { status: 'partial', keys: context.keys },
     stripe: { status: 'partial', keys: context.stripeKeys },
+    // v3 keys plus the v4 OAuth client credentials: v4 has no other way to
+    // learn them, since the banner is the only other place they are shown.
+    flutterwave: {
+      status: 'partial',
+      keys: { ...context.flutterwaveKeys, v4: { ...context.flutterwaveV4 } },
+    },
+    kora: { status: 'partial', keys: context.koraKeys },
+    wewire: { status: 'partial', keys: context.wewireKeys },
+    wise: { status: 'partial', keys: context.wiseKeys },
   };
 
   fastify.get('/providers', async () => ({
@@ -486,28 +501,44 @@ export const controlApiPlugin: FastifyPluginAsync<{ context: PayboxContext }> = 
 
   fastify.post<{ Body: { action: string; value?: string | number } }>('/time', async (request) => {
     const { action, value } = request.body ?? { action: '' };
-    switch (action) {
-      case 'freeze':
-        return clock.freeze(value as number | undefined);
-      case 'unfreeze':
-        return clock.unfreeze();
-      case 'advance': {
-        const state = clock.advance(parseDuration(value ?? '0s'));
-        // Draining here rather than waiting for the next poll is what makes
-        // `advance` synchronous from the caller's point of view: by the time
-        // this returns, every job that came due has already run.
-        await context.scheduler.settle();
-        await context.scheduler.drain();
-        return state;
+    let state: ClockState;
+    try {
+      switch (action) {
+        case 'freeze':
+          state = clock.freeze(value as number | undefined);
+          break;
+        case 'unfreeze':
+          state = clock.unfreeze();
+          break;
+        case 'advance':
+          state = clock.advance(parseDuration(value ?? '0s'));
+          break;
+        case 'set':
+          state = clock.set(value as string);
+          break;
+        default:
+          throw new PayboxError(
+            'invalid_request',
+            'action must be one of freeze, unfreeze, advance, set.',
+          );
       }
-      case 'set':
-        return clock.set(value as string);
-      default:
-        throw new PayboxError(
-          'invalid_request',
-          'action must be one of freeze, unfreeze, advance, set.',
-        );
+    } catch (error) {
+      // The clock refuses to move backwards and rejects an unparseable
+      // instant with plain RangeError/TypeError. Those are the caller's
+      // mistake, not the emulator's: answer 400, not 500.
+      if (error instanceof RangeError || error instanceof TypeError) {
+        throw new PayboxError('invalid_request', error.message, { cause: error });
+      }
+      throw error;
     }
+    // Every clock change triggers a drain through `clock.onChange`. Draining
+    // here rather than waiting for it is what makes each action synchronous
+    // from the caller's point of view: by the time this returns, every job
+    // that came due has already run, and a follow-up `freeze` cannot catch
+    // the scheduler mid-job.
+    await context.scheduler.settle();
+    await context.scheduler.drain();
+    return state;
   });
 
   /* ---------------- scenarios (spec §12) ---------------- */

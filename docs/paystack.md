@@ -216,8 +216,13 @@ developer should find locally.
 
 The `authorization_code` is derived from the instrument, not the transaction,
 so charging the same test card twice returns **one** authorization rather than
-accumulating a new one per payment. Only masked fragments are ever stored —
-there is no column that could hold a PAN, and none for a CVV.
+accumulating a new one per payment. The instrument fingerprint includes the
+expiry, as a card fingerprint does: Paystack requires `expiry_month` and
+`expiry_year` on a card charge, and paybox accepts their absence as a
+convenience — but the same number sent once with them and once without is two
+fingerprints and mints two authorizations, so send them consistently. Only
+masked fragments are ever stored — there is no column that could hold a PAN,
+and none for a CVV.
 
 ### The PIN/OTP conversation
 
@@ -339,6 +344,10 @@ balance:
   opening: 10000000   # PAYBOX_OPENING_BALANCE
   transferFee: {}     # override the published schedule per currency
 ```
+
+A transfer's `reference` is unique per integration, exactly as a transaction's
+is. Reusing one is refused with `duplicate_reference` (HTTP 400) rather than
+creating a second payout; omit the field to have one generated.
 
 ### Transfer fees
 

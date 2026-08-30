@@ -48,7 +48,13 @@ export function expandPaths(source: unknown): string[] {
 
   if (typeof value === 'string') return [value];
   if (!Array.isArray(value)) return [];
-  return value.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0);
+  // A query string with the key repeated -- `expand[]=a&expand[]=b`, which is
+  // how Stripe's own clients send several -- arrives from the query parser as
+  // one array under "expand[]", and the form expander then nests it one level
+  // deeper. Flatten so both spellings expand every path named.
+  return value
+    .flat()
+    .filter((entry): entry is string => typeof entry === 'string' && entry.length > 0);
 }
 
 /** `a.b.c` -> `['a','b','c']`, dropping the empty segments a stray dot leaves. */

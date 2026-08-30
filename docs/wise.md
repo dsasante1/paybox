@@ -119,7 +119,10 @@ returns `{type, status, errorCode, errorMessage, balanceTransactionId}` with
 and reproducing it matters: a client branching on the HTTP status alone would
 read a rejected funding as a success. paybox returns 201 with `REJECTED` for an
 already-funded transfer, a wrong-state transfer, an unavailable pay-in type and
-an insufficient balance.
+an insufficient balance. Note that every balance starts at the opening test
+float (`balance.opening`, applied to every provider and currency), so a fresh
+emulator funds a small transfer without a top-up; set the float to `0` to
+exercise the insufficient-balance rejection from the first transfer.
 
 **Two timestamp formats, because Wise has two.** A quote's `createdTime` is
 ISO-8601 with a `Z` (`2019-04-05T13:18:58Z`); a transfer's `created` is

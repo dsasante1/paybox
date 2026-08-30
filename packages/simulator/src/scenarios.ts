@@ -1,10 +1,36 @@
 import { parse as parseYaml } from 'yaml';
-import { PayboxError, type Clock, type IdFactory, type PaymentStatus } from '@paybox/shared';
-import { parseDuration, type Job, type JobResult, type PaymentEngine, type Storage } from '@paybox/core';
+import {
+  PAYMENT_STATUSES,
+  PayboxError,
+  type Clock,
+  type IdFactory,
+  type PaymentStatus,
+} from '@paybox/shared';
+import {
+  canTransitionPayment,
+  isTerminalPayment,
+  parseDuration,
+  type Job,
+  type JobResult,
+  type PaymentEngine,
+  type Storage,
+} from '@paybox/core';
 import type { PaymentSimulator } from './simulator.js';
-import type { SimulatedOutcome } from './instruments.js';
+import { SIMULATED_OUTCOMES, type SimulatedOutcome } from './instruments.js';
 
 export const SCENARIO_STEP_JOB = 'scenario.step';
+
+const SCENARIO_ACTIONS = ['cancel', 'expire', 'authorize', 'capture', 'approve', 'reject'] as const;
+
+/**
+ * Statuses in which the money has been collected. Not terminal -- a refund
+ * can still follow -- but no outcome or action step has anything left to do.
+ */
+const SETTLED: ReadonlySet<PaymentStatus> = new Set<PaymentStatus>([
+  'successful',
+  'partially_refunded',
+  'refunded',
+]);
 
 /**
  * A scenario step (spec §12). Exactly one of `status`, `outcome` or `action`
@@ -185,8 +211,12 @@ export class ScenarioRunner {
         maxAttempts: 1,
         leaseExpiresAt: null,
         lastError: null,
-        // Cancelling the payment cancels the rest of its scenario.
-        groupKey: `payment:${paymentId}`,
+        // The run's own group, deliberately not `payment:<id>`: the engine
+        // cancels that group when a payment goes terminal, which used to
+        // cancel a scenario's own later steps -- `late-reversal` declined a
+        // payment and then never got to reverse it. Steps that land on a
+        // settled payment are skipped in `handleJob` instead.
+        groupKey: `scenario:${runId}`,
         createdAt: this.#clock.nowISO(),
         updatedAt: this.#clock.nowISO(),
       });
@@ -208,16 +238,36 @@ export class ScenarioRunner {
     const step = job.payload.step as ScenarioStep | undefined;
     if (!paymentId || !step) return;
 
-    // A scenario step that lands on an already-terminal payment is not an
-    // error -- the developer may have intervened from the dashboard. Skip it.
+    // A scenario step that lands on a payment that has already settled is not
+    // an error -- the developer may have intervened from the dashboard, or an
+    // earlier step may have finished the payment. Skip it.
     const payment = await this.#engine.getPayment(paymentId);
     if (!payment) return;
 
-    if (step.outcome) {
-      await this.#simulator.apply(paymentId, step.outcome);
+    if (step.status) {
+      if (payment.status === step.status) return;
+      // A status step may move a *terminal* payment: that is the explicitly
+      // simulated provider reversal `late-reversal` exists for. A settled
+      // payment that is not terminal (successful, refunded) has no such
+      // escape hatch, so the step is skipped rather than failed.
+      if (!canTransitionPayment(payment.status, step.status) && !isTerminalPayment(payment.status)) {
+        return;
+      }
+      await this.#engine.transitionPayment(paymentId, step.status, {
+        reversal: true,
+        eventData: { scenario: job.payload.scenario, note: step.note ?? null },
+      });
       return;
     }
-    if (step.action) {
+
+    // Outcomes and actions need a payment that is still in flight.
+    if (isTerminalPayment(payment.status) || SETTLED.has(payment.status)) return;
+
+    try {
+      if (step.outcome) {
+        await this.#simulator.apply(paymentId, step.outcome);
+        return;
+      }
       switch (step.action) {
         case 'cancel':
           await this.#simulator.cancel(paymentId);
@@ -237,17 +287,15 @@ export class ScenarioRunner {
         case 'reject':
           await this.#simulator.completeAuthentication(paymentId, false);
           return;
+        default:
+          return;
       }
-    }
-    if (step.status) {
-      if (payment.status === step.status) return;
-      await this.#engine.transitionPayment(paymentId, step.status, {
-        // The late-reversal scenario needs to move a failed payment forward,
-        // which is precisely the explicitly-simulated reversal the state
-        // machine allows.
-        reversal: true,
-        eventData: { scenario: job.payload.scenario, note: step.note ?? null },
-      });
+    } catch (error) {
+      // The payment moved between the check above and the transition -- a
+      // concurrent settle from the control API, say. Still a skip, not a
+      // failed job.
+      if (error instanceof PayboxError && error.code === 'invalid_state_transition') return;
+      throw error;
     }
   };
 }
@@ -265,6 +313,25 @@ function validateScenario(scenario: Scenario): void {
         'validation_failed',
         `Step ${index + 1} of "${scenario.name}" must set one of status, outcome or action.`,
       );
+    }
+    // The values are checked here, at registration, because a step that
+    // cannot apply is *skipped* at run time -- so a misspelt status would
+    // otherwise do nothing, silently, on every run.
+    const unknown = (kind: string, value: string, allowed: readonly string[]) =>
+      new PayboxError(
+        'validation_failed',
+        `Step ${index + 1} of "${scenario.name}" has an unknown ${kind} "${value}". ` +
+          `Allowed: ${allowed.join(', ')}.`,
+        { details: { step: index + 1, [kind]: value, allowed } },
+      );
+    if (step.status !== undefined && !(PAYMENT_STATUSES as readonly string[]).includes(step.status)) {
+      throw unknown('status', String(step.status), PAYMENT_STATUSES);
+    }
+    if (step.outcome !== undefined && !(SIMULATED_OUTCOMES as readonly string[]).includes(step.outcome)) {
+      throw unknown('outcome', String(step.outcome), SIMULATED_OUTCOMES);
+    }
+    if (step.action !== undefined && !(SCENARIO_ACTIONS as readonly string[]).includes(step.action)) {
+      throw unknown('action', String(step.action), SCENARIO_ACTIONS);
     }
     if (step.delay !== undefined) parseDuration(step.delay);
   }

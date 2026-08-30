@@ -103,7 +103,21 @@ program
       '/api/health',
     );
     const overview = await api.get<OverviewResponse>('/api/overview');
-    output({ health, overview }, () =>
+    const { providers } = await api.get<{ providers: ProviderInfo[] }>('/api/providers');
+    // Every credential the emulator issued, flattened one per line. The
+    // adapters' "see `paybox status`" errors and the README both point here.
+    const credentials: [string, string][] = [];
+    for (const provider of providers) {
+      for (const [name, value] of Object.entries(provider.keys ?? {})) {
+        if (typeof value === 'string') credentials.push([`${provider.id} ${name}`, value]);
+        else if (value && typeof value === 'object') {
+          for (const [inner, secret] of Object.entries(value as Record<string, string>)) {
+            credentials.push([`${provider.id} ${name} ${inner}`, secret]);
+          }
+        }
+      }
+    }
+    output({ health, overview, providers }, () =>
       [
         heading('paybox'),
         keyValue([
@@ -112,6 +126,8 @@ program
           ['time', health.time],
           ['clock', health.clock.mode === 'frozen' ? pc.yellow('frozen') : 'system'],
         ]),
+        heading('Test credentials (local only — not real keys)'),
+        keyValue(credentials),
         heading('Payments'),
         keyValue([
           ['total', String(overview.payments.total)],
@@ -152,7 +168,9 @@ program
   .argument('[provider]', 'show every endpoint for one adapter, e.g. kora')
   .option('--json', 'machine-readable output', false)
   .action((provider: string | undefined, options: { json: boolean }) => {
-    if (options.json) {
+    // Commander hands a `--json` written after the subcommand to the program's
+    // own `--json` option, so honour both spellings.
+    if (options.json || asJson()) {
       process.stdout.write(`${JSON.stringify(toRows(MANIFESTS), null, 2)}\n`);
       return;
     }
@@ -601,8 +619,9 @@ webhook
       provider: options.provider,
       ...(options.secret ? { secret: options.secret } : {}),
     });
-    process.stdout.write(
-      `${pc.green('✓')} ${endpoint.url}\n  ${pc.dim('signing secret')}  ${endpoint.secret}\n`,
+    output(
+      endpoint,
+      () => `${pc.green('✓')} ${endpoint.url}\n  ${pc.dim('signing secret')}  ${endpoint.secret}`,
     );
   });
 
@@ -640,9 +659,11 @@ webhook
   .description('Retry a delivery in place, granting one more attempt')
   .action(async (id: string) => {
     const delivery = await client().post<WebhookDelivery>(`/api/webhooks/deliveries/${id}/retry`);
-    process.stdout.write(
-      `${pc.green('✓')} ${delivery.id} → ${statusColour(delivery.status)} ` +
-        `(attempt ${delivery.attempt}/${delivery.maxAttempts})\n`,
+    output(
+      delivery,
+      () =>
+        `${pc.green('✓')} ${delivery.id} → ${statusColour(delivery.status)} ` +
+        `(attempt ${delivery.attempt}/${delivery.maxAttempts})`,
     );
   });
 
@@ -651,8 +672,9 @@ webhook
   .description('Send the identical signed payload again as a brand-new delivery')
   .action(async (id: string) => {
     const delivery = await client().post<WebhookDelivery>(`/api/webhooks/deliveries/${id}/replay`);
-    process.stdout.write(
-      `${pc.green('✓')} New delivery ${delivery.id} replaying ${delivery.replayOfDeliveryId}\n`,
+    output(
+      delivery,
+      () => `${pc.green('✓')} New delivery ${delivery.id} replaying ${delivery.replayOfDeliveryId}`,
     );
   });
 
@@ -739,9 +761,11 @@ scenario
       scenario: name,
       paymentId,
     });
-    process.stdout.write(
-      `${pc.green('✓')} Running "${name}" — ${run.steps} steps, completing at ${run.completesAt}.\n` +
-        pc.dim('  Use `paybox time advance` to fast-forward through it.\n'),
+    output(
+      run,
+      () =>
+        `${pc.green('✓')} Running "${name}" — ${run.steps} steps, completing at ${run.completesAt}.\n` +
+        pc.dim('  Use `paybox time advance` to fast-forward through it.'),
     );
   });
 
@@ -752,15 +776,15 @@ time
   .description('Freeze the clock')
   .action(async () => {
     const state = await client().post<{ now: number }>('/api/time', { action: 'freeze' });
-    process.stdout.write(`${pc.green('✓')} Clock frozen at ${new Date(state.now).toISOString()}\n`);
+    output(state, () => `${pc.green('✓')} Clock frozen at ${new Date(state.now).toISOString()}`);
   });
 
 time
   .command('unfreeze')
   .description('Resume the clock')
   .action(async () => {
-    await client().post('/api/time', { action: 'unfreeze' });
-    process.stdout.write(`${pc.green('✓')} Clock resumed.\n`);
+    const state = await client().post<{ now: number }>('/api/time', { action: 'unfreeze' });
+    output(state, () => `${pc.green('✓')} Clock resumed.`);
   });
 
 time
@@ -771,8 +795,9 @@ time
       action: 'advance',
       value: duration,
     });
-    process.stdout.write(
-      `${pc.green('✓')} Advanced ${duration} → ${new Date(state.now).toISOString()}\n`,
+    output(
+      state,
+      () => `${pc.green('✓')} Advanced ${duration} → ${new Date(state.now).toISOString()}`,
     );
   });
 
@@ -782,24 +807,27 @@ network
   .command('latency <ms>')
   .description('Add latency to provider responses')
   .action(async (ms: string) => {
-    await client().post('/api/network', { latencyMs: Number(ms) });
-    process.stdout.write(`${pc.green('✓')} Provider responses delayed by ${ms}ms.\n`);
+    const profile = await client().post('/api/network', { latencyMs: Number(ms) });
+    output(profile, () => `${pc.green('✓')} Provider responses delayed by ${ms}ms.`);
   });
 
 network
   .command('failure <rate>')
   .description('Fail a fraction of provider requests, 0..1')
   .action(async (rate: string) => {
-    await client().post('/api/network', { failureRate: Number(rate) });
-    process.stdout.write(`${pc.yellow('⚠')} ${Number(rate) * 100}% of provider requests will fail.\n`);
+    const profile = await client().post('/api/network', { failureRate: Number(rate) });
+    output(
+      profile,
+      () => `${pc.yellow('⚠')} ${Number(rate) * 100}% of provider requests will fail.`,
+    );
   });
 
 network
   .command('reset')
   .description('Clear network simulation')
   .action(async () => {
-    await client().delete('/api/network');
-    process.stdout.write(`${pc.green('✓')} Network simulation cleared.\n`);
+    const profile = await client().delete('/api/network');
+    output(profile, () => `${pc.green('✓')} Network simulation cleared.`);
   });
 
 program
@@ -1102,6 +1130,8 @@ interface ScenarioSummary {
   steps: unknown[];
 }
 interface ProviderInfo {
+  /** Every credential the adapter issued, as /api/providers reports them. */
+  keys?: Record<string, unknown>;
   id: string;
   enabled: boolean;
   basePath: string;

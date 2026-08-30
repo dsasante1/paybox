@@ -83,6 +83,13 @@ class SqliteStorage implements Storage {
   }
 
   async reset(): Promise<void> {
+    // One transaction, so a reset either empties everything or nothing. The
+    // deletes below are ordered by foreign keys; a mistake there used to fail
+    // halfway and leave payments behind with their events already gone.
+    if (!this.#inTransaction) {
+      await this.transaction((tx) => tx.reset());
+      return;
+    }
     const tables = [
       'webhook_deliveries',
       'webhook_endpoints',
@@ -105,8 +112,10 @@ class SqliteStorage implements Storage {
       'disputes',
       'split_subaccounts',
       'splits',
-      'subaccounts',
+      // The ledger references subaccounts with ON DELETE RESTRICT (migration
+      // 0015): a connected account's entries have to go before the account.
       'balance_ledger',
+      'subaccounts',
       // Setups reference authorizations, which reference payments and
       // customers; drop them first.
       'instrument_setups',

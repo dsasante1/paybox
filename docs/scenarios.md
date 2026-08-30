@@ -63,5 +63,11 @@ curl -X POST localhost:8080/api/scenarios \
   -d "{\"yaml\": $(jq -Rs . < momo-slow-approval.yml)}"
 ```
 
-A step that lands on an already-terminal payment is skipped rather than
-erroring — you may well have intervened from the dashboard mid-run.
+An `outcome` or `action` step that lands on a payment that has already
+finished — settled, refunded, failed, cancelled or expired — is skipped rather
+than erroring: you may well have intervened from the dashboard mid-run, or an
+earlier step may have finished it. A `status` step is the one exception, and
+deliberately so: on a payment in a terminal state it is applied as a simulated
+provider reversal, which is exactly what `late-reversal` does when it moves a
+`failed` payment to `successful`. On a settled payment that is not terminal
+(`successful`, refunded) a `status` step is skipped like the others.

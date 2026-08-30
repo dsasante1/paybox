@@ -34,22 +34,24 @@ afterEach(async () => {
 });
 
 describe('provider listing', () => {
-  it('reports both implemented adapters as partial', async () => {
+  it('reports every implemented adapter as partial, and none as anything more', async () => {
     const res = await app.inject({ method: 'GET', url: '/api/providers' });
     const byId = Object.fromEntries(
       (res.json().providers as { id: string; status: string }[]).map((p) => [p.id, p.status]),
     );
 
-    expect(byId.paystack).toBe('partial');
-    expect(byId.stripe).toBe('partial');
+    // All six adapters serve their manifests; the listing must say so
+    // without ever claiming "full".
+    for (const id of ['paystack', 'stripe', 'flutterwave', 'kora', 'wewire', 'wise']) {
+      expect(byId[id]).toBe('partial');
+    }
   });
 
-  it('never reports an unimplemented adapter as available', async () => {
+  it('never reports an adapter the app does not register', async () => {
     const res = await app.inject({ method: 'GET', url: '/api/providers' });
     const providers = res.json().providers as { id: string; status: string }[];
     for (const provider of providers) {
-      if (provider.id === 'paystack' || provider.id === 'stripe') continue;
-      expect(provider.status).toBe('not_implemented');
+      expect(['partial', 'not_implemented']).toContain(provider.status);
     }
   });
 

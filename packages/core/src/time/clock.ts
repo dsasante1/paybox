@@ -45,6 +45,19 @@ export class VirtualClock implements Clock {
 
   now(): number {
     if (this.#override !== null) return this.#override;
+    return this.#real();
+  }
+
+  /**
+   * The clock's own instant, ignoring any scoped `at()` override.
+   *
+   * The control surface reads this. A job running under `at()` must see its
+   * scheduled instant, but a caller asking "what time is it" while that job
+   * is in flight must not: `freeze()` used to pin the clock to a job's
+   * instant and `state()` used to report it, which moved virtual time
+   * backwards -- the one thing this clock promises never to do.
+   */
+  #real(): number {
     return this.#mode === 'frozen' ? this.#frozenAt : Date.now() + this.#offsetMs;
   }
 
@@ -77,8 +90,11 @@ export class VirtualClock implements Clock {
 
   freeze(at?: number | string): ClockState {
     const target =
-      at === undefined ? this.now() : typeof at === 'string' ? Date.parse(at) : at;
+      at === undefined ? this.#real() : typeof at === 'string' ? Date.parse(at) : at;
     if (Number.isNaN(target)) throw new TypeError(`freeze: unparseable time ${at}`);
+    if (target < this.#real()) {
+      throw new RangeError('freeze: refusing to move virtual time backwards');
+    }
     this.#frozenAt = target;
     this.#mode = 'frozen';
     return this.#emit();
@@ -108,7 +124,7 @@ export class VirtualClock implements Clock {
   set(at: number | string): ClockState {
     const target = typeof at === 'string' ? Date.parse(at) : at;
     if (Number.isNaN(target)) throw new TypeError(`set: unparseable time ${at}`);
-    if (target < this.now()) {
+    if (target < this.#real()) {
       throw new RangeError('set: refusing to move virtual time backwards');
     }
     if (this.#mode === 'frozen') this.#frozenAt = target;
@@ -117,7 +133,7 @@ export class VirtualClock implements Clock {
   }
 
   state(): ClockState {
-    return { mode: this.#mode, now: this.now(), offsetMs: this.#offsetMs };
+    return { mode: this.#mode, now: this.#real(), offsetMs: this.#offsetMs };
   }
 
   /** The scheduler subscribes here so an advance drains due jobs immediately. */

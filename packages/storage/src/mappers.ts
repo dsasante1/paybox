@@ -264,6 +264,9 @@ export function transferPatch(patch: Partial<Transfer>): Partial<TransferRow> {
   const out: Partial<TransferRow> = {};
   if (patch.status !== undefined) out.status = patch.status;
   if (patch.providerStatus !== undefined) out.provider_status = patch.providerStatus;
+  // `reason` was missing here, so an adapter's description update reached the
+  // repository and was silently dropped on the way to the row.
+  if (patch.reason !== undefined) out.reason = patch.reason;
   if (patch.failureReason !== undefined) out.failure_reason = patch.failureReason;
   if (patch.amountReversed !== undefined) out.amount_reversed = patch.amountReversed;
   if (patch.transferGroup !== undefined) out.transfer_group = patch.transferGroup;
