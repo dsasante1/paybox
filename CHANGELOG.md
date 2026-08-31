@@ -5,7 +5,7 @@ What each published version of `paybox-emulator` (npm) and `dsasante1/paybox`
 merging to `main` publishes nothing, and everything under **Unreleased** goes
 out with the next tag — see [docs/releasing.md](docs/releasing.md).
 
-## Unreleased
+## 0.2.1 — 2026-08-31
 
 - The `/docs` API reference lists **every route the emulator serves**,
   generated from the coverage manifests the test suite enforces against the
