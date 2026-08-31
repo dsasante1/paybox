@@ -1,6 +1,6 @@
 {
   "name": "paybox-emulator",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Local payment infrastructure emulator. Point a Paystack, Stripe, Flutterwave, Kora, WeWire or Wise integration at localhost and test pending payments, webhook retries, duplicate deliveries, timeouts, refunds and idempotency — deterministically, with no provider sandbox.",
   "license": "MIT",
   "type": "module",
