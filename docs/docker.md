@@ -7,7 +7,7 @@ Every release publishes the image to Docker Hub, for `linux/amd64` and
 docker run --rm -p 127.0.0.1:8080:8080 -v paybox-data:/app/data dsasante1/paybox
 ```
 
-Tags: `latest`, the minor line (`0.1`) and the exact version (`0.1.0`). Pin
+Tags: `latest`, the minor line (`0.2`) and the exact version (`0.2.0`). Pin
 one of the last two anywhere reproducibility matters.
 
 The same image, under the same tags, is also pushed to
@@ -92,7 +92,7 @@ For a clean slate every run, set `PAYBOX_DATABASE=:memory:`.
 ```yaml
 services:
   paybox:
-    image: dsasante1/paybox:0.1
+    image: dsasante1/paybox:0.2
     env:
       PAYBOX_DATABASE: ":memory:"
       PAYBOX_FREEZE_CLOCK: "1"

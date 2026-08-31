@@ -49,7 +49,7 @@ marker, so there is nothing to pattern-match on. What paybox refuses instead is
 anything **JWT-shaped** — three base64url segments separated by dots. A real
 Wise access token always is; a locally generated one never is. That is the
 honest test the format allows, and it is weaker than the guarantee the other
-five adapters give.
+five providers give.
 
 ## Endpoints
 
