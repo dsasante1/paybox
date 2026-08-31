@@ -1,14 +1,89 @@
-import { VERSION } from '@paybox/shared';
+import { VERSION, type CoverageEntry, type CoverageManifest } from '@paybox/shared';
+import { PAYSTACK_COVERAGE } from '@paybox/paystack';
+import { STRIPE_COVERAGE } from '@paybox/stripe';
+import { FLUTTERWAVE_V3_COVERAGE, FLUTTERWAVE_V4_COVERAGE } from '@paybox/flutterwave';
+import { KORA_COVERAGE } from '@paybox/kora';
+import { WEWIRE_COVERAGE } from '@paybox/wewire';
+import { WISE_COVERAGE } from '@paybox/wise';
 import type { PayboxContext } from './context.js';
 
 /**
- * Hand-curated OpenAPI document (spec §44).
+ * The OpenAPI document behind /docs (spec §44).
  *
- * Written by hand rather than generated, because the provider routes must
- * describe *Paystack's* contract — the shape a developer's SDK expects — not
- * whatever internal schema our handler happens to use. A generated document
- * would drift toward describing the emulator instead of the API it emulates.
+ * Two sources, deliberately split. The **route list** is generated from the
+ * coverage manifests — the same declarations `tests/coverage-drift.test.ts`
+ * enforces against the router — so every route the emulator serves appears
+ * here and the list cannot drift. The **shapes** are hand-curated: an entry
+ * carries a request or response schema only where one has been transcribed
+ * from the provider's contract, because a schema generated from our handlers
+ * would describe the emulator instead of the API it emulates, and a guessed
+ * one would be worse. A generated entry names the docs/<provider>.md file
+ * that is authoritative instead of pretending.
  */
+const MANIFESTS: readonly CoverageManifest[] = [
+  PAYSTACK_COVERAGE,
+  STRIPE_COVERAGE,
+  FLUTTERWAVE_V3_COVERAGE,
+  FLUTTERWAVE_V4_COVERAGE,
+  KORA_COVERAGE,
+  WEWIRE_COVERAGE,
+  WISE_COVERAGE,
+];
+
+/** `/paystack` + `/transaction/verify/:reference` → `/paystack/transaction/verify/{reference}`. */
+function publicPath(manifest: CoverageManifest, entry: CoverageEntry): string {
+  return `${manifest.basePath}${entry.path}`.replace(/:([A-Za-z_][A-Za-z0-9_]*)/g, '{$1}');
+}
+
+function manifestOperation(manifest: CoverageManifest, entry: CoverageEntry): Record<string, unknown> {
+  const status =
+    entry.status === 'compatible'
+      ? `**Compatible** with ${manifest.label}'s documented behaviour, within what paybox models.`
+      : entry.status === 'partial'
+        ? '**Partial** — a documented limitation applies.'
+        : `**Emulator-only** — no ${manifest.label} counterpart exists; never treat this as provider surface.`;
+  const description = [
+    status,
+    entry.note,
+    `Shapes are not transcribed for this entry: the contract in ${manifest.docs} is ` +
+      `authoritative, and \`paybox coverage ${manifest.id}\` lists this adapter's routes.`,
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+  const parameters = [...publicPath(manifest, entry).matchAll(/\{([^}]+)\}/g)].map((match) => ({
+    name: match[1]!,
+    in: 'path',
+    required: true,
+    schema: { type: 'string' },
+  }));
+  return {
+    tags: [manifest.label],
+    description,
+    ...(parameters.length > 0 ? { parameters } : {}),
+    responses: { default: { description: `See ${manifest.docs}.` } },
+  };
+}
+
+/**
+ * The full path map: one generated entry per manifest route, with the
+ * hand-curated entries overriding method-by-method wherever a shape has
+ * actually been transcribed.
+ */
+function withManifestRoutes(
+  curated: Record<string, Record<string, unknown>>,
+): Record<string, Record<string, unknown>> {
+  const paths: Record<string, Record<string, unknown>> = {};
+  for (const manifest of MANIFESTS) {
+    for (const entry of manifest.entries) {
+      (paths[publicPath(manifest, entry)] ??= {})[entry.method.toLowerCase()] =
+        manifestOperation(manifest, entry);
+    }
+  }
+  for (const [path, operations] of Object.entries(curated)) {
+    paths[path] = { ...(paths[path] ?? {}), ...operations };
+  }
+  return paths;
+}
 export function buildOpenApiDocument(context: PayboxContext): Record<string, unknown> {
   const paystackEnvelope = {
     type: 'object',
@@ -29,8 +104,10 @@ export function buildOpenApiDocument(context: PayboxContext): Record<string, unk
       description:
         'Provider-compatible payment APIs served from localhost. No real money moves. ' +
         'Provider routes mirror the upstream contract; /api/* is the emulator control plane. ' +
-        'This document is a hand-curated sample, not the full surface: each adapter\'s ' +
-        'contract is docs/<provider>.md, and `paybox coverage` lists every route served.',
+        'Every route the emulator serves is listed here, generated from the coverage ' +
+        'manifests the test suite enforces against the router. Entries carry schemas only ' +
+        "where a shape has been hand-transcribed; each adapter's contract in " +
+        'docs/<provider>.md is the authoritative statement of behaviour.',
     },
     servers: [{ url: context.baseUrl }],
     components: {
@@ -43,12 +120,15 @@ export function buildOpenApiDocument(context: PayboxContext): Record<string, unk
       },
     },
     tags: [
-      { name: 'Paystack', description: 'Paystack-compatible endpoints' },
+      ...MANIFESTS.map((manifest) => ({
+        name: manifest.label,
+        description: `${manifest.label}-compatible endpoints — coverage contract: ${manifest.docs}`,
+      })),
       { name: 'Payments', description: 'Emulator control plane' },
       { name: 'Webhooks', description: 'Delivery inspection, retry and replay' },
       { name: 'Simulation', description: 'Time, network and scenario control' },
     ],
-    paths: {
+    paths: withManifestRoutes({
       '/paystack/transaction/initialize': {
         post: {
           tags: ['Paystack'],
@@ -258,6 +338,6 @@ export function buildOpenApiDocument(context: PayboxContext): Record<string, unk
       '/api/scenarios/run': {
         post: { tags: ['Simulation'], summary: 'Run a named scenario against a payment', responses: { 200: { description: 'Scenario run' } } },
       },
-    },
+    }),
   };
 }
