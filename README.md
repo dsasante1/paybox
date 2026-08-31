@@ -184,6 +184,7 @@ The ones most people need first:
 | [Troubleshooting](docs/troubleshooting.md) | Symptoms and what to do |
 | [Docker](docs/docker.md) | The published image, compose, CI services |
 | [Architecture](docs/architecture.md) | How it works and why it is built this way |
+| [Changelog](CHANGELOG.md) | What each published version shipped |
 | [Releasing](docs/releasing.md) | How a tag becomes an npm package and a container image |
 | [Security](SECURITY.md) | The safety guarantees and their limits |
 

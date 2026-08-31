@@ -25,6 +25,7 @@ change it instead, start with [CONTRIBUTING.md](../CONTRIBUTING.md) and
 | Run it as a container | [Docker](docker.md) |
 | Fix something that is not behaving | [Troubleshooting](troubleshooting.md) |
 | Understand why it is built the way it is | [Architecture](architecture.md) |
+| See what each published version shipped | [Changelog](../CHANGELOG.md) |
 | Cut a release, or understand what CI enforces | [Releasing](releasing.md) · [CI](ci.md) |
 | Know what is and is not safe | [SECURITY.md](../SECURITY.md) |
 | Decode a `spec §N` citation in the source | [Spec references](spec-references.md) |

@@ -8,9 +8,11 @@ A release is a tag. Everything after the tag is `.github/workflows/release.yml`.
 # 1. Bump the version. One field, one file.
 npm version 0.2.0 --workspace apps/paybox --no-git-tag-version
 
-# 2. Land it through a pull request like any other change: main is protected.
+# 2. Date CHANGELOG.md's Unreleased section as the new version.
 
-# 3. Tag the merged commit and push the tag.
+# 3. Land both through a pull request like any other change: main is protected.
+
+# 4. Tag the merged commit and push the tag.
 git checkout main && git pull
 git tag v0.2.0
 git push origin v0.2.0
