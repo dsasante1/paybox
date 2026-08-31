@@ -41,7 +41,7 @@ refused transition.
 ### `GET /api/health`
 
 ```json
-{ "status": "ok", "version": "0.1.2", "time": "2026-01-01T00:00:00.000Z",
+{ "status": "ok", "version": "0.2.0", "time": "2026-01-01T00:00:00.000Z",
   "clock": { "mode": "frozen", "now": 1767225600000, "offsetMs": -20000000 } }
 ```
 

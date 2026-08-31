@@ -48,7 +48,8 @@ Flutterwave ships two live APIs with different authentication, envelopes and
 webhook signatures, so paybox implements them as two adapters rather than one
 with a flag.
 
-The engine is provider-independent, and five adapters now sit on it. Anything a
+The engine is provider-independent, and seven adapters across six providers now
+sit on it. Anything a
 provider needs from the engine reaches it as an injected function — a status
 mapping, an instrument table, an authorization minter — never an import, so no
 adapter can see another and the engine sees none of them.

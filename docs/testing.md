@@ -142,7 +142,7 @@ For a runner without Node, or alongside a non-Node application:
 ```yaml
 services:
   paybox:
-    image: dsasante1/paybox:0.1
+    image: dsasante1/paybox:0.2
     env:
       PAYBOX_DATABASE: ":memory:"
       PAYBOX_FREEZE_CLOCK: "1"
