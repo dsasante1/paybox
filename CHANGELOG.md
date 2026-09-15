@@ -20,6 +20,16 @@ out with the next tag — see [docs/releasing.md](docs/releasing.md).
 - `PaymentMethod` gains **`cash`**. A payer handing notes to a teller against
   a deposit slip debits no account of theirs, so none of the existing members
   described it.
+- **Every list query now sorts on a second, unique column.** `created_at` is
+  not unique under a frozen clock — every row written in one operation shares a
+  timestamp to the millisecond — so twenty-eight queries were leaving SQLite
+  free to return tied rows in any order it liked. That broke determinism for
+  anything reading a list, and broke `LIMIT`/`OFFSET` paging outright once a
+  tie spanned a page boundary. Tiebreaker is `sequence` for `events`, `jobs`
+  and `balance_ledger`, `id` elsewhere.
+- **Wise's seeded profiles are ordered explicitly**, so `GET /v2/profiles`
+  answers the same way whether the pair was just created or read back from
+  storage. The two paths previously agreed only by coincidence.
 
 ## 0.2.1 — 2026-08-31
 

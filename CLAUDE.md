@@ -146,6 +146,7 @@ Nothing outside `core/src/time/`, `core/src/random.ts`, `shared/src/ids.ts`, and
 - `Storage.transaction()` is reentrant: nested calls join the outer transaction, because the engine composes operations that each open one and SQLite has no true nesting.
 - Repositories are plain objects closing over a Kysely handle, so identical code runs against a connection or a transaction.
 - `event_sequences` is bumped by an upsert-and-return in the same transaction as the append, keeping per-resource sequences gapless.
+- **Every list query sorts on a second, unique column.** `created_at` is not unique and cannot be: the clock is frozen in tests and under `PAYBOX_FREEZE_CLOCK`, so every row written in one operation shares a timestamp to the millisecond, and `ORDER BY created_at` alone lets SQLite return tied rows in any order it likes. That breaks determinism for anything that reads a list, and breaks `LIMIT`/`OFFSET` paging outright once a tie spans a page boundary. The tiebreaker is `sequence` for `events`, `jobs` and `balance_ledger` — the order rows were actually appended in — and `id` everywhere else. **A new list query needs one too.**
 - The custom dialect exists to avoid `better-sqlite3` — a native addon would break `npm install -g` on machines without a matching prebuild. `node:sqlite` is synchronous, so one connection serves everything and the driver serializes access with a queue.
 
 ### Fastify encapsulation
@@ -162,7 +163,7 @@ The engine only raises `PayboxError` with a code from the `ERROR_CODES` list. Ea
 
 ## Testing
 
-47 suites, 796 tests. The load-bearing one is in `tests/paystack-subscriptions.test.ts`: a monthly subscription plus a single `advance` must yield twelve invoices one calendar month apart, each payment stamped at its own period start. If that breaks, `VirtualClock#at` has broken.
+48 suites, 802 tests. The load-bearing one is in `tests/paystack-subscriptions.test.ts`: a monthly subscription plus a single `advance` must yield twelve invoices one calendar month apart, each payment stamped at its own period start. If that breaks, `VirtualClock#at` has broken.
 
 `tests/helpers.ts` exposes `createHarness()` — in-memory SQLite, clock frozen at a fixed instant, fixed seed. Assertions can therefore be exact (literal ids, exact timestamps, gapless sequence numbers) rather than approximate. Prefer it over ad-hoc setup.
 
