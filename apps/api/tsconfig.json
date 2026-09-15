@@ -36,6 +36,9 @@
       "path": "../../packages/providers/kora"
     },
     {
+      "path": "../../packages/providers/quiddpay"
+    },
+    {
       "path": "../../packages/providers/wewire"
     },
     {

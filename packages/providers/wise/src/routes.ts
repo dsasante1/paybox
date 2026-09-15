@@ -129,11 +129,29 @@ export const wisePlugin: FastifyPluginAsync<WisePluginOptions> = async (fastify,
    * to one — so an emulator with no profiles would strand a developer at step
    * one. Creating them lazily keeps `paybox reset` meaningful: reset really
    * does empty everything, and the next request rebuilds the two.
+   *
+   * **Ordered explicitly, and that is load-bearing.** The call that creates
+   * the pair returns it in creation order, while every later call reads it
+   * back from storage — and `subaccounts.list` orders by `created_at DESC`,
+   * which under a frozen clock is a tie between two rows stamped the same
+   * millisecond. SQLite is free to break that tie however it likes, and in
+   * practice it breaks it by the primary key, so the order flipped whenever
+   * the seeded id stream shifted: the two paths disagreed and `GET /profiles`
+   * returned a different order on the second call than the first.
+   *
+   * Sorting on `wise_type` makes both paths agree by construction, with no
+   * dependence on ids, timestamps or the query planner. PERSONAL first,
+   * because that is the order Wise's own profile list uses.
    */
+  const PROFILE_ORDER = ['PERSONAL', 'BUSINESS'];
+  const byProfileType = (a: Subaccount, b: Subaccount): number =>
+    PROFILE_ORDER.indexOf(String(a.metadata.wise_type)) -
+    PROFILE_ORDER.indexOf(String(b.metadata.wise_type));
+
   async function profiles(): Promise<Subaccount[]> {
     const { items } = await storage.subaccounts.list({ provider: PROVIDER, limit: 100 });
     const existing = items.filter((item) => item.metadata.wise_type !== undefined);
-    if (existing.length > 0) return existing;
+    if (existing.length > 0) return existing.sort(byProfileType);
 
     const personal = await engine.createSubaccount({
       provider: PROVIDER,
@@ -155,7 +173,7 @@ export const wisePlugin: FastifyPluginAsync<WisePluginOptions> = async (fastify,
       countryCode: 'GB',
       metadata: { wise_type: 'BUSINESS', company_type: 'LIMITED' },
     });
-    return [personal, business];
+    return [personal, business].sort(byProfileType);
   }
 
   async function requireProfile(handle: number | string): Promise<Subaccount> {

@@ -4,6 +4,7 @@ import scalarApiReference from '@scalar/fastify-api-reference';
 import { stripePlugin } from '@paybox/stripe';
 import { flutterwavePlugin, flutterwaveV4Plugin } from '@paybox/flutterwave';
 import { koraPlugin } from '@paybox/kora';
+import { quiddpayPlugin } from '@paybox/quiddpay';
 import { wewirePlugin } from '@paybox/wewire';
 import { wisePlugin } from '@paybox/wise';
 import { paystackPlugin, fail } from '@paybox/paystack';
@@ -265,6 +266,46 @@ export async function buildApp(context: PayboxContext): Promise<FastifyInstance>
         });
       },
       { prefix: '/kora' },
+    );
+  }
+
+  if (context.config.providers.quiddpay?.enabled !== false) {
+    await app.register(
+      async (scope) => {
+        await scope.register(networkPlugin, {
+          simulator: context.network,
+          // Quid's coded envelope. `error.code` is the field its documentation
+          // tells clients to branch on, and `RATE_LIMITED` and
+          // `PROVIDER_RAIL_UNAVAILABLE` are both members of the published
+          // `MerchantErrorCode` list — so a simulated outage stays inside the
+          // contract rather than inventing a code beside it.
+          errorBody: (status) => ({
+            error: {
+              code: status === 429 ? 'RATE_LIMITED' : 'PROVIDER_RAIL_UNAVAILABLE',
+              message:
+                status === 429
+                  ? 'Too many requests'
+                  : 'The provider is temporarily unavailable (simulated by paybox).',
+            },
+          }),
+        });
+        await scope.register(idempotencyPlugin, {
+          storage: context.storage,
+          clock: context.clock,
+          provider: 'quiddpay',
+        });
+        await scope.register(quiddpayPlugin, {
+          engine: context.engine,
+          simulator: context.simulator,
+          storage: context.storage,
+          clock: context.clock,
+          ids: context.ids,
+          baseUrl: context.baseUrl,
+          basePath: '/quiddpay',
+          allowAnyKey: context.config.security.allowAnyKey,
+        });
+      },
+      { prefix: '/quiddpay' },
     );
   }
 

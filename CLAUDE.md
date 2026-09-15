@@ -16,9 +16,9 @@ All packages are implemented and the vertical slice runs end to end: `shared`, `
 
 **The published artifact is `paybox-emulator` on npm** (`npx paybox-emulator start`; the installed command is `paybox`) **and `dsasante1/paybox` on Docker Hub** (also pushed to `ghcr.io/dsasante1/paybox`, but Docker Hub is the address the docs use). The workspace packages export TypeScript source and are private, so none of them is installable on its own; `apps/paybox` is the one package that ships. `scripts/build.mjs` bundles the `@paybox/*` code into `apps/paybox/dist/paybox.js` and leaves third-party packages as ordinary dependencies — then fails if `apps/paybox/package.json` and the bundle's actual imports disagree in either direction. `apps/paybox/bin/paybox.js` is the launcher: it refuses Node < 22.5 with a readable message and keeps `node:sqlite`'s ExperimentalWarning off stderr on Node 22. `scripts/smoke-package.mjs` installs the packed tarball into an empty directory and runs it; CI runs both. A `v*` tag runs `.github/workflows/release.yml`; `docs/releasing.md` has the one-time setup. (`paybox` itself on npm is an unrelated 2013 client for the French Paybox gateway, hence the name.)
 
-**All four providers are implemented**, each partially: Paystack, Stripe, Flutterwave and Kora. Flutterwave ships two live APIs — v3 (`FLWSECK_TEST-` keys, `{status:"success",…}`) and v4 (OAuth2, `{status:"failed", error:{…}}`) — with different authentication, envelopes and webhook signatures, so they are **two adapters** at `/flutterwave/v3` and `/flutterwave/v4` rather than one with a flag.
+**All seven providers are implemented**, each partially: Paystack, Stripe, Flutterwave, Kora, Quid Payments, WeWire and Wise. Flutterwave ships two live APIs — v3 (`FLWSECK_TEST-` keys, `{status:"success",…}`) and v4 (OAuth2, `{status:"failed", error:{…}}`) — with different authentication, envelopes and webhook signatures, so they are **two adapters** at `/flutterwave/v3` and `/flutterwave/v4` rather than one with a flag.
 
-Coverage for each is documented honestly in `docs/paystack.md`, `docs/stripe.md`, `docs/flutterwave.md`, `docs/kora.md`, `docs/wewire.md` and `docs/wise.md` — those files are contracts, not marketing. If something is missing from one, assume it is not implemented.
+Coverage for each is documented honestly in `docs/paystack.md`, `docs/stripe.md`, `docs/flutterwave.md`, `docs/kora.md`, `docs/quiddpay.md`, `docs/wewire.md` and `docs/wise.md` — those files are contracts, not marketing. If something is missing from one, assume it is not implemented.
 
 **The contract is enforced, not just written.** Each adapter declares what it serves in a `coverage.ts` manifest, and `tests/coverage-drift.test.ts` fails if the manifest and the router disagree in either direction, or if an entry has nothing in the provider's docs file. The README's endpoint table is generated from the same manifests (`npm run coverage:table`) and a test fails if it is stale, so the counts on the repo's front page cannot overstate what the emulator serves. `paybox coverage` prints the same figures; `paybox coverage <provider>` breaks one down.
 
@@ -51,6 +51,11 @@ Provider-specific facts worth knowing before touching an adapter:
 - **Wise signs webhooks with RSA, not HMAC** -- the only asymmetric scheme here. It holds a private key and publishes the public one, so a subscriber verifies without holding any secret. paybox's keypair is embedded in `providers/wise/src/signature.ts`, **private key included and deliberately so**: it is published, proves nothing, and exists only so a developer's verifier can be exercised. It is embedded rather than generated because `generateKeyPairSync` cannot be seeded.
 - **Wise's flow is the strictest here**: profile → quote → recipient → transfer → fund. A transfer needs a quote, a quote is single-use and expires in 30 minutes, and creating a transfer reserves nothing -- a separate funding call debits the balance. A funding *rejection* is a `201` with `status: REJECTED`, not an HTTP error.
 - **Wise ships its own sandbox simulation endpoints** (`GET /simulation/transfers/{id}/{status}`, `POST /simulation/balance/topup`), which is the same idea as `paybox simulate`. They are implemented as published, so an existing Wise sandbox script drives the emulator unchanged -- and Wise needs no emulator-only funding endpoint, unlike WeWire.
+- **Quid Payments is a hosted-checkout product, and the adapter serves both halves.** Its guide says a merchant backend "does not start payment-method calls": you create a session, redirect to `checkout_url`, and wait. So `/quiddpay/api/v1/checkout/**` is **unauthenticated** — a payer's browser holds no API key — and answers with a narrower view of the session than the merchant endpoints do. The emulator's own hosted page drives those same public endpoints rather than a second implementation beside them.
+- **A Quid session is not a charge.** It is an invitation to pay, and an *attempt* is the thing on a rail; a payer can fail a mobile-money prompt and then pay by bank transfer against the same invoice. Attempts live in `storage.providerState` (the seam Wise added), never as an engine resource. `open` vs `pending` is load-bearing and deliberately preserved: `open` means payable and untried, `pending` means an attempt is in flight.
+- **Quid has no card rail at all**, and says so ("Merchants must not submit card data"), so the adapter has no card schema and no field that could carry a PAN. Mobile-money outcomes are selected by the **phone number**; the PIN only proves the payer is present.
+- **Quid ships its own test endpoint** (`POST /api/v1/test/payment-attempts/{ref}/simulate`), the same idea as `paybox simulate` and Wise's simulation routes. It is the only way to settle a bank transfer or a cash deposit locally — there is no teller. Three of its eight outcomes (`pending`, `manual_review`, `amount_mismatch`) deliberately do **not** finalise the session, so no `checkout.session.*` webhook follows them.
+- **Quid sends only *final* checkout events** (`completed`/`failed`/`expired`) but the *whole* payout lifecycle (all six `payout.*`). That asymmetry is the provider's, and is preserved. `test.payment.*` events fan out beside the checkout event, gated on a metadata marker so an ordinary checkout does not double-fire.
 - **Wise's `reference` is statement text, not an identifier.** Two payouts to the same vendor routinely share one, so the adapter stores `customerTransactionId` (unique by contract) as paybox's `Transfer.reference` and keeps the display reference on metadata.
 - **WeWire is FX-centric, and the "no FX conversion" invariant still holds.** The rate lives in `providers/wewire/src/rates.ts` — a fixed table, because a moving rate would break determinism — and a cross-currency payout is stored as integer minor units in the source currency with the destination amount and rate as metadata. The adapter quotes; core only records what was quoted, and `getBalance` still folds per currency.
 
@@ -79,7 +84,7 @@ Dependency direction is strict and one-way:
 ```
 shared ──> core ──> (storage, webhooks, simulator) ──> providers/* ──> apps/api ──> apps/cli
 
-providers/ now holds six packages and seven adapters (Flutterwave serves two
+providers/ now holds seven packages and eight adapters (Flutterwave serves two
 API versions). Anything a provider needs from core reaches it as an injected
 function -- ProviderStatusResolver, AuthorizationMinter, InstrumentResolver,
 SetupAuthorizationMinter -- never an import. Adding Stripe was the first test
@@ -141,6 +146,7 @@ Nothing outside `core/src/time/`, `core/src/random.ts`, `shared/src/ids.ts`, and
 - `Storage.transaction()` is reentrant: nested calls join the outer transaction, because the engine composes operations that each open one and SQLite has no true nesting.
 - Repositories are plain objects closing over a Kysely handle, so identical code runs against a connection or a transaction.
 - `event_sequences` is bumped by an upsert-and-return in the same transaction as the append, keeping per-resource sequences gapless.
+- **Every list query sorts on a second, unique column.** `created_at` is not unique and cannot be: the clock is frozen in tests and under `PAYBOX_FREEZE_CLOCK`, so every row written in one operation shares a timestamp to the millisecond, and `ORDER BY created_at` alone lets SQLite return tied rows in any order it likes. That breaks determinism for anything that reads a list, and breaks `LIMIT`/`OFFSET` paging outright once a tie spans a page boundary. The tiebreaker is `sequence` for `events`, `jobs` and `balance_ledger` — the order rows were actually appended in — and `id` everywhere else. **A new list query needs one too.**
 - The custom dialect exists to avoid `better-sqlite3` — a native addon would break `npm install -g` on machines without a matching prebuild. `node:sqlite` is synchronous, so one connection serves everything and the driver serializes access with a queue.
 
 ### Fastify encapsulation
@@ -157,7 +163,7 @@ The engine only raises `PayboxError` with a code from the `ERROR_CODES` list. Ea
 
 ## Testing
 
-40 suites, 706 tests. The load-bearing one is in `tests/paystack-subscriptions.test.ts`: a monthly subscription plus a single `advance` must yield twelve invoices one calendar month apart, each payment stamped at its own period start. If that breaks, `VirtualClock#at` has broken.
+48 suites, 802 tests. The load-bearing one is in `tests/paystack-subscriptions.test.ts`: a monthly subscription plus a single `advance` must yield twelve invoices one calendar month apart, each payment stamped at its own period start. If that breaks, `VirtualClock#at` has broken.
 
 `tests/helpers.ts` exposes `createHarness()` — in-memory SQLite, clock frozen at a fixed instant, fixed seed. Assertions can therefore be exact (literal ids, exact timestamps, gapless sequence numbers) rather than approximate. Prefer it over ad-hoc setup.
 

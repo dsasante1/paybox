@@ -77,6 +77,7 @@ const DEFAULTS: PayboxConfig = {
     stripe: { enabled: true },
     flutterwave: { enabled: true },
     kora: { enabled: true },
+    quiddpay: { enabled: true },
     wewire: { enabled: true },
     wise: { enabled: true },
   },

@@ -22,6 +22,7 @@ The pattern is the same everywhere:
 | Flutterwave v3 | `http://127.0.0.1:8080/flutterwave` | `FLWSECK_TEST-…` (+ 24-char encryption key) | `Authorization: Bearer` |
 | Flutterwave v4 | `http://127.0.0.1:8080/flutterwave/v4` | `flw-test-local-…` / `flwsec-test-local-…` | OAuth2 client credentials → `Bearer <token>` |
 | Kora | `http://127.0.0.1:8080/kora` | `sk_test_local_…` | `Authorization: Bearer` |
+| Quid Payments | `http://127.0.0.1:8080/quiddpay` | `ak_test_local_…` | `Authorization: Bearer` |
 | WeWire | `http://127.0.0.1:8080/wewire` | `sk_test_local_…` | `ww-api-key: <key>` — no Bearer |
 | Wise | `http://127.0.0.1:8080/wise` | `wise_test_local_…` | `Authorization: Bearer` |
 
@@ -35,13 +36,13 @@ Credentials are regenerated from the seed on every start; with a fixed
   JWT-shaped (three base64url segments). The message tells you to rotate it.
 - **A key of the wrong shape — HTTP 401** unless `PAYBOX_ALLOW_ANY_KEY=1`.
   Nothing checks *which* test key you send: any `sk_test_…` works for
-  Paystack, Kora and WeWire.
+  Paystack, Kora and WeWire, and any `ak_test_…` for Quid Payments.
 - **A wrong header.** WeWire with `Authorization: Bearer` fails, because that
   is what WeWire does.
 
 ## Idempotency
 
-Paystack, Stripe, Flutterwave (v3 and v4) and Kora honour an
+Paystack, Stripe, Flutterwave (v3 and v4), Kora and Quid Payments honour an
 **`Idempotency-Key`** request header on every non-GET route:
 
 | Same key + … | Result |
@@ -70,6 +71,7 @@ body sees exactly what its provider would send:
 | Flutterwave v3 | `{ "status": "error", "message": "…", "data": null }` |
 | Flutterwave v4 | `{ "status": "failed", "error": { "type": "SERVER_ERROR", "code": "10500", "message": "…" } }` |
 | Kora | `{ "status": false, "message": "…", "data": null }` |
+| Quid Payments | `{ "error": { "code": "PROVIDER_RAIL_UNAVAILABLE", "message": "…" } }` (429: `RATE_LIMITED`) |
 | WeWire | `{ "success": false, "error": { "code": "INTEGRATION_UNAVAILABLE", "message": "…", "statusCode": 500 } }` |
 | Wise | `{ "timestamp": "…", "errors": [ { "code": "unexpected.error", "message": "…" } ] }` |
 
@@ -280,6 +282,48 @@ Events: `charge.success`, `charge.failed`, `charge.expired`, `refund.success`,
 `refund.failed`, `transfer.success`, `transfer.failed`, `transfer.reversed`.
 Contract: [kora.md](kora.md).
 
+## Quid Payments
+
+```env
+QUIDDPAY_BASE_URL=http://127.0.0.1:8080/quiddpay       # then /api/v1/…
+QUIDDPAY_API_KEY=ak_test_local_…
+```
+
+```bash
+curl -X POST $QUIDDPAY_BASE_URL/api/v1/sessions \
+  -H "Authorization: Bearer $QUIDDPAY_API_KEY" -H 'content-type: application/json' \
+  -d '{"invoice_ref":"INV-2026-001","amount_minor":307038,"currency":"GHS",
+       "customer":{"name":"Ama Mensah","email":"ama@example.com"}}'
+```
+
+Minor units on the wire (`amount_minor`, in pesewas) and **GHS only**. Quid is
+a hosted-checkout product: you create a session, send the payer to
+`checkout_url`, and wait for a webhook — its guide says a merchant backend
+"does not start payment-method calls" at all. The emulator serves the public
+checkout API too, so the whole flow runs locally.
+
+**There are no card payments**, because Quid has none. A payer picks one of
+three rails — `momo`, `bank_transfer`, `cash` — and the outcome of a
+mobile-money attempt is selected by the **phone number**, not the PIN. Bank
+transfers and cash slips stay pending until they are settled through Quid's own
+test endpoint, `POST /api/v1/test/payment-attempts/{ref}/simulate`.
+
+**Webhook** — three headers. The signature covers `<t>.<raw body>`, keyed with
+the endpoint's signing secret, with a 300-second tolerance:
+
+```js
+const [, t, v1] = /t=(\d+),v1=([0-9a-f]+)/.exec(headers['x-payment-platform-signature']);
+const expected = createHmac('sha256', signingSecret).update(`${t}.${rawBody}`).digest('hex');
+```
+
+Read the **raw** body, not a re-serialised object, and deduplicate on
+`x-payment-platform-event-id` — it is stable across retries, and every retry
+carries a fresh timestamp and signature.
+
+Events: `checkout.session.completed`, `.failed`, `.expired`; the six
+`payout.*`; and `test.payment.*` for outcomes driven through the test endpoint.
+Contract: [quiddpay.md](quiddpay.md).
+
 ## WeWire
 
 ```env
@@ -372,7 +416,8 @@ SDK's own documentation; confirm against the version you run.
 
 **1. Base URL from configuration.** Most integrations build requests against
 an env var or a constant. Change it; done. This covers every hand-rolled
-client and the Paystack, Flutterwave, Kora, WeWire and Wise examples above.
+client and the Paystack, Flutterwave, Kora, Quid Payments, WeWire and Wise
+examples above.
 
 **2. An SDK setting that accepts a path.** Stripe's server SDKs expose one:
 

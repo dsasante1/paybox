@@ -193,6 +193,21 @@ describe('profiles', () => {
       second.json().map((p: { id: number }) => p.id),
     );
   });
+
+  it('orders them the same way whichever path built the list', async () => {
+    // The first call creates the pair and returns it directly; every later one
+    // reads it back from storage, where `created_at DESC` is a tie under a
+    // frozen clock and SQLite breaks it by primary key. Without an explicit
+    // order the two paths disagreed as soon as the seeded id stream shifted --
+    // so this pins the order itself, not merely that it is self-consistent.
+    const created = await get('/v2/profiles');
+    const read = await get('/v2/profiles');
+    expect(created.json().map((p: { type: string }) => p.type)).toEqual([
+      'PERSONAL',
+      'BUSINESS',
+    ]);
+    expect(read.json().map((p: { type: string }) => p.type)).toEqual(['PERSONAL', 'BUSINESS']);
+  });
 });
 
 describe('rates', () => {

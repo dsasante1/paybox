@@ -52,6 +52,30 @@ function page(options?: ListOptions): { limit: number; offset: number } {
   };
 }
 
+/**
+ * Every list query sorts on a second, unique column.
+ *
+ * `created_at` is not unique here and cannot be: the clock is usually frozen
+ * in tests and always frozen under `PAYBOX_FREEZE_CLOCK`, so every row written
+ * in one operation shares a timestamp to the millisecond. `ORDER BY created_at`
+ * alone therefore leaves SQLite free to return tied rows in any order it
+ * likes, and it is under no obligation to pick the same one twice.
+ *
+ * That costs two things the project promises:
+ *
+ *   determinism  "the same inputs plus the same seed produce byte-identical
+ *                output" stops being true for anything that reads a list.
+ *   paging       `LIMIT`/`OFFSET` over an unstable sort can show one row on
+ *                two pages and another on none -- a plain correctness bug,
+ *                and one that only appears once a tie spans a page boundary.
+ *
+ * The tiebreaker is `sequence` for the three tables that have one -- `events`,
+ * `jobs` and `balance_ledger` -- because it is the order rows were actually
+ * appended in. Everywhere else it is `id`, which is arbitrary but unique, and
+ * arbitrary-but-stable is what a tiebreaker needs to be: it decides ties
+ * consistently without claiming to mean anything.
+ */
+
 function notFound(kind: string, id: string): never {
   throw new PayboxError('not_found', `No ${kind} with id ${id}.`, { details: { id } });
 }
@@ -300,6 +324,7 @@ class SqliteStorage implements Storage {
         .selectAll()
         .where('payment_id', '=', paymentId)
         .orderBy('created_at', 'asc')
+        .orderBy('id', 'asc')
         .execute();
       return rows.map(map.toRefund);
     },
@@ -307,7 +332,12 @@ class SqliteStorage implements Storage {
       const { limit, offset } = page(filter);
       let query = this.#db.selectFrom('refunds').selectAll();
       if (filter?.status) query = query.where('status', '=', filter.status);
-      const rows = await query.orderBy('created_at', 'desc').limit(limit).offset(offset).execute();
+      const rows = await query
+        .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
+        .limit(limit)
+        .offset(offset)
+        .execute();
       const total = await this.#db
         .selectFrom('refunds')
         .select(({ fn }) => fn.countAll<number>().as('total'))
@@ -375,7 +405,12 @@ class SqliteStorage implements Storage {
       const { limit, offset } = page(filter);
       let query = this.#db.selectFrom('transfers').selectAll();
       if (filter?.status) query = query.where('status', '=', filter.status);
-      const rows = await query.orderBy('created_at', 'desc').limit(limit).offset(offset).execute();
+      const rows = await query
+        .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
+        .limit(limit)
+        .offset(offset)
+        .execute();
       const total = await this.#db
         .selectFrom('transfers')
         .select(({ fn }) => fn.countAll<number>().as('total'))
@@ -460,6 +495,7 @@ class SqliteStorage implements Storage {
       }
       const rows = await query
         .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
         .limit(limit)
         .offset(offset)
         .execute();
@@ -510,6 +546,7 @@ class SqliteStorage implements Storage {
         .where('signature', '=', signature)
         .where('customer_id', '=', customerId)
         .orderBy('created_at', 'asc')
+        .orderBy('id', 'asc')
         .executeTakeFirst();
       return row ? map.toAuthorization(row) : null;
     },
@@ -563,6 +600,7 @@ class SqliteStorage implements Storage {
       }
       const rows = await query
         .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
         .limit(limit)
         .offset(offset)
         .execute();
@@ -611,6 +649,7 @@ class SqliteStorage implements Storage {
         .selectAll()
         .where('customer_id', '=', customerId)
         .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
         .executeTakeFirst();
       return row ? map.toDedicatedAccount(row) : null;
     },
@@ -642,6 +681,7 @@ class SqliteStorage implements Storage {
       }
       const rows = await query
         .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
         .limit(limit)
         .offset(offset)
         .execute();
@@ -721,6 +761,7 @@ class SqliteStorage implements Storage {
       }
       const rows = await query
         .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
         .limit(limit)
         .offset(offset)
         .execute();
@@ -775,6 +816,7 @@ class SqliteStorage implements Storage {
       }
       const rows = await query
         .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
         .limit(limit)
         .offset(offset)
         .execute();
@@ -827,6 +869,7 @@ class SqliteStorage implements Storage {
       }
       const rows = await query
         .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
         .limit(limit)
         .offset(offset)
         .execute();
@@ -878,6 +921,7 @@ class SqliteStorage implements Storage {
         .selectAll()
         .where('customer_id', '=', customerId)
         .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
         .execute();
       return rows.map(map.toSubscription);
     },
@@ -897,6 +941,7 @@ class SqliteStorage implements Storage {
       }
       const rows = await query
         .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
         .limit(limit)
         .offset(offset)
         .execute();
@@ -936,6 +981,7 @@ class SqliteStorage implements Storage {
         .selectAll()
         .where('subscription_id', '=', subscriptionId)
         .orderBy('position', 'asc')
+        .orderBy('id', 'asc')
         .execute();
       return rows.map(map.toSubscriptionItem);
     },
@@ -947,6 +993,7 @@ class SqliteStorage implements Storage {
         .selectAll()
         .where('subscription_id', 'in', [...ids])
         .orderBy('position', 'asc')
+        .orderBy('id', 'asc')
         .execute();
       for (const row of rows) {
         const item = map.toSubscriptionItem(row);
@@ -1052,6 +1099,7 @@ class SqliteStorage implements Storage {
       }
       const rows = await query
         .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
         .limit(limit)
         .offset(offset)
         .execute();
@@ -1095,6 +1143,7 @@ class SqliteStorage implements Storage {
         .selectAll()
         .where('invoice_id', '=', invoiceId)
         .orderBy('position', 'asc')
+        .orderBy('id', 'asc')
         .execute();
       return rows.map(map.toInvoiceItem);
     },
@@ -1106,6 +1155,7 @@ class SqliteStorage implements Storage {
         .selectAll()
         .where('invoice_id', 'in', [...invoiceIds])
         .orderBy('position', 'asc')
+        .orderBy('id', 'asc')
         .execute();
       for (const row of rows) {
         const item = map.toInvoiceItem(row);
@@ -1135,7 +1185,7 @@ class SqliteStorage implements Storage {
           ]),
         );
       }
-      const rows = await query.orderBy('position', 'asc').execute();
+      const rows = await query.orderBy('position', 'asc').orderBy('id', 'asc').execute();
       return rows.map(map.toInvoiceItem);
     },
     update: async (id, patch) => {
@@ -1183,6 +1233,7 @@ class SqliteStorage implements Storage {
       }
       const rows = await query
         .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
         .limit(limit)
         .offset(offset)
         .execute();
@@ -1237,6 +1288,7 @@ class SqliteStorage implements Storage {
       }
       const rows = await query
         .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
         .limit(limit)
         .offset(offset)
         .execute();
@@ -1333,6 +1385,7 @@ class SqliteStorage implements Storage {
       }
       const rows = await query
         .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
         .limit(limit)
         .offset(offset)
         .execute();
@@ -1481,6 +1534,7 @@ class SqliteStorage implements Storage {
         .selectAll()
         .where('payment_id', '=', paymentId)
         .orderBy('created_at', 'asc')
+        .orderBy('id', 'asc')
         .execute();
       return rows.map(map.toDispute);
     },
@@ -1512,6 +1566,7 @@ class SqliteStorage implements Storage {
       }
       const rows = await query
         .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
         .limit(limit)
         .offset(offset)
         .execute();
@@ -1562,6 +1617,7 @@ class SqliteStorage implements Storage {
         .selectFrom('transfer_recipients')
         .selectAll()
         .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
         .limit(limit)
         .offset(offset)
         .execute();
@@ -1703,6 +1759,7 @@ class SqliteStorage implements Storage {
         .selectFrom('webhook_endpoints')
         .selectAll()
         .orderBy('created_at', 'asc')
+        .orderBy('id', 'asc')
         .execute();
       return rows.map(map.toEndpoint);
     },
@@ -1750,6 +1807,7 @@ class SqliteStorage implements Storage {
       }
       const rows = await query
         .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
         .limit(limit)
         .offset(offset)
         .execute();
@@ -1877,7 +1935,12 @@ class SqliteStorage implements Storage {
       const { limit, offset } = page(filter);
       let query = this.#db.selectFrom('jobs').selectAll();
       if (filter?.status) query = query.where('status', '=', filter.status);
-      const rows = await query.orderBy('run_at', 'asc').limit(limit).offset(offset).execute();
+      const rows = await query
+        .orderBy('run_at', 'asc')
+        .orderBy('sequence', 'asc')
+        .limit(limit)
+        .offset(offset)
+        .execute();
       const total = await this.#db
         .selectFrom('jobs')
         .select(({ fn }) => fn.countAll<number>().as('total'))
