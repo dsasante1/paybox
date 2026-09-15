@@ -50,6 +50,7 @@ import {
   generateV4Credentials,
 } from '@paybox/flutterwave';
 import { KoraWebhookFormatter, generateKoraKeys } from '@paybox/kora';
+import { QuiddpayWebhookFormatter, generateQuiddpayKeys } from '@paybox/quiddpay';
 import { WewireWebhookFormatter, generateWewireKeys } from '@paybox/wewire';
 import { WiseWebhookFormatter, generateWiseKeys } from '@paybox/wise';
 import type { PayboxConfig } from './config.js';
@@ -83,6 +84,11 @@ export interface PayboxContext {
   flutterwaveV4: { clientId: string; clientSecret: string };
   /** Kora's secret key doubles as the card-payload encryption key. */
   koraKeys: { secretKey: string; publicKey: string };
+  /**
+   * Quid Payments separates the two: the merchant API key authenticates
+   * requests, and a distinct per-endpoint secret signs webhooks.
+   */
+  quiddpayKeys: { apiKey: string; signingSecret: string };
   /** WeWire has one key, sent verbatim in `ww-api-key`. */
   wewireKeys: { secretKey: string };
   /** Wise uses a bearer token; its webhooks are RSA-signed, not shared-secret. */
@@ -212,6 +218,7 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
   dispatcher.register(new StripeWebhookFormatter({ basePath: '/stripe' }));
   dispatcher.register(new FlutterwaveWebhookFormatter({ version: 'v3' }));
   dispatcher.register(new KoraWebhookFormatter());
+  dispatcher.register(new QuiddpayWebhookFormatter());
   dispatcher.register(new WewireWebhookFormatter());
   dispatcher.register(new WiseWebhookFormatter());
   dispatcher.attachTo(bus);
@@ -338,6 +345,7 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
   const stripeKeys = generateStripeKeys(ids.token(20));
   const flutterwaveKeys = generateFlutterwaveKeys(ids.token(20));
   const koraKeys = generateKoraKeys(ids.token(20));
+  const quiddpayKeys = generateQuiddpayKeys(ids.token(20));
   const wewireKeys = generateWewireKeys(ids.token(20));
   const wiseKeys = generateWiseKeys(ids.token(20));
   const flutterwaveV4 = generateV4Credentials(ids.token(20));
@@ -362,6 +370,7 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
     flutterwaveKeys,
     flutterwaveV4,
     koraKeys,
+    quiddpayKeys,
     wewireKeys,
     wiseKeys,
     baseUrl,

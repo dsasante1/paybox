@@ -100,6 +100,7 @@ export const controlApiPlugin: FastifyPluginAsync<{ context: PayboxContext }> = 
       keys: { ...context.flutterwaveKeys, v4: { ...context.flutterwaveV4 } },
     },
     kora: { status: 'partial', keys: context.koraKeys },
+    quiddpay: { status: 'partial', keys: context.quiddpayKeys },
     wewire: { status: 'partial', keys: context.wewireKeys },
     wise: { status: 'partial', keys: context.wiseKeys },
   };
@@ -689,6 +690,10 @@ export const controlApiPlugin: FastifyPluginAsync<{ context: PayboxContext }> = 
         return context.flutterwaveKeys.secretKey;
       case 'kora':
         return context.koraKeys.secretKey;
+      case 'quiddpay':
+        // Quid signs with a per-endpoint secret issued in its dashboard, not
+        // with the merchant API key — so the default is the signing secret.
+        return context.quiddpayKeys.signingSecret;
       case 'wewire':
         return generateWewireWebhookSecret(context.ids.token(24));
       case 'wise':

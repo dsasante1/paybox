@@ -27,7 +27,8 @@ outcome by hand.
 
 ## The generic convention
 
-Works for every provider that has no published table (Kora), and alongside
+Works for every provider that has no published table (Kora, Quid Payments),
+and alongside
 the published tables everywhere else.
 
 | Last four | Outcome | What happens |
@@ -173,6 +174,32 @@ Kora's own sandbox endpoints are implemented as published:
 `POST /virtual-bank-account/sandbox/credit` pays into a virtual account. Card
 payloads may be AES-256-GCM encrypted in `charge_data` under the secret key,
 or sent plain.
+
+## Quid Payments
+
+There are **no cards**: Quid accepts none, so the outcome of a mobile-money
+attempt is selected by the **phone number** instead, using the generic
+convention — `0550000000` succeeds, `0550000001` declines, `0550000002` has
+insufficient funds. Quid publishes no magic test values, so none was invented.
+
+The **PIN is not** what decides the outcome. `POST …/authorize` takes a
+4-to-8-character code that proves the payer is present; the wallet decides
+whether the money moves. That split is the same one an OTP has on a card.
+
+Bank transfers and cash deposits have no instrument at all — nobody is holding
+a number — so they are settled through Quid's own published test endpoint:
+
+```bash
+curl -X POST "$QUIDDPAY_BASE_URL/api/v1/test/payment-attempts/$ATTEMPT/simulate" \
+  -H "Authorization: Bearer $QUIDDPAY_API_KEY" -H 'content-type: application/json' \
+  -d '{"outcome":"paid"}'
+```
+
+All eight published outcomes are honoured: `paid`, `failed`, `expired`,
+`cancelled` and `reversed` finalise the session; `pending`, `manual_review`
+and `amount_mismatch` move the attempt and deliberately leave the session
+payable, because none of them is a decision. See
+[quiddpay.md](quiddpay.md) for what each one settles to.
 
 ## WeWire
 

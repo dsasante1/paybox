@@ -190,8 +190,21 @@ export const PAYMENT_METHODS = [
   'ussd',
   'eft',
   'qr',
+  // A payer hands cash to a teller against a deposit slip, and the merchant is
+  // credited when the branch confirms it. Not a rail any card processor has,
+  // but a first-class one where Quid Payments operates -- and unrepresentable
+  // as any of the above, since no account of the payer's is ever debited.
+  'cash',
 ] as const;
 export type PaymentMethod = (typeof PAYMENT_METHODS)[number];
 
-export const PROVIDERS = ['paystack', 'stripe', 'flutterwave', 'kora', 'wewire', 'wise'] as const;
+export const PROVIDERS = [
+  'paystack',
+  'stripe',
+  'flutterwave',
+  'kora',
+  'quiddpay',
+  'wewire',
+  'wise',
+] as const;
 export type ProviderId = (typeof PROVIDERS)[number];

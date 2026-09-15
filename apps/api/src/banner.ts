@@ -22,6 +22,7 @@ export function printBanner(options: {
     flutterwaveV4,
     koraKeys,
     wewireKeys,
+    quiddpayKeys,
     wiseKeys,
   } = context;
   const out = (line = '') => process.stdout.write(`${line}\n`);
@@ -40,6 +41,7 @@ export function printBanner(options: {
   out(`    Stripe     ${baseUrl}/stripe     partial — see docs/stripe.md`);
   out(`    Flutterwave ${baseUrl}/flutterwave partial — see docs/flutterwave.md`);
   out(`    Kora       ${baseUrl}/kora        partial — see docs/kora.md`);
+  out(`    Quid Payments ${baseUrl}/quiddpay partial — see docs/quiddpay.md`);
   out(`    WeWire     ${baseUrl}/wewire      partial — see docs/wewire.md`);
   out(`    Wise       ${baseUrl}/wise        partial — see docs/wise.md`);
   for (const id of [] as string[]) {
@@ -56,6 +58,10 @@ export function printBanner(options: {
   out(`    Flutterwave v4 client_id ${flutterwaveV4.clientId}`);
   out(`    Flutterwave v4 client_secret ${flutterwaveV4.clientSecret}`);
   out(`    Kora       ${koraKeys.secretKey}`);
+  out(`    Quid Payments ${quiddpayKeys.apiKey}`);
+  // Quid signs webhooks with a dashboard-issued secret distinct from the API
+  // key, so a verifier cannot be written without seeing it.
+  out(`    Quid Payments webhook signing secret ${quiddpayKeys.signingSecret}`);
   out(`    WeWire     ${wewireKeys.secretKey}`);
   out(`    Wise       ${wiseKeys.apiToken}`);
   out();
@@ -64,6 +70,7 @@ export function printBanner(options: {
   out(`    STRIPE_API_BASE=${baseUrl}/stripe`);
   out(`    FLW_BASE_URL=${baseUrl}/flutterwave`);
   out(`    KORA_BASE_URL=${baseUrl}/kora`);
+  out(`    QUIDDPAY_BASE_URL=${baseUrl}/quiddpay`);
   out(`    WEWIRE_BASE_URL=${baseUrl}/wewire`);
   out(`    WISE_API_BASE=${baseUrl}/wise`);
   out();

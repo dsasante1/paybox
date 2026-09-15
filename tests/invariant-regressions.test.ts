@@ -450,7 +450,15 @@ describe('/api/providers', () => {
     const byId = Object.fromEntries(
       (res.json().providers as { id: string; keys?: Record<string, unknown> }[]).map((p) => [p.id, p.keys]),
     );
-    for (const id of ['paystack', 'stripe', 'flutterwave', 'kora', 'wewire', 'wise']) {
+    for (const id of [
+      'paystack',
+      'stripe',
+      'flutterwave',
+      'kora',
+      'quiddpay',
+      'wewire',
+      'wise',
+    ]) {
       expect(byId[id]).toBeDefined();
     }
     expect((byId.flutterwave as { v4: { clientId: string; clientSecret: string } }).v4).toEqual(

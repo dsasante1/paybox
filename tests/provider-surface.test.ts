@@ -42,7 +42,15 @@ describe('provider listing', () => {
 
     // All six adapters serve their manifests; the listing must say so
     // without ever claiming "full".
-    for (const id of ['paystack', 'stripe', 'flutterwave', 'kora', 'wewire', 'wise']) {
+    for (const id of [
+      'paystack',
+      'stripe',
+      'flutterwave',
+      'kora',
+      'quiddpay',
+      'wewire',
+      'wise',
+    ]) {
       expect(byId[id]).toBe('partial');
     }
   });
