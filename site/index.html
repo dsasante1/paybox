@@ -66,7 +66,6 @@ code,kbd{font-family:var(--mono);font-size:.86em;letter-spacing:0}
 .lbl{font:500 10.5px/1.1 var(--mono);letter-spacing:.14em;text-transform:uppercase;
   color:var(--ink-3)}
 .lbl-ink{color:var(--ink)}
-.lbl-acc{color:var(--accent)}
 
 /* ---------- title plate (header) ---------- */
 .plate{position:sticky;top:0;z-index:10;background:var(--paper);
@@ -228,8 +227,6 @@ figcaption b{font-weight:500;color:var(--ink-2)}
 .panel{border:1px solid var(--ink);margin-top:8px}
 .panel-bar{display:flex;align-items:stretch;border-bottom:1px solid var(--ink);
   flex-wrap:wrap}
-.panel-bar .id{display:flex;align-items:center;padding:0 14px;
-  border-right:1px solid var(--rule);font:500 10.5px/1 var(--mono);letter-spacing:.14em}
 [role=tablist]{display:flex;overflow-x:auto}
 [role=tab]{background:transparent;border:0;border-right:1px solid var(--rule);
   padding:11px 15px;cursor:pointer;color:var(--ink-2);white-space:nowrap;
@@ -250,7 +247,6 @@ pre code{display:block;padding:14px 16px 16px 0;font-size:inherit}
   color:var(--ink-3);border-right:1px solid var(--rule);font-size:11px;
   /* generated content is not copied, so line numbers stay out of the clipboard */
 }
-.l.b{padding-top:0}
 .c{color:var(--ink-3)}
 .k{color:var(--accent)}
 .q{color:var(--ink-2)}
@@ -366,10 +362,6 @@ thead th:nth-child(3){text-align:right}
       </a>
     </div>
     <div class="cell">
-      <span class="lbl">Drawing</span>
-      <i>PBX&#8209;001</i>
-    </div>
-    <div class="cell opt">
       <span class="lbl">Revision</span>
       <i>0.2.1</i>
     </div>
@@ -485,7 +477,7 @@ thead th:nth-child(3){text-align:right}
     <section class="sec" id="s00">
       <div class="hero">
         <div>
-          <p class="lbl">§00 · Title block</p>
+          <p class="lbl">§00</p>
           <h1>Test the payment flows a <em>sandbox won't reach.</em></h1>
           <p class="lede">
             paybox is a local payment infrastructure emulator. Point an existing
@@ -538,7 +530,6 @@ thead th:nth-child(3){text-align:right}
           <div class="fig-bar">
             <span class="id">FIG. 1</span>
             <span class="ti">Charge lifecycle · mobile money · GHS</span>
-            <span class="sc">SHEET 1 / 1 · NTS</span>
           </div>
           <div class="fig-body">
             <svg viewBox="0 0 1168 268" role="img" aria-labelledby="f1t f1d">
@@ -643,7 +634,7 @@ thead th:nth-child(3){text-align:right}
     <!-- §02 -------------------------------------------------------------- -->
     <section class="sec" id="s02">
       <div class="sec-head">
-        <p class="no">§02<br>IFACE</p>
+        <p class="no">§02</p>
         <h2>Change a base URL. Nothing else.</h2>
         <p class="sub">
           <code>paybox status</code> prints the credentials each adapter issued.
@@ -655,7 +646,6 @@ thead th:nth-child(3){text-align:right}
       <div class="offset">
         <div class="panel">
           <div class="panel-bar">
-            <span class="id">DATA</span>
             <div role="tablist" aria-label="Integration examples">
               <button type="button" role="tab" id="t-env" aria-controls="p-env" aria-selected="true">.env</button>
               <button type="button" role="tab" id="t-curl" aria-controls="p-curl" aria-selected="false" tabindex="-1">request</button>
@@ -682,7 +672,6 @@ thead th:nth-child(3){text-align:right}
           </div>
 
           <div class="panel-foot">
-            <span>ENCODING utf-8</span>
             <span>HOST 127.0.0.1:8080</span>
             <span>AMOUNTS integer minor units</span>
             <span>CVV never stored</span>
@@ -842,7 +831,7 @@ thead th:nth-child(3){text-align:right}
     <!-- §04 -------------------------------------------------------------- -->
     <section class="sec" id="s04">
       <div class="sec-head">
-        <p class="no">§04<br>SCHED</p>
+        <p class="no">§04</p>
         <h2>Seven providers, eight adapters — each partially implemented.</h2>
         <p class="sub">
           <strong>Partial means partial.</strong> Each contract page lists what is
@@ -1024,7 +1013,7 @@ thead th:nth-child(3){text-align:right}
     <!-- §06 -------------------------------------------------------------- -->
     <section class="sec" id="s06">
       <div class="sec-head">
-        <p class="no">§06<br>DOCS</p>
+        <p class="no">§06</p>
         <h2>Every page answers one question.</h2>
         <p class="sub">
           The contracts are the honest part: they say what is missing. The full tree
