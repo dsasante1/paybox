@@ -296,16 +296,33 @@ describe('the manifests are well formed', () => {
 
 describe('the published table', () => {
   it('matches what the manifests hold', async () => {
-    // The README is where a visitor forms their expectations, so its numbers
-    // have to be the ones this file enforces. Regenerate with
-    // `npm run coverage:table` — a stale table fails here rather than quietly
-    // overstating what the emulator serves.
-    const { replaceBlock } = await import('../scripts/coverage-table.js');
-    const readme = readFileSync('README.md', 'utf8');
-    expect(replaceBlock(readme)).toBe(readme);
+    // The README and the landing page in `site/` are where a visitor forms
+    // their expectations, so the numbers on them have to be the ones this file
+    // enforces. Regenerate with `npm run coverage:table` — a stale table fails
+    // here rather than quietly overstating what the emulator serves.
+    const { GENERATED } = await import('../scripts/coverage-table.js');
+    for (const target of GENERATED) {
+      const contents = readFileSync(target.path, 'utf8');
+      expect(target.replace(contents), `${target.path} is stale`).toBe(contents);
+    }
   });
 
-  it('says Partial for every adapter', () => {
+  it('says Partial for every adapter on the landing page', () => {
+    const html = readFileSync('site/index.html', 'utf8');
+    const table = html.slice(
+      html.indexOf('<!-- coverage:start -->'),
+      html.indexOf('<!-- coverage:end -->'),
+    );
+    for (const { manifest } of subjects) {
+      const row = table.split('\n').find((line) => line.includes(`>${manifest.label}<`));
+      expect(row, `no site row for ${manifest.label}`).toBeDefined();
+      // The page a visitor reads first must not imply an adapter is finished.
+      expect(row).toContain('>Partial<');
+      expect(row).toContain(manifest.docs);
+    }
+  });
+
+  it('says Partial for every adapter in the README', () => {
     const readme = readFileSync('README.md', 'utf8');
     const table = readme.slice(
       readme.indexOf('<!-- coverage:start -->'),

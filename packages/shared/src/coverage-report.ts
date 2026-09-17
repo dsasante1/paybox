@@ -80,3 +80,55 @@ export function entriesByStatus(
       note: entry.note ?? null,
     }));
 }
+
+/** HTML-escape a value that goes into generated markup. */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/**
+ * The same table, as HTML, for the landing page in `site/`.
+ *
+ * The landing page is deployed on its own and cannot resolve the repository's
+ * relative `docs/*.md` links, so each row's contract link is absolutised
+ * against `docsBaseUrl`. Generated for the same reason the README's table is:
+ * the front page a visitor reads first must not be able to claim an endpoint
+ * the router does not serve. `npm run coverage:table` writes both, and
+ * `tests/coverage-drift.test.ts` fails on either being stale.
+ */
+export function renderSiteTable(
+  manifests: readonly CoverageManifest[],
+  docsBaseUrl: string,
+): string {
+  const rows = toRows(manifests);
+  const base = docsBaseUrl.replace(/\/+$/, '');
+  const lines = [
+    '<table>',
+    '  <thead>',
+    '    <tr><th scope="col">Provider</th><th scope="col">Base path</th>' +
+      '<th scope="col">Endpoints</th><th scope="col">Coverage</th></tr>',
+    '  </thead>',
+    '  <tbody>',
+  ];
+  for (const row of rows) {
+    lines.push(
+      `    <tr><th scope="row">${escapeHtml(row.label)}</th>` +
+        `<td><code>${escapeHtml(row.basePath)}</code></td>` +
+        `<td class="num">${row.total}</td>` +
+        `<td><span class="pill">Partial</span> ` +
+        `<a href="${escapeHtml(`${base}/${row.docs}`)}">what works</a></td></tr>`,
+    );
+  }
+  const total = rows.reduce((sum, row) => sum + row.total, 0);
+  lines.push('  </tbody>');
+  lines.push('</table>');
+  lines.push(
+    `<p class="note">${total} endpoints across ${rows.length} adapters, ` +
+      'counted from the manifests the test suite checks against the router.</p>',
+  );
+  return lines.join('\n');
+}

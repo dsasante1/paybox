@@ -1,0 +1,1153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>paybox — a local payment infrastructure emulator</title>
+<meta name="description" content="Point an existing Paystack, Stripe, Flutterwave, Kora, Quid Payments, WeWire or Wise integration at localhost and test pending payments, webhook retries, duplicate deliveries, timeouts, refunds and idempotency — deterministically, with no provider sandbox.">
+<link rel="canonical" href="https://paybox-emulator.vercel.app/">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<meta name="theme-color" content="#f8f9fa">
+<meta property="og:type" content="website">
+<meta property="og:title" content="paybox — a local payment infrastructure emulator">
+<meta property="og:description" content="Test the parts of payments that are hard to test: pending mobile-money authorization, webhook retries, duplicate deliveries, timeouts, refunds and idempotency. Deterministic, offline, no provider sandbox.">
+<meta property="og:url" content="https://paybox-emulator.vercel.app/">
+<meta name="twitter:card" content="summary">
+<style>
+/* ---------------------------------------------------------------------------
+   paybox — technical sheet
+   A blueprint, not a brochure: hairline rules, no fills, no shadows, no
+   gradients used as shading, one accent reserved for the highlighted step of
+   a process. Every rule is 1px; figures are hand-plotted SVG on a 4px grid.
+   --------------------------------------------------------------------------- */
+:root{
+  color-scheme:light;
+  --paper:#f8f9fa;
+  --ink:#121212;
+  --ink-2:#4a5058;
+  --ink-3:#666d75;
+  --rule:#c9ced4;      /* hairlines, borders */
+  --grid:#e4e7ea;      /* background grid */
+  --accent:#1b44e0;    /* muted electric blue — highlighted step only */
+  --accent-wash:rgba(27,68,224,.055);
+  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:Inter,"SF Pro Text",-apple-system,system-ui,"Segoe UI",sans-serif;
+  --nav:268px;
+  --pad:clamp(20px,4vw,56px);
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;background:var(--paper);color:var(--ink);
+  font:400 15px/1.6 var(--sans);letter-spacing:-.005em;
+  -webkit-font-smoothing:antialiased;
+}
+/* The sheet's 32px construction grid. Drawn, not shaded: two sets of 1px
+   lines, nothing between them. */
+body::before{
+  content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
+  background:
+    repeating-linear-gradient(to right,var(--grid) 0 1px,transparent 1px 32px),
+    repeating-linear-gradient(to bottom,var(--grid) 0 1px,transparent 1px 32px);
+  opacity:.7;
+}
+.sheet{position:relative;z-index:1}
+h1,h2,h3{margin:0;font-weight:500;letter-spacing:-.025em;line-height:1.14}
+p{margin:0}
+a{color:var(--accent);text-decoration:none;border-bottom:1px solid rgba(27,68,224,.3)}
+a:hover{border-bottom-color:var(--accent)}
+code,kbd{font-family:var(--mono);font-size:.86em;letter-spacing:0}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.skip{position:absolute;left:-9999px}
+.skip:focus{left:8px;top:8px;z-index:20;background:var(--paper);
+  border:1px solid var(--ink);padding:8px 12px}
+
+/* mono label — the lettering of the sheet */
+.lbl{font:500 10.5px/1.1 var(--mono);letter-spacing:.14em;text-transform:uppercase;
+  color:var(--ink-3)}
+.lbl-ink{color:var(--ink)}
+
+/* ---------- title plate (header) ---------- */
+.plate{position:sticky;top:0;z-index:10;background:var(--paper);
+  border-bottom:1px solid var(--ink)}
+.plate-in{display:flex;align-items:stretch;min-height:56px}
+.mark{display:flex;align-items:center;gap:10px;padding:0 20px 0 var(--pad);
+  border-right:1px solid var(--rule)}
+.mark a{display:flex;align-items:center;gap:10px;color:var(--ink);border:0;
+  align-self:stretch}
+.mark svg{display:block}
+.mark b{font:500 17px/1 var(--sans);letter-spacing:-.04em}
+.plate .cell{display:flex;flex-direction:column;justify-content:center;gap:3px;
+  padding:8px 18px;border-right:1px solid var(--rule);min-width:0}
+.plate .cell i{font-style:normal;font:500 12px/1.2 var(--mono);color:var(--ink)}
+.plate nav{margin-left:auto;display:flex;align-items:stretch}
+.plate nav a{display:flex;align-items:center;padding:0 18px;border:0;
+  border-left:1px solid var(--rule);color:var(--ink-2);
+  font:500 11px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase}
+.plate nav a:hover{color:var(--accent);background:var(--accent-wash)}
+@media (max-width:1080px){.plate .cell.opt{display:none}}
+@media (max-width:720px){.plate nav a.opt{display:none}}
+
+/* ---------- body: asymmetric two-column sheet ---------- */
+.frame{display:grid;grid-template-columns:var(--nav) minmax(0,1fr)}
+@media (max-width:980px){.frame{grid-template-columns:minmax(0,1fr)}}
+/* The figures and code blocks are deliberately wider than a phone and scroll
+   inside their own frame. Without a zero minimum at every step between them
+   and the page, that width would push the whole sheet sideways instead. */
+main,.sec,.offset,.fig,.fig-body,.panel,.schedule,.index-in,.split>*{min-width:0}
+
+/* ---------- sidebar: documentation tree ---------- */
+.index{border-right:1px solid var(--ink);padding:26px 0 60px}
+.index-in{position:sticky;top:78px;max-height:calc(100vh - 100px);overflow-y:auto;
+  padding:0 18px 0 var(--pad)}
+.index h2{margin:0 0 10px}
+.index-sec{padding:0 0 22px;margin:0 0 22px;border-bottom:1px solid var(--rule)}
+.index-sec:last-child{border-bottom:0;margin-bottom:0}
+.toc{list-style:none;margin:10px 0 0;padding:0}
+.toc li{display:flex;gap:10px;align-items:baseline;padding:4px 0}
+.toc a{color:var(--ink);border:0;font-size:13.5px}
+.toc a:hover{color:var(--accent)}
+.toc span{font:500 10.5px/1.6 var(--mono);color:var(--ink-3);letter-spacing:.06em}
+
+/* the tree: guides are 1px borders, not glyphs */
+.tree,.tree ul{list-style:none;margin:0;padding:0}
+.tree{margin-top:10px}
+.tree ul{margin-left:9px;border-left:1px solid var(--rule)}
+.tree li{position:relative;padding-left:16px}
+.tree ul>li::before{content:"";position:absolute;left:0;top:13px;width:11px;
+  height:1px;background:var(--rule)}
+.tree>li{padding-left:0}
+.tree a,.tree summary{display:block;padding:4.5px 0;color:var(--ink);
+  font-size:13px;border:0}
+.tree a:hover{color:var(--accent)}
+.tree a.f::after{content:".md";color:var(--ink-3);font-family:var(--mono);font-size:10.5px}
+.tree summary{cursor:pointer;font:500 10.5px/1.8 var(--mono);letter-spacing:.12em;
+  text-transform:uppercase;color:var(--ink-2);list-style:none}
+.tree summary::-webkit-details-marker{display:none}
+.tree summary::before{content:"+";display:inline-block;width:12px;color:var(--ink-3);
+  font-family:var(--mono)}
+.tree details[open]>summary::before{content:"–"}
+.tree summary:hover{color:var(--accent)}
+.index .meta{margin-top:14px;font:400 11px/1.55 var(--mono);color:var(--ink-3)}
+/* Beside the sheet the index is simply a column: the disclosure is held open
+   and its summary is not drawn. */
+.index-shell>summary{display:none}
+@media (max-width:980px){
+  /* With no column to put it in, the index becomes a menu: one row under the
+     title plate, closed until asked for. Open, it is a wall of links in front
+     of the page; at the foot of the page it cannot be used to navigate to
+     anything without scrolling past everything first. */
+  .frame{display:flex;flex-direction:column}
+  .index{order:0;border-right:0;border-bottom:1px solid var(--ink);padding:0}
+  main{order:1}
+  .index-shell>summary{display:flex;align-items:center;gap:10px;cursor:pointer;
+    list-style:none;padding:15px var(--pad);color:var(--ink);
+    font:500 11.5px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase}
+  .index-shell>summary::-webkit-details-marker{display:none}
+  .index-shell>summary::after{content:"+";margin-left:auto;font-size:14px;
+    color:var(--ink-3);line-height:1}
+  .index-shell[open]>summary::after{content:"–"}
+  .index-shell>summary:hover{color:var(--accent)}
+  .index-shell[open]>summary{border-bottom:1px solid var(--rule)}
+  /* A menu should be a panel, not a page: bounded, and scrolling on its own. */
+  .index-in{position:static;max-height:62vh;overflow-y:auto;
+    overscroll-behavior:contain;padding:20px var(--pad) 26px}
+  /* The summary already says Index; the first list does not need to repeat it. */
+  .index-sec:first-child>h2{display:none}
+  .index-sec:first-child{padding-bottom:18px;margin-bottom:18px}
+  .index-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:0 32px}
+}
+
+/* ---------- sections ---------- */
+.sec{border-bottom:1px solid var(--ink);padding:0 var(--pad) 56px;scroll-margin-top:68px}
+.sec:last-of-type{border-bottom:0}
+#s00{padding-bottom:0}
+.sec-head{display:grid;grid-template-columns:76px minmax(0,1fr);gap:0 22px;
+  align-items:start;padding:34px 0 26px}
+.sec-head .no{font:500 11px/1.3 var(--mono);letter-spacing:.1em;color:var(--ink-3);
+  padding-top:5px;border-top:1px solid var(--ink);margin-top:0}
+.sec-head h2{font-size:clamp(21px,2.5vw,29px);max-width:30ch}
+.sec-head .sub{grid-column:2;margin-top:14px;color:var(--ink-2);max-width:66ch;font-size:15px}
+.sec-head .sub strong{font-weight:500;color:var(--ink)}
+@media (max-width:640px){
+  .sec-head{grid-template-columns:1fr;gap:12px}
+  .sec-head .sub{grid-column:1}
+}
+.offset{margin-left:98px}
+@media (max-width:640px){.offset{margin-left:0}}
+.split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.05fr);
+  gap:clamp(24px,4vw,48px);align-items:start}
+@media (max-width:1000px){.split{grid-template-columns:1fr;gap:26px}}
+/* Beside a long list the drawing stays in view — reading the invariants
+   against the stack is the point of putting them side by side. */
+@media (min-width:1001px){.split>figure{position:sticky;top:78px}}
+
+/* ---------- §00 title block ---------- */
+.hero{padding:clamp(40px,7vw,86px) 0 54px;display:grid;
+  grid-template-columns:minmax(0,1.55fr) minmax(0,1fr);gap:clamp(28px,5vw,64px)}
+@media (max-width:900px){.hero{grid-template-columns:1fr;gap:34px}}
+.hero h1{font-size:clamp(31px,5.2vw,58px);letter-spacing:-.035em;max-width:19ch}
+.hero h1 em{font-style:normal;color:var(--accent)}
+.hero .lede{margin-top:22px;font-size:clamp(15px,1.5vw,17.5px);color:var(--ink-2);max-width:54ch}
+.hero .lede b{font-weight:500;color:var(--ink)}
+.cmd{display:flex;align-items:stretch;border:1px solid var(--ink);margin-top:30px;
+  max-width:520px;background:var(--paper)}
+.cmd span{flex:1;padding:13px 14px;font:400 13.5px/1.2 var(--mono);white-space:nowrap;
+  overflow:auto}
+.cmd span i{font-style:normal;color:var(--ink-3);padding-right:6px}
+.cmd button{border:0;border-left:1px solid var(--ink);background:transparent;
+  color:var(--ink);font:500 10.5px/1 var(--mono);letter-spacing:.12em;
+  text-transform:uppercase;padding:0 16px;cursor:pointer}
+.cmd button:hover{background:var(--accent);color:#fff}
+.acts{display:flex;flex-wrap:wrap;gap:0;margin-top:0;border:1px solid var(--ink);
+  border-top:0;max-width:520px}
+.acts a{flex:1 1 auto;text-align:center;padding:12px 16px;border:0;color:var(--ink);
+  font:500 10.5px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase}
+.acts a+a{border-left:1px solid var(--ink)}
+.acts a:hover{background:var(--ink);color:var(--paper)}
+/* the drawing's specification table */
+.specs{border-top:1px solid var(--ink)}
+.specs dl{display:grid;grid-template-columns:auto minmax(0,1fr);margin:0}
+.specs dt{padding:9px 14px 9px 0;border-bottom:1px solid var(--rule);
+  font:500 10.5px/1.5 var(--mono);letter-spacing:.1em;text-transform:uppercase;
+  color:var(--ink-3);white-space:nowrap}
+.specs dd{margin:0;padding:9px 0;border-bottom:1px solid var(--rule);
+  font:400 12.5px/1.5 var(--mono);color:var(--ink);text-align:right}
+.specs dd em{font-style:normal;color:var(--accent)}
+
+/* ---------- figures ---------- */
+figure{margin:0}
+.fig{border:1px solid var(--ink);margin-top:8px;background:var(--paper)}
+.fig-bar{display:flex;align-items:center;gap:14px;padding:9px 14px;
+  border-bottom:1px solid var(--rule);flex-wrap:wrap}
+.fig-bar .id{font:500 10.5px/1.1 var(--mono);letter-spacing:.14em;color:var(--ink)}
+.fig-bar .ti{font:400 10.5px/1.1 var(--mono);letter-spacing:.08em;color:var(--ink-3);
+  text-transform:uppercase}
+.fig-bar .sc{margin-left:auto;font:400 10.5px/1.1 var(--mono);color:var(--ink-3)}
+.fig-body{padding:20px 16px;overflow-x:auto;overscroll-behavior-x:contain}
+.fig svg{display:block;width:100%;height:auto;min-width:640px}
+.fig-body.tall svg{min-width:300px;max-width:600px;margin:0 auto}
+figcaption{margin-top:12px;font:400 12px/1.6 var(--mono);color:var(--ink-3);max-width:88ch}
+figcaption b{font-weight:500;color:var(--ink-2)}
+/* figure line vocabulary */
+.s-thin{fill:none;stroke:var(--ink);stroke-width:1;vector-effect:non-scaling-stroke}
+.s-rule{fill:none;stroke:var(--rule);stroke-width:1;vector-effect:non-scaling-stroke}
+.s-acc{fill:none;stroke:var(--accent);stroke-width:1.5;vector-effect:non-scaling-stroke}
+.s-dash{fill:none;stroke:var(--rule);stroke-width:1;stroke-dasharray:3 3;
+  vector-effect:non-scaling-stroke}
+.knock{fill:var(--paper)}
+.t-h{font:500 13px/1 var(--sans);fill:var(--ink)}
+.t-m{font:400 10.5px/1 var(--mono);fill:var(--ink-2);letter-spacing:.04em}
+.t-s{font:400 9.5px/1 var(--mono);fill:var(--ink-3);letter-spacing:.1em}
+.t-a{font:500 10.5px/1 var(--mono);fill:var(--accent);letter-spacing:.08em}
+.t-n{font:500 11px/1 var(--mono);fill:var(--ink)}
+
+/* ---------- data panel ---------- */
+.panel{border:1px solid var(--ink);margin-top:8px}
+.panel-bar{display:flex;align-items:stretch;border-bottom:1px solid var(--ink);
+  flex-wrap:wrap}
+[role=tablist]{display:flex;overflow-x:auto}
+[role=tab]{background:transparent;border:0;border-right:1px solid var(--rule);
+  padding:11px 15px;cursor:pointer;color:var(--ink-2);white-space:nowrap;
+  font:500 11px/1.2 var(--mono);letter-spacing:.06em}
+[role=tab]:hover{color:var(--accent)}
+[role=tab][aria-selected=true]{color:var(--ink);box-shadow:inset 0 -2px 0 var(--accent)}
+.panel-bar button.copy{margin-left:auto;border:0;border-left:1px solid var(--rule);
+  background:transparent;cursor:pointer;padding:0 16px;color:var(--ink-2);
+  font:500 10.5px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase}
+.panel-bar button.copy:hover{background:var(--accent);color:#fff}
+[role=tabpanel]{padding:0}
+pre{margin:0;overflow-x:auto;counter-reset:l;
+  font:400 12.8px/1.85 var(--mono);tab-size:2}
+pre code{display:block;padding:14px 16px 16px 0;font-size:inherit}
+.l{display:block;padding-left:62px;position:relative;white-space:pre}
+.l::before{counter-increment:l;content:counter(l,decimal-leading-zero);
+  position:absolute;left:0;width:46px;padding-right:12px;text-align:right;
+  color:var(--ink-3);border-right:1px solid var(--rule);font-size:11px;
+  /* generated content is not copied, so line numbers stay out of the clipboard */
+}
+.c{color:var(--ink-3)}
+.k{color:var(--accent)}
+.q{color:var(--ink-2)}
+.panel-foot{display:flex;gap:16px;flex-wrap:wrap;border-top:1px solid var(--rule);
+  padding:9px 14px;font:400 10.5px/1.5 var(--mono);color:var(--ink-3)}
+
+/* ---------- schedule (generated coverage table) ---------- */
+.schedule{border:1px solid var(--ink);margin-top:8px;overflow-x:auto}
+table{border-collapse:collapse;width:100%;min-width:560px}
+thead th{text-align:left;padding:10px 16px;border-bottom:1px solid var(--ink);
+  font:500 10px/1.2 var(--mono);letter-spacing:.14em;text-transform:uppercase;
+  color:var(--ink-3);white-space:nowrap}
+tbody th,tbody td{padding:11px 16px;border-bottom:1px solid var(--rule);
+  text-align:left;font-size:14px;font-weight:400}
+tbody tr:last-child th,tbody tr:last-child td{border-bottom:0}
+tbody tr:hover th,tbody tr:hover td{background:var(--accent-wash)}
+tbody th{font-weight:500;white-space:nowrap}
+td.num{font-family:var(--mono);font-size:12.5px;text-align:right;
+  font-variant-numeric:tabular-nums}
+thead th:nth-child(3){text-align:right}
+.pill{display:inline-block;border:1px solid var(--accent);color:var(--accent);
+  padding:2px 6px;margin-right:8px;font:500 9.5px/1.3 var(--mono);
+  letter-spacing:.12em;text-transform:uppercase;vertical-align:1px}
+.note{margin-top:12px;font:400 12px/1.6 var(--mono);color:var(--ink-3);max-width:78ch}
+/* The generated block carries its own summary line; inside the schedule's
+   border it reads as the drawing's footer row, so it gets the same gutter. */
+.schedule>.note{margin:0;padding:11px 16px;border-top:1px solid var(--rule);max-width:none}
+
+/* ---------- note block ---------- */
+.callout{display:grid;grid-template-columns:auto minmax(0,1fr);gap:0;
+  border:1px solid var(--ink);margin-top:8px}
+.callout .bar{width:36px;border-right:1px solid var(--ink);
+  /* hatching: 1px lines at 45°, the only texture on the sheet */
+  background:repeating-linear-gradient(45deg,var(--rule) 0 1px,transparent 1px 7px)}
+.callout .txt{padding:18px 20px}
+.callout h3{font:500 10.5px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;
+  color:var(--accent);margin-bottom:10px}
+.callout p{color:var(--ink-2);max-width:74ch;font-size:14.5px}
+.callout p+p{margin-top:9px}
+.callout strong{font-weight:500;color:var(--ink)}
+
+/* ---------- spec list (invariants, failure modes) ---------- */
+.rows{border-top:1px solid var(--ink);margin-top:8px}
+.rows .row{display:grid;grid-template-columns:34px minmax(150px,0.7fr) minmax(0,1.5fr);
+  gap:0 20px;padding:13px 0;border-bottom:1px solid var(--rule)}
+.rows .row>span:first-child{font:500 10.5px/1.7 var(--mono);color:var(--ink-3)}
+.rows h3{font-size:14.5px;font-weight:500;line-height:1.5}
+.rows p{color:var(--ink-2);font-size:14px}
+.rows code{color:var(--ink)}
+@media (max-width:720px){
+  .rows .row{grid-template-columns:28px minmax(0,1fr);gap:4px 12px}
+  .rows h3{font-size:14px}
+  .rows .row p{grid-column:2}
+}
+/* Inside a half-width column the three-track form squeezes the prose into a
+   ribbon, so there the heading sits above its text. */
+.split .rows .row{grid-template-columns:34px minmax(0,1fr)}
+.split .rows .row p{grid-column:2;margin-top:4px}
+
+/* ---------- links grid ---------- */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(232px,1fr));
+  gap:1px;background:var(--rule);border:1px solid var(--ink);margin-top:8px}
+.cards a{padding:16px 18px;border:0;background:var(--paper);color:var(--ink)}
+.cards a:hover{background:#eef1fd}
+.cards a b{display:block;font:500 13.5px/1.3 var(--sans);margin-bottom:5px}
+.cards a span{font:400 11.5px/1.5 var(--mono);color:var(--ink-3)}
+
+/* ---------- foot plate ---------- */
+.foot{border-top:1px solid var(--ink);padding:26px var(--pad) 40px}
+.foot-links{display:flex;flex-wrap:wrap;gap:0;border:1px solid var(--rule)}
+.foot-links a{padding:11px 16px;border:0;border-right:1px solid var(--rule);
+  color:var(--ink-2);font:500 10.5px/1 var(--mono);letter-spacing:.12em;
+  text-transform:uppercase}
+.foot-links a:hover{color:var(--accent)}
+/* The legal notes open the sheet as an inverted band: full bleed, no frame.
+   The one place on the drawing where the ink is the ground rather than the
+   line, which is what makes it read before anything else. */
+.notice{background:var(--ink);padding:clamp(15px,2vw,22px) var(--pad)}
+.legal{max-width:108ch;margin:0 auto;text-align:center}
+.legal p{font:400 12px/1.75 var(--mono);color:#fff;max-width:none}
+.legal p+p{margin-top:5px;color:rgba(255,255,255,.66)}
+/* ---------- phones ----------------------------------------------------------
+   Measured at 390px: the sheet itself never overflowed, but four frames
+   scrolled sideways with nothing saying so, the index links were 22px tall
+   against a 44px target, and the mono lettering was 10.5px. */
+@media (max-width:620px){
+  /* Lettering that is fine on a desk is too small in the hand. */
+  .lbl,.plate .cell i,.toc span,.fig-bar .id,.fig-bar .ti,.fig-bar .sc,
+  .specs dt,.tree summary,.index .meta,.foot-links a,.panel-foot,
+  .cmd button,.acts a,.plate nav a{font-size:11.5px}
+  .note,figcaption,.legal p{font-size:12.5px}
+  .specs dd{font-size:13px}
+
+  /* Touch targets: 44px minimum, which the index lists missed by half. */
+  .toc li{padding:0}
+  .toc a{padding:11px 0;flex:1}
+  .tree a,.tree summary{padding:11px 0}
+  .cards a{padding:18px}
+  .foot-links a{padding:14px 16px}
+  .acts a{padding:15px 16px}
+  /* Both bars wrap on a phone, and a wrapped flex item gets no height from
+     `stretch` — so the copy buttons need real vertical padding. */
+  .cmd button{padding:14px 18px}
+  [role=tab]{padding:14px 16px}
+  .panel-bar button.copy{padding:14px 18px;margin-left:0;
+    border-left:0;border-top:1px solid var(--rule);width:100%;text-align:left}
+  /* The contract link is the row's one action, so it gets a target. */
+  .schedule tbody td a{display:inline-block;padding:5px 0}
+  .skip:focus{padding:12px 16px}
+
+  /* The coverage schedule is four columns of one fact each; on a phone it
+     reads better as one block per adapter than as a 560px sideways scroll. */
+  .schedule{overflow-x:visible}
+  .schedule table{min-width:0;display:block}
+  .schedule thead{display:none}
+  .schedule tbody,.schedule tr,.schedule th,.schedule td{display:block}
+  .schedule tbody tr{padding:14px 16px;border-bottom:1px solid var(--rule)}
+  .schedule tbody tr:last-child{border-bottom:0}
+  .schedule tbody th,.schedule tbody td{border:0;padding:0}
+  .schedule tbody th{font-size:15.5px;margin-bottom:5px}
+  .schedule tbody td{display:inline-block;margin:0 12px 0 0;font-size:12.5px;
+    text-align:left;vertical-align:middle}
+  /* Without the column heading above it, the count has to say what it counts. */
+  .schedule td.num::after{content:" endpoints";color:var(--ink-3)}
+  .schedule>.note{padding:13px 16px}
+  .schedule tbody td a{padding:7px 0 2px;line-height:1.2}
+
+  /* Four items in the figure bar wrap into a ragged block at this width, so
+     they stack flush left instead. */
+  .fig-bar{display:block}
+  .fig-bar>span{display:block}
+  .fig-bar .sc{margin-left:0}
+  .fig.over .fig-bar::after{display:block;margin-left:0}
+}
+
+/* A frame whose drawing is wider than the screen says so, and stops saying it
+   as soon as it is not. `.over` is set from main.js against the real widths. */
+.fig.over .fig-bar::after{content:"SWIPE →";margin-left:auto;
+  font:500 10.5px/1 var(--mono);letter-spacing:.12em;color:var(--accent)}
+.fig.over .fig-bar .sc{margin-left:0}
+
+@media (prefers-reduced-motion:no-preference){html{scroll-behavior:smooth}}
+</style>
+</head>
+<body>
+<a class="skip" href="#sheet">Skip to content</a>
+
+<div class="sheet">
+
+<div class="notice">
+  <div class="legal">
+    <p>
+      MIT licensed. Not affiliated with, endorsed by, or connected to Paystack,
+      Stripe, Flutterwave, Kora, Quid Payments, WeWire or Wise. Provider names are
+      used only to describe API compatibility.
+    </p>
+    <p>
+      This page is static. paybox itself runs on your machine and never talks to it.
+    </p>
+  </div>
+</div>
+
+<header class="plate">
+  <div class="plate-in">
+    <div class="mark">
+      <a href="/">
+        <svg width="22" height="22" viewBox="0 0 22 22" fill="none" aria-hidden="true">
+          <rect x="1" y="4.5" width="20" height="13" stroke="currentColor"/>
+          <path d="M1 9h20M14.5 13.5h3.5" stroke="currentColor"/>
+          <circle cx="6" cy="13.5" r="1.6" stroke="#1b44e0"/>
+        </svg>
+        <b>paybox</b>
+      </a>
+    </div>
+    <div class="cell">
+      <span class="lbl">Revision</span>
+      <i>0.2.1</i>
+    </div>
+    <div class="cell opt">
+      <span class="lbl">Scope</span>
+      <i>127.0.0.1 only</i>
+    </div>
+    <nav>
+      <a class="opt" href="#s04">Coverage</a>
+      <a class="opt" href="#s06">Docs</a>
+      <a href="https://www.npmjs.com/package/paybox-emulator">npm</a>
+      <a href="https://github.com/dsasante1/paybox">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<div class="frame">
+
+  <!-- ============ sidebar: sheet index + documentation tree ============ -->
+  <aside class="index" aria-label="Sheet index and documentation">
+    <details class="index-shell" open>
+      <summary>Index</summary>
+      <div class="index-in">
+      <div class="index-cols">
+        <div class="index-sec">
+          <h2 class="lbl lbl-ink">Sheet index</h2>
+          <ul class="toc">
+            <li><span>00</span><a href="#s00">Title block</a></li>
+            <li><span>01</span><a href="#s01">Charge lifecycle</a></li>
+            <li><span>02</span><a href="#s02">Interface</a></li>
+            <li><span>03</span><a href="#s03">Failure injection</a></li>
+            <li><span>04</span><a href="#s04">Coverage schedule</a></li>
+            <li><span>05</span><a href="#s05">Assembly</a></li>
+            <li><span>06</span><a href="#s06">Documentation</a></li>
+          </ul>
+        </div>
+
+        <div class="index-sec">
+          <h2 class="lbl lbl-ink">Documentation tree</h2>
+          <ul class="tree">
+            <li>
+              <details open>
+                <summary>docs/</summary>
+                <ul>
+                  <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/getting-started.md">getting-started</a></li>
+                  <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/concepts.md">concepts</a></li>
+                  <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/architecture.md">architecture</a></li>
+                  <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/payment-lifecycle.md">payment-lifecycle</a></li>
+                  <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/time.md">time</a></li>
+                  <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/webhooks.md">webhooks</a></li>
+                  <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/scenarios.md">scenarios</a></li>
+                  <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/test-instruments.md">test-instruments</a></li>
+                  <li>
+                    <details>
+                      <summary>providers/</summary>
+                      <ul>
+                        <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/paystack.md">paystack</a></li>
+                        <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/stripe.md">stripe</a></li>
+                        <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/flutterwave.md">flutterwave</a></li>
+                        <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/kora.md">kora</a></li>
+                        <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/quiddpay.md">quiddpay</a></li>
+                        <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/wewire.md">wewire</a></li>
+                        <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/wise.md">wise</a></li>
+                      </ul>
+                    </details>
+                  </li>
+                  <li>
+                    <details>
+                      <summary>interfaces/</summary>
+                      <ul>
+                        <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/cli.md">cli</a></li>
+                        <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/control-api.md">control-api</a></li>
+                        <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/dashboard.md">dashboard</a></li>
+                        <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/configuration.md">configuration</a></li>
+                      </ul>
+                    </details>
+                  </li>
+                  <li>
+                    <details>
+                      <summary>operations/</summary>
+                      <ul>
+                        <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/testing.md">testing</a></li>
+                        <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/docker.md">docker</a></li>
+                        <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/ci.md">ci</a></li>
+                        <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/releasing.md">releasing</a></li>
+                        <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/troubleshooting.md">troubleshooting</a></li>
+                      </ul>
+                    </details>
+                  </li>
+                  <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/README.md">README</a></li>
+                </ul>
+              </details>
+            </li>
+            <li>
+              <details>
+                <summary>root/</summary>
+                <ul>
+                  <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/CHANGELOG.md">CHANGELOG</a></li>
+                  <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/CONTRIBUTING.md">CONTRIBUTING</a></li>
+                  <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/SECURITY.md">SECURITY</a></li>
+                </ul>
+              </details>
+            </li>
+          </ul>
+          <p class="meta">MIT · Node ≥ 22.5<br>no network path to a provider</p>
+        </div>
+        </div>
+      </div>
+    </details>
+  </aside>
+
+  <!-- ============ main sheet ============ -->
+  <main id="sheet">
+
+    <!-- §00 -------------------------------------------------------------- -->
+    <section class="sec" id="s00">
+      <div class="hero">
+        <div>
+          <p class="lbl">§00</p>
+          <h1>Test the payment flows a <em>sandbox won't reach.</em></h1>
+          <p class="lede">
+            paybox is a local payment infrastructure emulator. Point an existing
+            Paystack, Stripe, Flutterwave, Kora, Quid Payments, WeWire or Wise
+            integration at <code>localhost</code> and drive pending mobile-money
+            authorization, webhook retries, duplicate deliveries, timeouts,
+            refunds and idempotency — <b>deterministically, offline.</b>
+          </p>
+          <div class="cmd">
+            <span><i>$</i>npx paybox-emulator start</span>
+            <button type="button" data-copy="npx paybox-emulator start">Copy</button>
+          </div>
+          <div class="acts">
+            <a href="https://github.com/dsasante1/paybox/blob/main/docs/getting-started.md">Getting started</a>
+            <a href="https://github.com/dsasante1/paybox">Read the source</a>
+          </div>
+        </div>
+        <div class="specs">
+          <dl>
+            <dt>Requirement</dt><dd>Node ≥ 22.5</dd>
+            <dt>Install</dt><dd>npm · npx · docker</dd>
+            <dt>Storage</dt><dd>node:sqlite, in process</dd>
+            <dt>Providers</dt><dd>7 · 8 adapters</dd>
+            <dt>Clock</dt><dd><em>virtual</em></dd>
+            <dt>Determinism</dt><dd>seeded, byte-identical</dd>
+            <dt>Network reach</dt><dd><em>none</em></dd>
+            <dt>Licence</dt><dd>MIT</dd>
+          </dl>
+        </div>
+      </div>
+    </section>
+
+    <!-- §01 -------------------------------------------------------------- -->
+    <section class="sec" id="s01">
+      <div class="sec-head">
+        <p class="no">§01<br>FIG. 1</p>
+        <h2>A charge, from initialize to signed webhook.</h2>
+        <p class="sub">
+          Every request drives a real state machine. A charge appends to an
+          append-only event log, moves through the same canonical statuses the
+          organic flow would, and emits the same signed webhooks — the payment
+          row is a projection of that log, which is why the timeline, replay and
+          audit trail are one mechanism rather than three. <strong>Step 03 is
+          the one no sandbox gives you:</strong> time is a value you set.
+        </p>
+      </div>
+
+      <figure class="offset">
+        <div class="fig">
+          <div class="fig-bar">
+            <span class="id">FIG. 1</span>
+            <span class="ti">Charge lifecycle · mobile money · GHS</span>
+          </div>
+          <div class="fig-body">
+            <svg viewBox="0 0 1168 268" role="img" aria-labelledby="f1t f1d">
+              <title id="f1t">The five stages of a mobile-money charge in paybox</title>
+              <desc id="f1d">Five stations connected left to right: initialize, authorize
+                (requires_action), advance virtual time, settle (successful), and deliver a
+                signed webhook. A dimension line beneath spans the whole sequence and is
+                labelled: one time advance of five seconds runs every job due in the
+                window.</desc>
+
+              <!-- station 01 -->
+              <rect class="s-thin" x="24" y="96" width="176" height="92"/>
+              <line class="s-rule" x1="24" y1="142" x2="200" y2="142"/>
+              <rect class="knock" x="34" y="84" width="24" height="24"/>
+              <rect class="s-thin" x="34" y="84" width="24" height="24"/>
+              <text class="t-n" x="46" y="101" text-anchor="middle">01</text>
+              <text class="t-h" x="112" y="130" text-anchor="middle">Initialize</text>
+              <text class="t-m" x="112" y="166" text-anchor="middle">POST /transaction/…</text>
+              <!-- station 02 -->
+              <rect class="s-thin" x="260" y="96" width="176" height="92"/>
+              <line class="s-rule" x1="260" y1="142" x2="436" y2="142"/>
+              <rect class="knock" x="270" y="84" width="24" height="24"/>
+              <rect class="s-thin" x="270" y="84" width="24" height="24"/>
+              <text class="t-n" x="282" y="101" text-anchor="middle">02</text>
+              <text class="t-h" x="348" y="130" text-anchor="middle">Authorize</text>
+              <text class="t-m" x="348" y="166" text-anchor="middle">requires_action</text>
+              <!-- station 03 — the highlighted step -->
+              <rect class="s-acc" x="496" y="96" width="176" height="92"/>
+              <line class="s-rule" x1="496" y1="142" x2="672" y2="142"/>
+              <rect class="knock" x="506" y="84" width="24" height="24"/>
+              <rect class="s-acc" x="506" y="84" width="24" height="24"/>
+              <text class="t-n" x="518" y="101" text-anchor="middle">03</text>
+              <text class="t-h" x="584" y="130" text-anchor="middle">Advance</text>
+              <text class="t-a" x="584" y="166" text-anchor="middle">time advance 5s</text>
+              <text class="t-a" x="584" y="70" text-anchor="middle">VIRTUAL TIME</text>
+              <line class="s-acc" x1="496" y1="76" x2="672" y2="76"/>
+              <line class="s-acc" x1="496" y1="76" x2="496" y2="84"/>
+              <line class="s-acc" x1="672" y1="76" x2="672" y2="84"/>
+              <!-- station 04 -->
+              <rect class="s-thin" x="732" y="96" width="176" height="92"/>
+              <line class="s-rule" x1="732" y1="142" x2="908" y2="142"/>
+              <rect class="knock" x="742" y="84" width="24" height="24"/>
+              <rect class="s-thin" x="742" y="84" width="24" height="24"/>
+              <text class="t-n" x="754" y="101" text-anchor="middle">04</text>
+              <text class="t-h" x="820" y="130" text-anchor="middle">Settle</text>
+              <text class="t-m" x="820" y="166" text-anchor="middle">successful</text>
+              <!-- station 05 -->
+              <rect class="s-thin" x="968" y="96" width="176" height="92"/>
+              <line class="s-rule" x1="968" y1="142" x2="1144" y2="142"/>
+              <rect class="knock" x="978" y="84" width="24" height="24"/>
+              <rect class="s-thin" x="978" y="84" width="24" height="24"/>
+              <text class="t-n" x="990" y="101" text-anchor="middle">05</text>
+              <text class="t-h" x="1056" y="130" text-anchor="middle">Deliver</text>
+              <text class="t-m" x="1056" y="166" text-anchor="middle">charge.success</text>
+
+              <!-- connectors -->
+              <line class="s-thin" x1="200" y1="142" x2="254" y2="142"/>
+              <polyline class="s-thin" points="248,136 254,142 248,148"/>
+              <line class="s-thin" x1="436" y1="142" x2="490" y2="142"/>
+              <polyline class="s-thin" points="484,136 490,142 484,148"/>
+              <line class="s-acc" x1="672" y1="142" x2="726" y2="142"/>
+              <polyline class="s-acc" points="720,136 726,142 720,148"/>
+              <line class="s-thin" x1="908" y1="142" x2="962" y2="142"/>
+              <polyline class="s-thin" points="956,136 962,142 956,148"/>
+
+              <!-- extension lines -->
+              <line class="s-rule" x1="112" y1="188" x2="112" y2="238"/>
+              <line class="s-rule" x1="348" y1="188" x2="348" y2="238"/>
+              <line class="s-rule" x1="584" y1="188" x2="584" y2="238"/>
+              <line class="s-rule" x1="820" y1="188" x2="820" y2="238"/>
+              <line class="s-rule" x1="1056" y1="188" x2="1056" y2="238"/>
+
+              <!-- dimension line -->
+              <line class="s-thin" x1="24" y1="244" x2="1144" y2="244"/>
+              <line class="s-thin" x1="24" y1="236" x2="24" y2="252"/>
+              <line class="s-thin" x1="1144" y1="236" x2="1144" y2="252"/>
+              <line class="s-rule" x1="112" y1="240" x2="112" y2="248"/>
+              <line class="s-rule" x1="348" y1="240" x2="348" y2="248"/>
+              <line class="s-rule" x1="584" y1="240" x2="584" y2="248"/>
+              <line class="s-rule" x1="820" y1="240" x2="820" y2="248"/>
+              <line class="s-rule" x1="1056" y1="240" x2="1056" y2="248"/>
+              <rect class="knock" x="340" y="234" width="490" height="20"/>
+              <text class="t-s" x="584" y="248" text-anchor="middle">ONE ADVANCE — EVERY JOB DUE IN THIS WINDOW RUNS BEFORE IT RETURNS</text>
+              <text class="t-s" x="24" y="230">t₀</text>
+              <text class="t-s" x="1144" y="230" text-anchor="end">t₀ + 5s</text>
+            </svg>
+          </div>
+        </div>
+        <figcaption>
+          <b>01</b> the API answers with an authorization URL — a real checkout page
+          carrying the test instruments. <b>02</b> the charge sits in
+          <code>requires_action</code>: the customer has not approved the prompt.
+          <b>03</b> rather than waiting, you move the clock; the scheduler runs each
+          due job at the instant it was <em>scheduled for</em>. <b>04</b> the row and
+          the event log commit together. <b>05</b> the webhook is signed and
+          dispatched only after that commit, so it can never describe a state that
+          then rolls back.
+        </figcaption>
+      </figure>
+    </section>
+
+    <!-- §02 -------------------------------------------------------------- -->
+    <section class="sec" id="s02">
+      <div class="sec-head">
+        <p class="no">§02</p>
+        <h2>Change a base URL. Nothing else.</h2>
+        <p class="sub">
+          <code>paybox status</code> prints the credentials each adapter issued.
+          They are labelled test credentials that exist only in the local
+          database — and the emulator refuses a live key.
+        </p>
+      </div>
+
+      <div class="offset">
+        <div class="panel">
+          <div class="panel-bar">
+            <div role="tablist" aria-label="Integration examples">
+              <button type="button" role="tab" id="t-env" aria-controls="p-env" aria-selected="true">.env</button>
+              <button type="button" role="tab" id="t-curl" aria-controls="p-curl" aria-selected="false" tabindex="-1">request</button>
+              <button type="button" role="tab" id="t-res" aria-controls="p-res" aria-selected="false" tabindex="-1">response</button>
+              <button type="button" role="tab" id="t-cli" aria-controls="p-cli" aria-selected="false" tabindex="-1">cli</button>
+            </div>
+            <button class="copy" type="button" data-copy-panel>Copy</button>
+          </div>
+
+          <div role="tabpanel" id="p-env" aria-labelledby="t-env" tabindex="0">
+<pre><code><span class="l">PAYSTACK_BASE_URL=http://127.0.0.1:8080/paystack</span><span class="l">PAYSTACK_SECRET_KEY=sk_test_local_a1b2c3...</span><span class="l"> </span><span class="l">STRIPE_API_BASE=http://127.0.0.1:8080/stripe</span><span class="l">FLW_BASE_URL=http://127.0.0.1:8080/flutterwave   <span class="c"># v3, FLWSECK_TEST-… keys</span></span><span class="l">KORA_BASE_URL=http://127.0.0.1:8080/kora</span><span class="l">WISE_BASE_URL=http://127.0.0.1:8080/wise</span></code></pre>
+          </div>
+
+          <div role="tabpanel" id="p-curl" aria-labelledby="t-curl" tabindex="0" hidden>
+<pre><code><span class="l"><span class="k">curl</span> -X POST http://127.0.0.1:8080/paystack/transaction/initialize \</span><span class="l">  -H <span class="q">"Authorization: Bearer sk_test_local_a1b2c3..."</span> \</span><span class="l">  -H <span class="q">"content-type: application/json"</span> \</span><span class="l">  -d <span class="q">'{"email":"dev@example.com","amount":10000,</span></span><span class="l"><span class="q">       "currency":"GHS","reference":"order_1"}'</span></span></code></pre>
+          </div>
+
+          <div role="tabpanel" id="p-res" aria-labelledby="t-res" tabindex="0" hidden>
+<pre><code><span class="l">{</span><span class="l">  <span class="q">"status"</span>: true,</span><span class="l">  <span class="q">"message"</span>: <span class="q">"Authorization URL created"</span>,</span><span class="l">  <span class="q">"data"</span>: {</span><span class="l">    <span class="q">"authorization_url"</span>: <span class="q">"http://127.0.0.1:8080/paystack/checkout/48zrdrkbqv7e"</span>,</span><span class="l">    <span class="q">"access_code"</span>: <span class="q">"48zrdrkbqv7e"</span>,</span><span class="l">    <span class="q">"reference"</span>: <span class="q">"order_1"</span></span><span class="l">  }</span><span class="l">}</span></code></pre>
+          </div>
+
+          <div role="tabpanel" id="p-cli" aria-labelledby="t-cli" tabindex="0" hidden>
+<pre><code><span class="l"><span class="c"># register your handler, then settle the charge</span></span><span class="l"><span class="k">paybox</span> webhook add http://localhost:3000/webhooks/paystack</span><span class="l"><span class="k">paybox</span> payment success order_1</span><span class="l"> </span><span class="l"><span class="c"># a signed charge.success arrives; verify now answers "success"</span></span><span class="l"><span class="k">paybox</span> payment list</span><span class="l"><span class="k">paybox</span> webhook list</span></code></pre>
+          </div>
+
+          <div class="panel-foot">
+            <span>HOST 127.0.0.1:8080</span>
+            <span>AMOUNTS integer minor units</span>
+            <span>CVV never stored</span>
+          </div>
+        </div>
+        <p class="note">
+          That authorization URL is a real checkout page with the test instruments
+          listed on it — which card or phone number produces which outcome is in
+          <a href="https://github.com/dsasante1/paybox/blob/main/docs/test-instruments.md">test-instruments</a>.
+        </p>
+      </div>
+    </section>
+
+    <!-- §03 -------------------------------------------------------------- -->
+    <section class="sec" id="s03">
+      <div class="sec-head">
+        <p class="no">§03<br>FIG. 2</p>
+        <h2>The failure modes, on demand.</h2>
+        <p class="sub">
+          A non-2xx response or a transport error schedules a retry: exponential
+          from one second, doubling, with full jitter across the lower half of each
+          interval, up to five attempts. All of it is scheduled work in a durable
+          job table — so <strong>one advance runs the whole ladder</strong>, and the
+          jitter is drawn from the seeded random, which keeps the run reproducible.
+        </p>
+      </div>
+
+      <figure class="offset">
+        <div class="fig">
+          <div class="fig-bar">
+            <span class="id">FIG. 2</span>
+            <span class="ti">Webhook retry ladder · default policy</span>
+            <span class="sc">t AXIS NOT TO SCALE</span>
+          </div>
+          <div class="fig-body">
+            <svg viewBox="0 0 1168 212" role="img" aria-labelledby="f2t f2d">
+              <title id="f2t">The default webhook retry ladder</title>
+              <desc id="f2d">Five attempts on a time axis. The first delivery is at t zero;
+                each retry follows after a doubling interval with full jitter — 0.5 to 1
+                second, 1 to 2, 2 to 4, then 4 to 8 — and the fifth failure marks the
+                delivery exhausted, at most fifteen seconds of virtual time later.</desc>
+
+              <!-- attempts -->
+              <g class="s-thin">
+                <line x1="100" y1="112" x2="100" y2="66"/>
+                <line x1="330" y1="112" x2="330" y2="66"/>
+                <line x1="560" y1="112" x2="560" y2="66"/>
+                <line x1="790" y1="112" x2="790" y2="66"/>
+              </g>
+              <g class="s-thin">
+                <rect x="94" y="56" width="12" height="12"/>
+                <rect x="324" y="56" width="12" height="12"/>
+                <rect x="554" y="56" width="12" height="12"/>
+                <rect x="784" y="56" width="12" height="12"/>
+              </g>
+              <line class="s-acc" x1="1020" y1="112" x2="1020" y2="66"/>
+              <rect class="s-acc" x="1014" y="56" width="12" height="12"/>
+              <text class="t-s" x="100" y="44" text-anchor="middle">ATT 01</text>
+              <text class="t-s" x="330" y="44" text-anchor="middle">ATT 02</text>
+              <text class="t-s" x="560" y="44" text-anchor="middle">ATT 03</text>
+              <text class="t-s" x="790" y="44" text-anchor="middle">ATT 04</text>
+              <text class="t-a" x="1020" y="44" text-anchor="middle">ATT 05</text>
+              <text class="t-m" x="100" y="132" text-anchor="middle">http 500</text>
+              <text class="t-m" x="330" y="132" text-anchor="middle">http 500</text>
+              <text class="t-m" x="560" y="132" text-anchor="middle">http 500</text>
+              <text class="t-m" x="790" y="132" text-anchor="middle">http 500</text>
+              <text class="t-a" x="1020" y="132" text-anchor="middle">EXHAUSTED</text>
+
+              <!-- time axis -->
+              <line class="s-thin" x1="32" y1="112" x2="1136" y2="112"/>
+              <polyline class="s-thin" points="1130,106 1136,112 1130,118"/>
+              <text class="t-s" x="32" y="104">t₀</text>
+
+              <!-- interval dimensions -->
+              <g>
+                <line class="s-rule" x1="100" y1="150" x2="330" y2="150"/>
+                <line class="s-rule" x1="100" y1="144" x2="100" y2="156"/>
+                <line class="s-rule" x1="330" y1="144" x2="330" y2="156"/>
+                <rect class="knock" x="175" y="142" width="80" height="16"/>
+                <text class="t-s" x="215" y="154" text-anchor="middle">0.5–1s</text>
+              </g>
+              <g>
+                <line class="s-rule" x1="330" y1="150" x2="560" y2="150"/>
+                <line class="s-rule" x1="560" y1="144" x2="560" y2="156"/>
+                <rect class="knock" x="410" y="142" width="70" height="16"/>
+                <text class="t-s" x="445" y="154" text-anchor="middle">1–2s</text>
+              </g>
+              <g>
+                <line class="s-rule" x1="560" y1="150" x2="790" y2="150"/>
+                <line class="s-rule" x1="790" y1="144" x2="790" y2="156"/>
+                <rect class="knock" x="640" y="142" width="70" height="16"/>
+                <text class="t-s" x="675" y="154" text-anchor="middle">2–4s</text>
+              </g>
+              <g>
+                <line class="s-rule" x1="790" y1="150" x2="1020" y2="150"/>
+                <line class="s-rule" x1="1020" y1="144" x2="1020" y2="156"/>
+                <rect class="knock" x="870" y="142" width="70" height="16"/>
+                <text class="t-s" x="905" y="154" text-anchor="middle">4–8s</text>
+              </g>
+
+              <!-- total dimension -->
+              <line class="s-thin" x1="100" y1="188" x2="1020" y2="188"/>
+              <line class="s-thin" x1="100" y1="180" x2="100" y2="196"/>
+              <line class="s-thin" x1="1020" y1="180" x2="1020" y2="196"/>
+              <line class="s-rule" x1="100" y1="156" x2="100" y2="180"/>
+              <line class="s-rule" x1="1020" y1="156" x2="1020" y2="180"/>
+              <rect class="knock" x="370" y="178" width="380" height="20"/>
+              <text class="t-s" x="560" y="192" text-anchor="middle">≤ 15s VIRTUAL · ONE `time advance 2h` RUNS ALL OF IT</text>
+            </svg>
+          </div>
+        </div>
+        <figcaption>
+          Five attempts is the default (<code>webhooks.retry.maxAttempts</code>). The
+          delivery row records every attempt, its HTTP status, the response body, the
+          duration and the next retry time — and <b>replay</b> re-sends a
+          byte-identical signed payload against a fresh delivery, which is the thing
+          that answers whether your handler double-credits the customer.
+        </figcaption>
+      </figure>
+
+      <div class="rows offset">
+        <div class="row">
+          <span>A</span>
+          <h3>Force every delivery to fail</h3>
+          <p><code>paybox webhook fail http_500</code> — then advance the clock and
+            watch the ladder above run to exhaustion.</p>
+        </div>
+        <div class="row">
+          <span>B</span>
+          <h3>Duplicate and reorder</h3>
+          <p><code>paybox webhook chaos --duplicate true --out-of-order true</code> —
+            at-least-once delivery, reproduced honestly.</p>
+        </div>
+        <div class="row">
+          <span>C</span>
+          <h3>Race the response</h3>
+          <p><code>paybox network latency 3000</code> — latency lands on the
+            <em>response</em>, so the webhook reaches your app before the call that
+            created it returns.</p>
+        </div>
+        <div class="row">
+          <span>D</span>
+          <h3>Replay a signed payload</h3>
+          <p><code>paybox webhook replay whd_…</code> — same bytes, same signature,
+            new delivery.</p>
+        </div>
+        <div class="row">
+          <span>E</span>
+          <h3>Move a year in one call</h3>
+          <p><code>paybox time advance 1y</code> — a monthly subscription yields
+            twelve invoices one calendar month apart, each payment stamped at its own
+            period start.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- §04 -------------------------------------------------------------- -->
+    <section class="sec" id="s04">
+      <div class="sec-head">
+        <p class="no">§04</p>
+        <h2>Seven providers, eight adapters — each partially implemented.</h2>
+        <p class="sub">
+          <strong>Partial means partial.</strong> Each contract page lists what is
+          implemented, what differs from the real provider and what is absent; if
+          something is missing from one, assume it is not there. Every adapter
+          declares what it serves in a manifest, and a test fails if the manifest and
+          the router disagree in either direction — so this schedule cannot overstate
+          what the emulator answers.
+        </p>
+      </div>
+
+      <div class="offset">
+        <div class="schedule">
+<!-- coverage:start -->
+<table>
+  <thead>
+    <tr><th scope="col">Provider</th><th scope="col">Base path</th><th scope="col">Endpoints</th><th scope="col">Coverage</th></tr>
+  </thead>
+  <tbody>
+    <tr><th scope="row">Paystack</th><td><code>/paystack</code></td><td class="num">64</td><td><span class="pill">Partial</span> <a href="https://github.com/dsasante1/paybox/blob/main/docs/paystack.md">what works</a></td></tr>
+    <tr><th scope="row">Stripe</th><td><code>/stripe</code></td><td class="num">92</td><td><span class="pill">Partial</span> <a href="https://github.com/dsasante1/paybox/blob/main/docs/stripe.md">what works</a></td></tr>
+    <tr><th scope="row">Flutterwave v3</th><td><code>/flutterwave</code></td><td class="num">26</td><td><span class="pill">Partial</span> <a href="https://github.com/dsasante1/paybox/blob/main/docs/flutterwave.md">what works</a></td></tr>
+    <tr><th scope="row">Flutterwave v4</th><td><code>/flutterwave/v4</code></td><td class="num">11</td><td><span class="pill">Partial</span> <a href="https://github.com/dsasante1/paybox/blob/main/docs/flutterwave.md">what works</a></td></tr>
+    <tr><th scope="row">Kora</th><td><code>/kora</code></td><td class="num">29</td><td><span class="pill">Partial</span> <a href="https://github.com/dsasante1/paybox/blob/main/docs/kora.md">what works</a></td></tr>
+    <tr><th scope="row">Quid Payments</th><td><code>/quiddpay</code></td><td class="num">36</td><td><span class="pill">Partial</span> <a href="https://github.com/dsasante1/paybox/blob/main/docs/quiddpay.md">what works</a></td></tr>
+    <tr><th scope="row">WeWire</th><td><code>/wewire</code></td><td class="num">25</td><td><span class="pill">Partial</span> <a href="https://github.com/dsasante1/paybox/blob/main/docs/wewire.md">what works</a></td></tr>
+    <tr><th scope="row">Wise</th><td><code>/wise</code></td><td class="num">30</td><td><span class="pill">Partial</span> <a href="https://github.com/dsasante1/paybox/blob/main/docs/wise.md">what works</a></td></tr>
+  </tbody>
+</table>
+<p class="note">313 endpoints across 8 adapters, counted from the manifests the test suite checks against the router.</p>
+<!-- coverage:end -->
+        </div>
+
+        <div class="callout">
+          <div class="bar" aria-hidden="true"></div>
+          <div class="txt">
+            <h3>Note · safety</h3>
+            <p>
+              <strong>No real money can move through this process.</strong> It has no
+              code path that reaches a payment network, it refuses live API keys, it
+              never stores a CVV, and it binds to <code>127.0.0.1</code> by default —
+              warning if you bind it wider.
+            </p>
+            <p>
+              Generated credentials are labelled TEST/LOCAL, and the whole database is
+              a file you can delete. The guarantees and their limits are stated in
+              <a href="https://github.com/dsasante1/paybox/blob/main/SECURITY.md">SECURITY.md</a>.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- §05 -------------------------------------------------------------- -->
+    <section class="sec" id="s05">
+      <div class="sec-head">
+        <p class="no">§05<br>FIG. 3</p>
+        <h2>One engine, eight adapters, one direction.</h2>
+        <p class="sub">
+          The engine knows nothing about providers: <code>provider</code> is a
+          discriminator on a row. Anything an adapter needs from the engine arrives
+          as an <strong>injected function</strong> — a status mapping, an instrument
+          table, an authorization minter — never an import. No adapter can see
+          another, and the engine sees none of them.
+        </p>
+      </div>
+
+      <div class="offset split">
+        <figure>
+          <div class="fig">
+            <div class="fig-bar">
+              <span class="id">FIG. 3</span>
+              <span class="ti">Exploded view · package stack</span>
+            </div>
+            <div class="fig-body tall">
+              <svg viewBox="0 0 600 420" role="img" aria-labelledby="f3t f3d">
+                <title id="f3t">Exploded view of the package stack</title>
+                <desc id="f3d">Six plates in an exploded stack, from apps/cli at the top
+                  down to shared at the bottom. Each plate is labelled by a leader line.
+                  Higher plates import lower ones and never the reverse.</desc>
+
+                <line class="s-dash" x1="170" y1="8" x2="170" y2="404"/>
+
+                <!-- plates, top to bottom -->
+                <polygon class="s-thin" points="50,46 170,24 290,46 170,68"/>
+                <circle class="s-thin" cx="290" cy="46" r="2.5"/>
+                <polyline class="s-rule" points="292,46 322,46"/>
+                <text class="t-m" x="330" y="50">apps/cli</text>
+
+                <polygon class="s-thin" points="50,110 170,88 290,110 170,132"/>
+                <circle class="s-thin" cx="290" cy="110" r="2.5"/>
+                <polyline class="s-rule" points="292,110 322,110"/>
+                <text class="t-m" x="330" y="114">apps/api</text>
+
+                <polygon class="s-acc" points="50,174 170,152 290,174 170,196"/>
+                <circle class="s-acc" cx="290" cy="174" r="2.5"/>
+                <polyline class="s-rule" points="292,174 322,174"/>
+                <text class="t-a" x="330" y="171">providers/*</text>
+                <text class="t-s" x="330" y="185">8 adapters · 7 providers</text>
+
+                <polygon class="s-thin" points="50,238 170,216 290,238 170,260"/>
+                <circle class="s-thin" cx="290" cy="238" r="2.5"/>
+                <polyline class="s-rule" points="292,238 322,238"/>
+                <text class="t-m" x="330" y="235">storage · webhooks</text>
+                <text class="t-m" x="330" y="249">simulator</text>
+
+                <polygon class="s-thin" points="50,302 170,280 290,302 170,324"/>
+                <circle class="s-thin" cx="290" cy="302" r="2.5"/>
+                <polyline class="s-rule" points="292,302 322,302"/>
+                <text class="t-m" x="330" y="299">core</text>
+                <text class="t-s" x="330" y="313">engine · clock · scheduler</text>
+
+                <polygon class="s-thin" points="50,366 170,344 290,366 170,388"/>
+                <circle class="s-thin" cx="290" cy="366" r="2.5"/>
+                <polyline class="s-rule" points="292,366 322,366"/>
+                <text class="t-m" x="330" y="363">shared</text>
+                <text class="t-s" x="330" y="377">types · Random · Clock port</text>
+
+                <!-- one-way dimension -->
+                <line class="s-thin" x1="22" y1="46" x2="22" y2="366"/>
+                <polyline class="s-thin" points="16,52 22,46 28,52"/>
+                <line class="s-thin" x1="14" y1="366" x2="30" y2="366"/>
+                <text class="t-s" x="12" y="206" text-anchor="middle"
+                      transform="rotate(-90 12 206)">IMPORTS · ONE WAY</text>
+              </svg>
+            </div>
+          </div>
+          <figcaption>
+            Higher plates import lower ones; nothing imports upward. Adding Stripe was
+            the test of that — it needed three narrow seams, not a rewrite.
+          </figcaption>
+        </figure>
+
+        <div class="rows" style="margin-top:8px">
+          <div class="row">
+            <span>I</span>
+            <h3>The event log is the source of truth</h3>
+            <p>Append-only, with no UPDATE path. Every state change appends an event
+              and updates the row inside one transaction.</p>
+          </div>
+          <div class="row">
+            <span>II</span>
+            <h3>Two statuses are always stored</h3>
+            <p>One canonical status drives the state machine; the verbatim provider
+              string is kept beside it, so an adapter echoes exactly what the real API
+              would return.</p>
+          </div>
+          <div class="row">
+            <span>III</span>
+            <h3>The state machine is a table</h3>
+            <p>Not code. Terminal states have empty transition lists, and
+              <code>failed → successful</code> is reachable only through an explicit
+              reversal.</p>
+          </div>
+          <div class="row">
+            <span>IV</span>
+            <h3>The balance is a fold</h3>
+            <p>Over an append-only ledger, never a stored mutable number. A transfer
+              reserves its amount when queued, so two queued payouts cannot spend the
+              same money.</p>
+          </div>
+          <div class="row">
+            <span>V</span>
+            <h3>Amounts are integer minor units</h3>
+            <p>Always. No FX conversion ever happens; a cross-currency quote is
+              recorded, not computed.</p>
+          </div>
+          <div class="row">
+            <span>VI</span>
+            <h3>Nothing reads the wall clock</h3>
+            <p><code>Date.now()</code>, <code>Math.random()</code> and raw timers are
+              banned by lint outside the time package. That is what makes
+              <code>time advance</code> work and a seed reproduce a run byte for byte.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- §06 -------------------------------------------------------------- -->
+    <section class="sec" id="s06">
+      <div class="sec-head">
+        <p class="no">§06</p>
+        <h2>Every page answers one question.</h2>
+        <p class="sub">
+          The contracts are the honest part: they say what is missing. The full tree
+          is in the index on the left, and the
+          <a href="https://github.com/dsasante1/paybox/blob/main/docs/README.md">documentation index</a>
+          maps every page to a question.
+        </p>
+      </div>
+
+      <div class="cards offset">
+        <a href="https://github.com/dsasante1/paybox/blob/main/docs/getting-started.md">
+          <b>Getting started</b><span>install · point an app at it · first webhook</span></a>
+        <a href="https://github.com/dsasante1/paybox/blob/main/docs/concepts.md">
+          <b>Concepts</b><span>statuses · event log · virtual time</span></a>
+        <a href="https://github.com/dsasante1/paybox/blob/main/docs/providers.md">
+          <b>Providers</b><span>base URL · credential · SDK settings</span></a>
+        <a href="https://github.com/dsasante1/paybox/blob/main/docs/test-instruments.md">
+          <b>Test instruments</b><span>which input · which outcome</span></a>
+        <a href="https://github.com/dsasante1/paybox/blob/main/docs/payment-lifecycle.md">
+          <b>Lifecycle</b><span>transitions · refunds · disputes</span></a>
+        <a href="https://github.com/dsasante1/paybox/blob/main/docs/time.md">
+          <b>Time control</b><span>what advance runs — and what it does not</span></a>
+        <a href="https://github.com/dsasante1/paybox/blob/main/docs/testing.md">
+          <b>Testing with paybox</b><span>a full test · CI blocks · one recipe per failure</span></a>
+        <a href="https://github.com/dsasante1/paybox/blob/main/docs/cli.md">
+          <b>CLI</b><span>every command</span></a>
+        <a href="https://github.com/dsasante1/paybox/blob/main/docs/control-api.md">
+          <b>Control API</b><span>every /api route</span></a>
+        <a href="https://github.com/dsasante1/paybox/blob/main/docs/architecture.md">
+          <b>Architecture</b><span>how it works · why it is built this way</span></a>
+        <a href="https://github.com/dsasante1/paybox/blob/main/docs/docker.md">
+          <b>Docker</b><span>image · compose · CI services</span></a>
+        <a href="https://github.com/dsasante1/paybox/blob/main/docs/troubleshooting.md">
+          <b>Troubleshooting</b><span>symptom → what to do</span></a>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<footer class="foot">
+  <div class="foot-links">
+    <a href="https://github.com/dsasante1/paybox">GitHub</a>
+    <a href="https://www.npmjs.com/package/paybox-emulator">npm</a>
+    <a href="https://hub.docker.com/r/dsasante1/paybox">Docker Hub</a>
+    <a href="https://github.com/dsasante1/paybox/blob/main/CHANGELOG.md">Changelog</a>
+    <a href="https://github.com/dsasante1/paybox/blob/main/SECURITY.md">Security</a>
+    <a href="https://github.com/dsasante1/paybox/blob/main/CONTRIBUTING.md">Contributing</a>
+  </div>
+</footer>
+
+</div>
+<script src="/main.js"></script>
+</body>
+</html>
