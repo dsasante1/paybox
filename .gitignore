@@ -13,6 +13,3 @@ apps/paybox/LICENSE
 # comments as `spec §N`, but not published: it is a working document, not
 # documentation. docs/spec-references.md indexes the sections the code cites.
 idea.txt
-
-# Vercel's local link for the landing page in site/ (project and org ids).
-site/.vercel

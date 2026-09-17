@@ -40,6 +40,15 @@ Preview it locally with any static server:
 npx serve site        # or: python3 -m http.server --directory site
 ```
 
+### Where it is deployed
+
+Project `paybox-emulator` in the `verbsghs-projects` scope, aliased to
+**https://paybox-emulator.vercel.app**. `vercel link` has already been run
+here, so `npx vercel --prod` from this directory deploys to that project;
+`site/.vercel` and the `.env.local` the link step writes are both local and
+gitignored, and `.vercelignore` keeps them — and this file — out of the upload,
+since a static deployment would otherwise serve the token file verbatim.
+
 ### The canonical URL
 
 `index.html` carries `<link rel="canonical">` and `og:url` pointing at
