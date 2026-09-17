@@ -131,21 +131,26 @@ named `paybox-emulator`. If it ends up on a different hostname — a custom
 domain, or a different project name — change both, or search engines and link
 previews will point at a URL that does not resolve.
 
-## The coverage table
+## The generated blocks
 
-The provider table between the `<!-- coverage:start -->` and
-`<!-- coverage:end -->` markers in `index.html` is **generated**, exactly like
-the README's. Do not edit it by hand:
+Two things on this page are **generated**. Do not edit either by hand:
 
 ```bash
-npm run coverage:table
+npm run generate
 ```
 
-It is rendered from each adapter's coverage manifest by `renderSiteTable`
-(`packages/shared/src/coverage-report.ts`), and `tests/coverage-drift.test.ts`
-fails if the page is stale — so the counts on the landing page cannot claim an
-endpoint the router does not serve. Contract links are absolutised against the
-repository, since the deployed page cannot resolve `docs/*.md`.
+- The provider table, between `<!-- coverage:start -->` and
+  `<!-- coverage:end -->`, rendered from each adapter's coverage manifest by
+  `renderSiteTable` (`packages/shared/src/coverage-report.ts`). Contract links
+  are absolutised against the repository, since the deployed page cannot
+  resolve `docs/*.md`.
+- The version in the title plate, between `<!-- version:start -->` and
+  `<!-- version:end -->`, read from `apps/paybox/package.json` — the one field
+  that decides what `npx paybox-emulator` installs.
+
+`tests/coverage-drift.test.ts` fails if either is stale, so the page cannot
+claim an endpoint the router does not serve, and cannot name a version that is
+not the published one. `scripts/generated-blocks.ts` owns both.
 
 Everything else on the page is prose, written by hand, and should stay in step
 with the README it paraphrases. The page makes no claim the README does not:

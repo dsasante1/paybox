@@ -20,7 +20,7 @@
     "test:watch": "vitest",
     "typecheck": "tsc -b --pretty",
     "lint": "eslint .",
-    "coverage:table": "tsx scripts/coverage-table.ts",
+    "generate": "tsx scripts/generated-blocks.ts",
     "build": "node scripts/build.mjs",
     "smoke:package": "node scripts/smoke-package.mjs",
     "ship": "node scripts/ship.mjs",

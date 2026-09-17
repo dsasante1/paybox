@@ -97,7 +97,7 @@ function escapeHtml(value: string): string {
  * relative `docs/*.md` links, so each row's contract link is absolutised
  * against `docsBaseUrl`. Generated for the same reason the README's table is:
  * the front page a visitor reads first must not be able to claim an endpoint
- * the router does not serve. `npm run coverage:table` writes both, and
+ * the router does not serve. `npm run generate` writes both, and
  * `tests/coverage-drift.test.ts` fails on either being stale.
  */
 export function renderSiteTable(
