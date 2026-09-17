@@ -1,9 +1,57 @@
 # site
 
-The landing page for paybox: one static HTML document, a favicon and a
-thirteen-line script. No framework, no build step, no dependencies — the same
-trade the dashboard makes in `apps/api/src/dashboard.ts`, for the same reason:
-nothing here should need compiling before it can be served.
+The landing page for paybox: one static HTML document, a favicon and a short
+script. No framework, no build step, no dependencies — the same trade the
+dashboard makes in `apps/api/src/dashboard.ts`, for the same reason: nothing
+here should need compiling before it can be served.
+
+## The drawing
+
+The page is laid out as a technical sheet rather than a marketing page: a title
+plate, a numbered sheet index, sections `§00`–`§06`, and three figures drawn as
+patent-style line art.
+
+| | |
+|---|---|
+| Paper | `#f8f9fa`, with a 32px construction grid of 1px lines |
+| Ink | `#121212`; `#4a5058` for prose, `#666d75` for the mono lettering |
+| Rules | 1px throughout — `#c9ced4` for hairlines, ink for the frame |
+| Accent | `#1b44e0`, and **only** on the highlighted step of a process |
+| Type | JetBrains Mono / system mono for lettering, Inter / system sans for prose — both from the system, so the page still loads no external asset |
+| Absent | gradients as shading, shadows, filled shapes, rounded corners |
+
+The three figures are hand-plotted SVG, on the same 4px grid, using one line
+vocabulary: `.s-thin` for geometry, `.s-rule` for dimension and extension
+lines, `.s-dash` for axes, `.s-acc` for the highlighted step. Strokes carry
+`vector-effect: non-scaling-stroke`, so a hairline stays a hairline when the
+figure scales. Each figure has a `<title>` and a `<desc>` that describes the
+whole drawing in words, and a caption that repeats the substance in prose —
+the diagrams are not the only way to read the page.
+
+Text on the figures is knocked out over its own rules with a paper-coloured
+rectangle rather than a background fill, which is how a dimension line is
+lettered on a real drawing.
+
+**One accent, one job.** Blue marks the step of a process that is the point of
+the figure: `time advance` in FIG. 1, the exhausted delivery in FIG. 2, the
+provider layer in FIG. 3. It is also the link colour, and nothing else uses it.
+
+### Verifying a change
+
+There is no test for the visual design, so check it in a browser before
+deploying — including at a phone width, where the figures scroll inside their
+own frames and the index moves below the sheet:
+
+```bash
+python3 -m http.server 8099 --directory site
+chromium --headless --window-size=430,3000 --screenshot=/tmp/m.png http://127.0.0.1:8099/
+```
+
+The interactive parts are the tabbed data panel in `§02` and the copy buttons.
+The tablist implements arrow-key navigation with a roving `tabindex`; the code
+panels number their lines with CSS generated content, which browsers leave out
+of a copy, so the copy button rejoins the `.l` elements with newlines rather
+than reading `textContent`.
 
 ## Deploying it on Vercel
 
