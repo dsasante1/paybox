@@ -8,7 +8,7 @@ here should need compiling before it can be served.
 ## The drawing
 
 The page is laid out as a technical sheet rather than a marketing page: a title
-plate, a numbered sheet index, sections `§00`–`§06`, and three figures drawn as
+plate, a numbered sheet index, sections `§00`–`§06`, and two figures drawn as
 patent-style line art.
 
 | | light | dark |
@@ -71,9 +71,9 @@ instead — same emphasis, none of the glare.
 `favicon.svg` carries its own `prefers-color-scheme` block, so the tab icon
 follows the browser too.
 
-The three figures are hand-plotted SVG, on the same 4px grid, using one line
+Both figures are hand-plotted SVG, on the same 4px grid, using one line
 vocabulary: `.s-thin` for geometry, `.s-rule` for dimension and extension
-lines, `.s-dash` for axes, `.s-acc` for the highlighted step. Strokes carry
+lines, `.s-acc` for the highlighted step. Strokes carry
 `vector-effect: non-scaling-stroke`, so a hairline stays a hairline when the
 figure scales. Each figure has a `<title>` and a `<desc>` that describes the
 whole drawing in words, and a caption that repeats the substance in prose —
@@ -84,8 +84,8 @@ rectangle rather than a background fill, which is how a dimension line is
 lettered on a real drawing.
 
 **One accent, one job.** Blue marks the step of a process that is the point of
-the figure: `time advance` in FIG. 1, the exhausted delivery in FIG. 2, the
-provider layer in FIG. 3. It is also the link colour, and nothing else uses it.
+the figure: `time advance` in FIG. 1, the exhausted delivery in FIG. 2. It is
+also the link colour, and nothing else uses it.
 
 ### On a phone
 
@@ -105,11 +105,10 @@ across. What is deliberately different at 620px and below:
   become one block per adapter, so it needs no sideways scroll. The endpoint
   count grows the word `endpoints`, because the column heading it used to sit
   under is hidden.
-- **FIG. 1 and FIG. 2 still scroll inside their frames**, because shrinking them
-  to fit makes the lettering unreadable. Their frames say `SWIPE →` — set from
+- **Both figures still scroll inside their frames**, because shrinking them to
+  fit makes the lettering unreadable. Their frames say `SWIPE →` — set from
   `main.js` by a `ResizeObserver` against the real widths, so it appears only
   when the drawing genuinely does not fit and disappears the moment it does.
-  FIG. 3's floor is 300px, which fits.
 - **Targets and lettering are bigger**: 44px minimum on every control (the
   index links were 22px), and the smallest mono labels go from 10.5px to
   11.5px.

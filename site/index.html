@@ -152,7 +152,7 @@ code,kbd{font-family:var(--mono);font-size:.86em;letter-spacing:0}
 /* The figures and code blocks are deliberately wider than a phone and scroll
    inside their own frame. Without a zero minimum at every step between them
    and the page, that width would push the whole sheet sideways instead. */
-main,.sec,.offset,.fig,.fig-body,.panel,.schedule,.index-in,.split>*{min-width:0}
+main,.sec,.offset,.fig,.fig-body,.panel,.schedule,.index-in{min-width:0}
 
 /* ---------- sidebar: documentation tree ---------- */
 .index{border-right:1px solid var(--ink);padding:26px 0 60px}
@@ -233,12 +233,6 @@ main,.sec,.offset,.fig,.fig-body,.panel,.schedule,.index-in,.split>*{min-width:0
 }
 .offset{margin-left:98px}
 @media (max-width:640px){.offset{margin-left:0}}
-.split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.05fr);
-  gap:clamp(24px,4vw,48px);align-items:start}
-@media (max-width:1000px){.split{grid-template-columns:1fr;gap:26px}}
-/* Beside a long list the drawing stays in view — reading the invariants
-   against the stack is the point of putting them side by side. */
-@media (min-width:1001px){.split>figure{position:sticky;top:78px}}
 
 /* ---------- §00 title block ---------- */
 .hero{padding:clamp(40px,7vw,86px) 0 54px;display:grid;
@@ -284,15 +278,12 @@ figure{margin:0}
 .fig-bar .sc{margin-left:auto;font:400 10.5px/1.1 var(--mono);color:var(--ink-3)}
 .fig-body{padding:20px 16px;overflow-x:auto;overscroll-behavior-x:contain}
 .fig svg{display:block;width:100%;height:auto;min-width:640px}
-.fig-body.tall svg{min-width:300px;max-width:600px;margin:0 auto}
 figcaption{margin-top:12px;font:400 12px/1.6 var(--mono);color:var(--ink-3);max-width:88ch}
 figcaption b{font-weight:500;color:var(--ink-2)}
 /* figure line vocabulary */
 .s-thin{fill:none;stroke:var(--ink);stroke-width:1;vector-effect:non-scaling-stroke}
 .s-rule{fill:none;stroke:var(--rule);stroke-width:1;vector-effect:non-scaling-stroke}
 .s-acc{fill:none;stroke:var(--accent);stroke-width:1.5;vector-effect:non-scaling-stroke}
-.s-dash{fill:none;stroke:var(--rule);stroke-width:1;stroke-dasharray:3 3;
-  vector-effect:non-scaling-stroke}
 .knock{fill:var(--paper)}
 .t-h{font:500 13px/1 var(--sans);fill:var(--ink)}
 .t-m{font:400 10.5px/1 var(--mono);fill:var(--ink-2);letter-spacing:.04em}
@@ -378,10 +369,6 @@ thead th:nth-child(3){text-align:right}
   .rows h3{font-size:14px}
   .rows .row p{grid-column:2}
 }
-/* Inside a half-width column the three-track form squeezes the prose into a
-   ribbon, so there the heading sits above its text. */
-.split .rows .row{grid-template-columns:34px minmax(0,1fr)}
-.split .rows .row p{grid-column:2;margin-top:4px}
 
 /* ---------- links grid ---------- */
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(232px,1fr));
@@ -540,7 +527,7 @@ thead th:nth-child(3){text-align:right}
             <li><span>02</span><a href="#s02">Interface</a></li>
             <li><span>03</span><a href="#s03">Failure injection</a></li>
             <li><span>04</span><a href="#s04">Coverage schedule</a></li>
-            <li><span>05</span><a href="#s05">Assembly</a></li>
+            <li><span>05</span><a href="#s05">Architecture</a></li>
             <li><span>06</span><a href="#s06">Documentation</a></li>
           </ul>
         </div>
@@ -1037,84 +1024,21 @@ thead th:nth-child(3){text-align:right}
     <!-- §05 -------------------------------------------------------------- -->
     <section class="sec" id="s05">
       <div class="sec-head">
-        <p class="no">§05<br>FIG. 3</p>
+        <p class="no">§05</p>
         <h2>One engine, eight adapters, one direction.</h2>
         <p class="sub">
           The engine knows nothing about providers: <code>provider</code> is a
           discriminator on a row. Anything an adapter needs from the engine arrives
           as an <strong>injected function</strong> — a status mapping, an instrument
           table, an authorization minter — never an import. No adapter can see
-          another, and the engine sees none of them.
+          another, and the engine sees none of them. Adding Stripe was the test
+          of that: it needed three narrow seams, not a rewrite.
         </p>
       </div>
 
-      <div class="offset split">
-        <figure>
-          <div class="fig">
-            <div class="fig-bar">
-              <span class="id">FIG. 3</span>
-              <span class="ti">Exploded view · package stack</span>
-            </div>
-            <div class="fig-body tall">
-              <svg viewBox="0 0 600 420" role="img" aria-labelledby="f3t f3d">
-                <title id="f3t">Exploded view of the package stack</title>
-                <desc id="f3d">Six plates in an exploded stack, from apps/cli at the top
-                  down to shared at the bottom. Each plate is labelled by a leader line.
-                  Higher plates import lower ones and never the reverse.</desc>
+      <div class="offset">
 
-                <line class="s-dash" x1="170" y1="8" x2="170" y2="404"/>
-
-                <!-- plates, top to bottom -->
-                <polygon class="s-thin" points="50,46 170,24 290,46 170,68"/>
-                <circle class="s-thin" cx="290" cy="46" r="2.5"/>
-                <polyline class="s-rule" points="292,46 322,46"/>
-                <text class="t-m" x="330" y="50">apps/cli</text>
-
-                <polygon class="s-thin" points="50,110 170,88 290,110 170,132"/>
-                <circle class="s-thin" cx="290" cy="110" r="2.5"/>
-                <polyline class="s-rule" points="292,110 322,110"/>
-                <text class="t-m" x="330" y="114">apps/api</text>
-
-                <polygon class="s-acc" points="50,174 170,152 290,174 170,196"/>
-                <circle class="s-acc" cx="290" cy="174" r="2.5"/>
-                <polyline class="s-rule" points="292,174 322,174"/>
-                <text class="t-a" x="330" y="171">providers/*</text>
-                <text class="t-s" x="330" y="185">8 adapters · 7 providers</text>
-
-                <polygon class="s-thin" points="50,238 170,216 290,238 170,260"/>
-                <circle class="s-thin" cx="290" cy="238" r="2.5"/>
-                <polyline class="s-rule" points="292,238 322,238"/>
-                <text class="t-m" x="330" y="235">storage · webhooks</text>
-                <text class="t-m" x="330" y="249">simulator</text>
-
-                <polygon class="s-thin" points="50,302 170,280 290,302 170,324"/>
-                <circle class="s-thin" cx="290" cy="302" r="2.5"/>
-                <polyline class="s-rule" points="292,302 322,302"/>
-                <text class="t-m" x="330" y="299">core</text>
-                <text class="t-s" x="330" y="313">engine · clock · scheduler</text>
-
-                <polygon class="s-thin" points="50,366 170,344 290,366 170,388"/>
-                <circle class="s-thin" cx="290" cy="366" r="2.5"/>
-                <polyline class="s-rule" points="292,366 322,366"/>
-                <text class="t-m" x="330" y="363">shared</text>
-                <text class="t-s" x="330" y="377">types · Random · Clock port</text>
-
-                <!-- one-way dimension -->
-                <line class="s-thin" x1="22" y1="46" x2="22" y2="366"/>
-                <polyline class="s-thin" points="16,52 22,46 28,52"/>
-                <line class="s-thin" x1="14" y1="366" x2="30" y2="366"/>
-                <text class="t-s" x="12" y="206" text-anchor="middle"
-                      transform="rotate(-90 12 206)">IMPORTS · ONE WAY</text>
-              </svg>
-            </div>
-          </div>
-          <figcaption>
-            Higher plates import lower ones; nothing imports upward. Adding Stripe was
-            the test of that — it needed three narrow seams, not a rewrite.
-          </figcaption>
-        </figure>
-
-        <div class="rows" style="margin-top:8px">
+        <div class="rows">
           <div class="row">
             <span>I</span>
             <h3>The event log is the source of truth</h3>
