@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>paybox — a local payment infrastructure emulator</title>
+<meta name="description" content="Point an existing Paystack, Stripe, Flutterwave, Kora, Quid Payments, WeWire or Wise integration at localhost and test pending payments, webhook retries, duplicate deliveries, timeouts, refunds and idempotency — deterministically, with no provider sandbox.">
+<link rel="canonical" href="https://paybox-emulator.vercel.app/">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<meta name="theme-color" content="#0b7285" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0e1014" media="(prefers-color-scheme: dark)">
+<meta property="og:type" content="website">
+<meta property="og:title" content="paybox — a local payment infrastructure emulator">
+<meta property="og:description" content="Test the parts of payments that are hard to test: pending mobile-money authorization, webhook retries, duplicate deliveries, timeouts, refunds and idempotency. Deterministic, offline, no provider sandbox.">
+<meta property="og:url" content="https://paybox-emulator.vercel.app/">
+<meta name="twitter:card" content="summary">
+<style>
+:root{
+  color-scheme:light dark;
+  --bg:#f7f8fa; --panel:#fff; --fg:#12141a; --muted:#666e7a; --line:#e2e5ea;
+  --accent:#0b7285; --accent-soft:rgba(11,114,133,.1);
+  --ok:#12805c; --warn:#a6690a; --err:#b42318;
+  --term-bg:#12141a; --term-fg:#e6e9ee;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --radius:12px;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#0e1014; --panel:#161920; --fg:#e6e9ee; --muted:#98a1ad; --line:#252932;
+    --accent:#3bb7cc; --accent-soft:rgba(59,183,204,.12);
+    --ok:#3ecf9a; --warn:#e0a94a; --err:#f87a6e;
+    --term-bg:#0a0c10; --term-fg:#e6e9ee;
+  }
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0;background:var(--bg);color:var(--fg);
+  font:16px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+a{color:var(--accent)}
+a:hover{text-decoration-thickness:2px}
+code{font-family:var(--mono);font-size:.87em}
+h1,h2,h3{line-height:1.2;letter-spacing:-.02em;margin:0}
+.wrap{max-width:960px;margin:0 auto;padding:0 24px}
+.skip{position:absolute;left:-9999px}
+.skip:focus{left:8px;top:8px;background:var(--panel);padding:8px 12px;border-radius:8px;z-index:9}
+
+/* header */
+header{position:sticky;top:0;z-index:5;background:color-mix(in srgb,var(--bg) 88%,transparent);
+  backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+header .wrap{display:flex;align-items:center;gap:16px;height:60px}
+.brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:17px;
+  color:var(--fg);text-decoration:none;letter-spacing:-.03em}
+.brand svg{display:block}
+.tag-local{font:600 10.5px/1 var(--mono);text-transform:uppercase;letter-spacing:.08em;
+  color:var(--accent);background:var(--accent-soft);padding:4px 7px;border-radius:99px}
+header nav{margin-left:auto;display:flex;align-items:center;gap:20px;font-size:14.5px}
+header nav a{color:var(--muted);text-decoration:none}
+header nav a:hover{color:var(--fg)}
+@media (max-width:640px){header nav .hide-sm{display:none}}
+
+/* hero */
+.hero{padding:84px 0 64px;border-bottom:1px solid var(--line)}
+.hero h1{font-size:clamp(34px,6vw,54px)}
+.hero h1 em{font-style:normal;color:var(--accent)}
+.lede{font-size:clamp(17px,2.2vw,20px);color:var(--muted);max-width:44ch;margin:20px 0 0}
+.cta{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-top:32px}
+.copy{display:flex;align-items:center;gap:10px;background:var(--panel);border:1px solid var(--line);
+  border-radius:10px;padding:0 0 0 14px;font-family:var(--mono);font-size:14px}
+.copy span{white-space:nowrap;overflow:auto;padding:12px 0}
+.copy .prompt{color:var(--muted);padding-right:2px}
+.copy button{border:0;border-left:1px solid var(--line);background:transparent;color:var(--muted);
+  font:inherit;font-size:12px;padding:13px 14px;cursor:pointer;border-radius:0 10px 10px 0}
+.copy button:hover{color:var(--accent);background:var(--accent-soft)}
+.btn{display:inline-block;background:var(--accent);color:var(--bg);text-decoration:none;
+  font-weight:600;font-size:14.5px;padding:12px 18px;border-radius:10px}
+.btn.ghost{background:transparent;color:var(--fg);border:1px solid var(--line)}
+.btn.ghost:hover{border-color:var(--accent);color:var(--accent)}
+.hero .aside{margin-top:22px;font-size:13.5px;color:var(--muted)}
+
+/* sections */
+section{padding:64px 0;border-bottom:1px solid var(--line)}
+.eyebrow{font:600 11.5px/1 var(--mono);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);margin:0 0 12px}
+section h2{font-size:clamp(24px,3.4vw,32px)}
+section h2+p{color:var(--muted);max-width:62ch;margin:14px 0 0}
+
+/* terminal */
+.term{margin-top:28px;background:var(--term-bg);color:var(--term-fg);border-radius:var(--radius);
+  border:1px solid var(--line);overflow:hidden}
+.term .bar{display:flex;gap:6px;align-items:center;padding:11px 14px;border-bottom:1px solid rgba(255,255,255,.08)}
+.term .bar i{width:10px;height:10px;border-radius:50%;background:rgba(255,255,255,.16)}
+.term .bar b{margin-left:6px;font:500 11.5px/1 var(--mono);color:rgba(255,255,255,.44);letter-spacing:.04em}
+.term pre{margin:0;padding:18px;overflow-x:auto;font-family:var(--mono);font-size:13px;line-height:1.7}
+.term .c{color:#7d8794}
+.term .p{color:#3bb7cc}
+.term .o{color:#8fd6b0}
+.term .w{color:#e0a94a}
+
+/* cards */
+.grid{display:grid;gap:18px;margin-top:32px;grid-template-columns:repeat(auto-fit,minmax(248px,1fr))}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:20px 22px}
+.card h3{font-size:16.5px;display:flex;align-items:center;gap:8px}
+.card p{margin:9px 0 0;font-size:14.5px;color:var(--muted)}
+.card code{color:var(--fg)}
+
+/* table */
+.table-wrap{margin-top:28px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--radius);overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:14.5px}
+th,td{text-align:left;padding:12px 16px;border-bottom:1px solid var(--line)}
+thead th{font:600 11.5px/1 system-ui;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+tbody tr:last-child th,tbody tr:last-child td{border-bottom:0}
+tbody th{font-weight:600}
+td.num{font-family:var(--mono);color:var(--muted)}
+.pill{font:700 11px/1 system-ui;padding:4px 8px;border-radius:99px;
+  background:rgba(166,105,10,.16);color:var(--warn)}
+.note{font-size:13.5px;color:var(--muted);margin:14px 0 0}
+.table-wrap+.note{max-width:62ch}
+
+/* safety */
+.safety{display:flex;gap:16px;align-items:flex-start;margin-top:28px;padding:20px 22px;
+  background:var(--accent-soft);border:1px solid var(--line);border-radius:var(--radius)}
+.safety svg{flex:none;margin-top:3px;color:var(--accent)}
+.safety p{margin:0;font-size:14.5px}
+.safety strong{color:var(--fg)}
+
+/* docs list */
+.docs{display:grid;gap:0;margin-top:28px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--radius);overflow:hidden}
+.docs a{display:grid;grid-template-columns:minmax(150px,220px) 1fr;gap:4px 20px;
+  padding:14px 20px;text-decoration:none;color:var(--fg);border-bottom:1px solid var(--line);font-size:14.5px}
+.docs a:last-child{border-bottom:0}
+.docs a:hover{background:var(--bg)}
+.docs a b{font-weight:600;color:var(--accent)}
+.docs a span{color:var(--muted)}
+@media (max-width:560px){.docs a{grid-template-columns:1fr}}
+
+/* footer */
+footer{padding:40px 0 56px;font-size:13.5px;color:var(--muted)}
+footer .links{display:flex;flex-wrap:wrap;gap:18px;margin-bottom:18px}
+footer p{margin:0 0 10px;max-width:72ch}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header>
+  <div class="wrap">
+    <a class="brand" href="/">
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+        <rect x="1.25" y="4" width="17.5" height="12" rx="3" stroke="currentColor" stroke-width="1.6"/>
+        <path d="M1.25 8.5h17.5" stroke="currentColor" stroke-width="1.6"/>
+        <circle cx="14.5" cy="12.5" r="1.3" fill="#0b7285"/>
+      </svg>
+      paybox
+      <span class="tag-local">local only</span>
+    </a>
+    <nav>
+      <a class="hide-sm" href="#providers">Providers</a>
+      <a class="hide-sm" href="#docs">Docs</a>
+      <a href="https://www.npmjs.com/package/paybox-emulator">npm</a>
+      <a href="https://github.com/dsasante1/paybox">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+<div class="hero">
+  <div class="wrap">
+    <h1>Test the payment flows a<br><em>sandbox won't let you reach.</em></h1>
+    <p class="lede">
+      paybox is a local payment infrastructure emulator. Point an existing
+      Paystack, Stripe, Flutterwave, Kora, Quid Payments, WeWire or Wise
+      integration at <code>localhost</code> and drive pending mobile-money
+      authorization, webhook retries, duplicate deliveries, timeouts, refunds
+      and idempotency — deterministically, offline.
+    </p>
+    <div class="cta">
+      <div class="copy">
+        <span><span class="prompt">$</span> npx paybox-emulator start</span>
+        <button type="button" data-copy="npx paybox-emulator start">Copy</button>
+      </div>
+      <a class="btn" href="https://github.com/dsasante1/paybox/blob/main/docs/getting-started.md">Getting started</a>
+      <a class="btn ghost" href="https://github.com/dsasante1/paybox">Read the source</a>
+    </div>
+    <p class="aside">
+      Node 22.5 or newer is the only requirement — no clone, no database
+      server, no compiler. Or
+      <code>docker run --rm -p 127.0.0.1:8080:8080 dsasante1/paybox</code>.
+    </p>
+  </div>
+</div>
+
+<section id="why">
+  <div class="wrap">
+    <p class="eyebrow">Not a mock server</p>
+    <h2>Every request drives a real state machine.</h2>
+    <p>
+      A charge appends to an append-only event log, moves through the same
+      canonical statuses the organic flow would, and emits the same signed
+      webhooks. The payment row is a projection of that log, which is why the
+      timeline, webhook replay and audit trail are one mechanism rather than
+      three.
+    </p>
+    <div class="safety">
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+        <path d="M10 1.75 3.25 4.5v5c0 4 2.9 7.1 6.75 8.75 3.85-1.65 6.75-4.75 6.75-8.75v-5L10 1.75Z"
+              stroke="currentColor" stroke-width="1.5"/>
+        <path d="m7.2 9.9 2 2 3.6-3.9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+      </svg>
+      <p>
+        <strong>No real money can move through this process.</strong>
+        It has no code path that reaches a payment network, it refuses live API
+        keys, it never stores a CVV, and it binds to <code>127.0.0.1</code> by
+        default.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section id="interesting">
+  <div class="wrap">
+    <p class="eyebrow">The interesting part</p>
+    <h2>Fast-forward instead of waiting.</h2>
+    <p>
+      Time is virtual. The scheduler compares due jobs against the virtual
+      clock and runs each one at the instant it was <em>scheduled for</em>, so
+      one advance fires the whole window — a five-attempt retry ladder, or
+      twelve monthly renewals with twelve correct dates.
+    </p>
+    <div class="term">
+      <div class="bar"><i></i><i></i><i></i><b>paybox</b></div>
+<pre><span class="c"># A mobile-money charge answers immediately; the customer has not approved yet.</span>
+<span class="p">$</span> paybox payment create --amount 25000 --method mobile_money --reference momo_1
+  <span class="w">→ requires_action</span>, "Please approve the payment prompt on your phone"
+
+<span class="c"># Fast-forward. Every job that comes due runs before this returns.</span>
+<span class="p">$</span> paybox time advance 5s
+  <span class="o">→ successful</span>, charge.success delivered
+
+<span class="c"># Make every webhook fail, then watch the retry ladder run to exhaustion.</span>
+<span class="p">$</span> paybox webhook fail http_500
+<span class="p">$</span> paybox time advance 2h
+
+<span class="c"># Replay a delivery with a byte-identical signed payload.</span>
+<span class="c"># Does your handler double-credit the customer?</span>
+<span class="p">$</span> paybox webhook replay whd_...
+
+<span class="c"># Duplicate and reorder every webhook.</span>
+<span class="p">$</span> paybox webhook chaos --duplicate true --out-of-order true
+
+<span class="c"># Hold the API response open so the webhook lands before the call returns.</span>
+<span class="p">$</span> paybox network latency 3000</pre>
+    </div>
+  </div>
+</section>
+
+<section id="features">
+  <div class="wrap">
+    <p class="eyebrow">What you get</p>
+    <h2>The failure modes, on demand.</h2>
+    <div class="grid">
+      <div class="card">
+        <h3>Virtual time</h3>
+        <p><code>time advance 1y</code> runs a year of scheduled work instantly —
+          renewals, expiries and retries, each stamped at the moment it was due.</p>
+      </div>
+      <div class="card">
+        <h3>Deterministic runs</h3>
+        <p>A fixed <code>PAYBOX_SEED</code> and a frozen clock reproduce a run
+          byte for byte, so tests can assert on literal ids and exact timestamps.</p>
+      </div>
+      <div class="card">
+        <h3>Webhook chaos</h3>
+        <p>Signed deliveries with real retry ladders, forced failures, duplicates,
+          reordering and byte-identical replay.</p>
+      </div>
+      <div class="card">
+        <h3>Asynchronous authorization</h3>
+        <p>Mobile-money prompts that sit in <code>requires_action</code>, PIN and
+          OTP loops, and stored authorizations you can charge again.</p>
+      </div>
+      <div class="card">
+        <h3>Money movement</h3>
+        <p>Refunds and partial refunds, disputes, transfers that reserve against a
+          balance folded from an append-only ledger, subscriptions and invoices.</p>
+      </div>
+      <div class="card">
+        <h3>Idempotency and latency</h3>
+        <p>Replayed keys answer from the stored response; injected latency lands on
+          the response, so a webhook can beat the call that created it.</p>
+      </div>
+      <div class="card">
+        <h3>Dashboard and event stream</h3>
+        <p>Five views over payments, webhooks, jobs and the log at
+          <code>/dashboard</code>, with an OpenAPI reference at <code>/docs</code>.</p>
+      </div>
+      <div class="card">
+        <h3>CLI-driven, CI-ready</h3>
+        <p>Every control is a command and an HTTP route, so a test can create,
+          settle, fail, advance and assert without a browser.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="providers">
+  <div class="wrap">
+    <p class="eyebrow">Coverage</p>
+    <h2>Seven providers, eight adapters — each partially implemented.</h2>
+    <p>
+      <strong>Partial means partial.</strong> Each contract page lists what is
+      implemented, what differs from the real provider and what is absent. If
+      something is missing from one, assume it is not there. Every adapter
+      declares what it serves in a manifest, and a test fails if the manifest
+      and the router disagree in either direction — so these counts cannot
+      overstate what the emulator answers.
+    </p>
+    <div class="table-wrap">
+<!-- coverage:start -->
+<table>
+  <thead>
+    <tr><th scope="col">Provider</th><th scope="col">Base path</th><th scope="col">Endpoints</th><th scope="col">Coverage</th></tr>
+  </thead>
+  <tbody>
+    <tr><th scope="row">Paystack</th><td><code>/paystack</code></td><td class="num">64</td><td><span class="pill">Partial</span> <a href="https://github.com/dsasante1/paybox/blob/main/docs/paystack.md">what works</a></td></tr>
+    <tr><th scope="row">Stripe</th><td><code>/stripe</code></td><td class="num">92</td><td><span class="pill">Partial</span> <a href="https://github.com/dsasante1/paybox/blob/main/docs/stripe.md">what works</a></td></tr>
+    <tr><th scope="row">Flutterwave v3</th><td><code>/flutterwave</code></td><td class="num">26</td><td><span class="pill">Partial</span> <a href="https://github.com/dsasante1/paybox/blob/main/docs/flutterwave.md">what works</a></td></tr>
+    <tr><th scope="row">Flutterwave v4</th><td><code>/flutterwave/v4</code></td><td class="num">11</td><td><span class="pill">Partial</span> <a href="https://github.com/dsasante1/paybox/blob/main/docs/flutterwave.md">what works</a></td></tr>
+    <tr><th scope="row">Kora</th><td><code>/kora</code></td><td class="num">29</td><td><span class="pill">Partial</span> <a href="https://github.com/dsasante1/paybox/blob/main/docs/kora.md">what works</a></td></tr>
+    <tr><th scope="row">Quid Payments</th><td><code>/quiddpay</code></td><td class="num">36</td><td><span class="pill">Partial</span> <a href="https://github.com/dsasante1/paybox/blob/main/docs/quiddpay.md">what works</a></td></tr>
+    <tr><th scope="row">WeWire</th><td><code>/wewire</code></td><td class="num">25</td><td><span class="pill">Partial</span> <a href="https://github.com/dsasante1/paybox/blob/main/docs/wewire.md">what works</a></td></tr>
+    <tr><th scope="row">Wise</th><td><code>/wise</code></td><td class="num">30</td><td><span class="pill">Partial</span> <a href="https://github.com/dsasante1/paybox/blob/main/docs/wise.md">what works</a></td></tr>
+  </tbody>
+</table>
+<p class="note">313 endpoints across 8 adapters, counted from the manifests the test suite checks against the router.</p>
+<!-- coverage:end -->
+    </div>
+  </div>
+</section>
+
+<section id="start">
+  <div class="wrap">
+    <p class="eyebrow">Zero to a simulated payment</p>
+    <h2>Change a base URL. Nothing else.</h2>
+    <p>
+      <code>paybox status</code> prints the credentials each adapter issued.
+      They are labelled test credentials that exist only in the local database.
+    </p>
+    <div class="term">
+      <div class="bar"><i></i><i></i><i></i><b>.env</b></div>
+<pre>PAYSTACK_BASE_URL=http://127.0.0.1:8080/paystack
+PAYSTACK_SECRET_KEY=sk_test_local_a1b2c3...
+
+STRIPE_API_BASE=http://127.0.0.1:8080/stripe
+FLW_BASE_URL=http://127.0.0.1:8080/flutterwave   <span class="c"># v3, FLWSECK_TEST-… keys</span>
+KORA_BASE_URL=http://127.0.0.1:8080/kora</pre>
+    </div>
+    <div class="term">
+      <div class="bar"><i></i><i></i><i></i><b>then, exactly as you would against Paystack</b></div>
+<pre><span class="p">$</span> curl -X POST http://127.0.0.1:8080/paystack/transaction/initialize \
+    -H "Authorization: Bearer sk_test_local_a1b2c3..." \
+    -H "content-type: application/json" \
+    -d '{"email":"dev@example.com","amount":10000,"currency":"GHS","reference":"order_1"}'
+
+{
+  <span class="o">"status"</span>: true,
+  <span class="o">"message"</span>: "Authorization URL created",
+  <span class="o">"data"</span>: {
+    <span class="o">"authorization_url"</span>: "http://127.0.0.1:8080/paystack/checkout/48zrdrkbqv7e",
+    <span class="o">"access_code"</span>: "48zrdrkbqv7e",
+    <span class="o">"reference"</span>: "order_1"
+  }
+}</pre>
+    </div>
+    <p class="note">
+      That URL is a real checkout page with the test instruments listed on it.
+      Add a webhook endpoint with <code>paybox webhook add</code>, run
+      <code>paybox payment success order_1</code>, and your app receives a
+      signed <code>charge.success</code> while <code>verify</code> starts
+      answering <code>"status": "success"</code>.
+    </p>
+  </div>
+</section>
+
+<section id="docs">
+  <div class="wrap">
+    <p class="eyebrow">Documentation</p>
+    <h2>Every page answers one question.</h2>
+    <div class="docs">
+      <a href="https://github.com/dsasante1/paybox/blob/main/docs/getting-started.md">
+        <b>Getting started</b><span>Install, point an app at it, first payment, first webhook</span></a>
+      <a href="https://github.com/dsasante1/paybox/blob/main/docs/concepts.md">
+        <b>Concepts</b><span>Canonical statuses, the event log, virtual time, determinism</span></a>
+      <a href="https://github.com/dsasante1/paybox/blob/main/docs/providers.md">
+        <b>Providers</b><span>Base URL, credential, webhook verification and SDK settings for each adapter</span></a>
+      <a href="https://github.com/dsasante1/paybox/blob/main/docs/test-instruments.md">
+        <b>Test instruments</b><span>Which card or phone number produces which outcome</span></a>
+      <a href="https://github.com/dsasante1/paybox/blob/main/docs/payment-lifecycle.md">
+        <b>Payment lifecycle</b><span>Statuses, transitions, refunds, transfers, subscriptions, disputes</span></a>
+      <a href="https://github.com/dsasante1/paybox/blob/main/docs/webhooks.md">
+        <b>Webhooks</b><span>Signing, retries, replay, failure simulation</span></a>
+      <a href="https://github.com/dsasante1/paybox/blob/main/docs/time.md">
+        <b>Time control</b><span>What <code>time advance</code> runs, and what it does not</span></a>
+      <a href="https://github.com/dsasante1/paybox/blob/main/docs/testing.md">
+        <b>Testing with paybox</b><span>A complete automated test, CI blocks, and a recipe per failure mode</span></a>
+      <a href="https://github.com/dsasante1/paybox/blob/main/docs/cli.md">
+        <b>CLI</b><span>Every command</span></a>
+      <a href="https://github.com/dsasante1/paybox/blob/main/docs/control-api.md">
+        <b>Control API</b><span>Every <code>/api</code> route the CLI and dashboard use</span></a>
+      <a href="https://github.com/dsasante1/paybox/blob/main/docs/architecture.md">
+        <b>Architecture</b><span>How it works, and why it is built this way</span></a>
+      <a href="https://github.com/dsasante1/paybox/blob/main/docs/README.md">
+        <b>Documentation index</b><span>All twenty-odd pages, mapped to the question each answers</span></a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="links">
+      <a href="https://github.com/dsasante1/paybox">GitHub</a>
+      <a href="https://www.npmjs.com/package/paybox-emulator">npm</a>
+      <a href="https://hub.docker.com/r/dsasante1/paybox">Docker Hub</a>
+      <a href="https://github.com/dsasante1/paybox/blob/main/CHANGELOG.md">Changelog</a>
+      <a href="https://github.com/dsasante1/paybox/blob/main/SECURITY.md">Security</a>
+      <a href="https://github.com/dsasante1/paybox/blob/main/CONTRIBUTING.md">Contributing</a>
+    </div>
+    <p>
+      MIT licensed. Not affiliated with, endorsed by, or connected to Paystack,
+      Stripe, Flutterwave, Kora, Quid Payments, WeWire or Wise. Provider names
+      are used only to describe API compatibility.
+    </p>
+    <p>
+      This page is static. paybox itself runs on your machine and never talks to
+      this site.
+    </p>
+  </div>
+</footer>
+
+<script src="/main.js"></script>
+</body>
+</html>

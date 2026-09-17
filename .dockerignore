@@ -9,6 +9,7 @@ data
 .githooks
 docs
 examples
+site
 tests
 **/*.test.ts
 idea.txt
