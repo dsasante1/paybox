@@ -11,14 +11,65 @@ The page is laid out as a technical sheet rather than a marketing page: a title
 plate, a numbered sheet index, sections `§00`–`§06`, and three figures drawn as
 patent-style line art.
 
+| | light | dark |
+|---|---|---|
+| Paper | `#f8f9fa` | `#0f1216` |
+| Ink | `#121212` | `#e9ecf1` |
+| Prose | `#4a5058` | `#a7b0bb` |
+| Mono lettering | `#666d75` | `#828b96` |
+| Hairlines | `#c9ced4` | `#2c3239` |
+| Construction grid | `#e4e7ea` | `#191e24` |
+| Accent | `#1b44e0` | `#7aa2ff` |
+
+Every text pair above is at least 4.5:1 on its own ground, in both themes;
+`scripts/` has no checker for it, so the numbers were computed by hand when the
+palette was chosen. The hairline is deliberately ~1.5:1 in both — it is a
+drawn line, not a control boundary, and the frames that *are* boundaries use
+ink.
+
 | | |
 |---|---|
-| Paper | `#f8f9fa`, with a 32px construction grid of 1px lines |
-| Ink | `#121212`; `#4a5058` for prose, `#666d75` for the mono lettering |
-| Rules | 1px throughout — `#c9ced4` for hairlines, ink for the frame |
-| Accent | `#1b44e0`, and **only** on the highlighted step of a process |
 | Type | JetBrains Mono / system mono for lettering, Inter / system sans for prose — both from the system, so the page still loads no external asset |
+| Accent | used **only** on the highlighted step of a process, and as the link colour |
 | Absent | gradients as shading, shadows, filled shapes, rounded corners |
+
+### The two themes, and the switch
+
+Each colour is defined **once**, as `light-dark(<light>, <dark>)`, resolved by
+the computed `color-scheme`. Every token carries the plain light value on the
+line above as a fallback, so a browser too old for `light-dark()` keeps that
+declaration, drops the next as invalid, and renders the light sheet rather than
+an unstyled one.
+
+Nothing below the palette block knows which theme it is in. The switch is one
+line per mode:
+
+```css
+:root[data-theme=light]{color-scheme:light}
+:root[data-theme=dark]{color-scheme:dark}
+```
+
+`theme.js` sets that attribute and stores the choice under `paybox-theme`.
+It is loaded from `<head>` **without `defer`**, on purpose: a visitor who chose
+dark must not be shown a white page first. That is also why it is separate from
+`main.js`, which runs at the end of the body.
+
+- `auto` removes the attribute, so `color-scheme: light dark` stands and the
+  operating system decides — including for a visitor with no JavaScript.
+- The control is a real `<select>` covering its whole plate cell, so the target
+  is the cell (56px) rather than the 14px text box, and the phone gets its
+  native picker. The cell prints the current value.
+- The control is **hidden until `theme.js` runs** (`[data-theme-ready]`).
+  Without the script it could not do anything, and a dead switch is worse than
+  none.
+
+One deliberate asymmetry: the opening notice is the sheet's only inverted
+element, and inverting it again in the dark theme would put a glaring white
+band across the top of a dark page. There it is a raised panel (`--band-bg`)
+instead — same emphasis, none of the glare.
+
+`favicon.svg` carries its own `prefers-color-scheme` block, so the tab icon
+follows the browser too.
 
 The three figures are hand-plotted SVG, on the same 4px grid, using one line
 vocabulary: `.s-thin` for geometry, `.s-rule` for dimension and extension
@@ -66,7 +117,12 @@ across. What is deliberately different at 620px and below:
 ### Verifying a change
 
 There is no test for the visual design, so check it in a browser before
-deploying — including at a phone width:
+deploying — in **both themes** and at a phone width. Chromium can emulate the
+preference over CDP (`Emulation.setEmulatedMedia` with
+`prefers-color-scheme`), which is how the palette above was checked; the paths
+worth re-checking after a change are: auto under a light OS, auto under a dark
+OS, each explicit choice surviving a reload, a choice returning to auto, and
+the control's absence with scripts disabled.
 
 ```bash
 python3 -m http.server 8099 --directory site
