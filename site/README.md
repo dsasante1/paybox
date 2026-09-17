@@ -8,7 +8,7 @@ here should need compiling before it can be served.
 ## The drawing
 
 The page is laid out as a technical sheet rather than a marketing page: a title
-plate, a numbered sheet index, sections `§00`–`§06`, and two figures drawn as
+plate, a numbered index, sections `§00`–`§06`, and two figures drawn as
 patent-style line art.
 
 | | light | dark |
