@@ -326,6 +326,9 @@ thead th:nth-child(3){text-align:right}
   color:var(--ink-2);font:500 10.5px/1 var(--mono);letter-spacing:.12em;
   text-transform:uppercase}
 .foot-links a:hover{color:var(--accent)}
+/* The legal notes sit inside their own frame, flush with the links bar above
+   them — a notes box on the sheet rather than loose text under it. */
+.legal{border:1px solid var(--ink);padding:16px 20px}
 .foot p{font:400 11.5px/1.7 var(--mono);color:var(--ink-3);max-width:92ch}
 .foot p+p{margin-top:10px}
 @media (prefers-reduced-motion:no-preference){html{scroll-behavior:smooth}}
@@ -1057,14 +1060,16 @@ thead th:nth-child(3){text-align:right}
     <a href="https://github.com/dsasante1/paybox/blob/main/SECURITY.md">Security</a>
     <a href="https://github.com/dsasante1/paybox/blob/main/CONTRIBUTING.md">Contributing</a>
   </div>
-  <p>
-    MIT licensed. Not affiliated with, endorsed by, or connected to Paystack,
-    Stripe, Flutterwave, Kora, Quid Payments, WeWire or Wise. Provider names are
-    used only to describe API compatibility.
-  </p>
-  <p>
-    This page is static. paybox itself runs on your machine and never talks to it.
-  </p>
+  <div class="legal">
+    <p>
+      MIT licensed. Not affiliated with, endorsed by, or connected to Paystack,
+      Stripe, Flutterwave, Kora, Quid Payments, WeWire or Wise. Provider names are
+      used only to describe API compatibility.
+    </p>
+    <p>
+      This page is static. paybox itself runs on your machine and never talks to it.
+    </p>
+  </div>
 </footer>
 
 </div>
