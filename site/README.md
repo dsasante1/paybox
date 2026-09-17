@@ -93,6 +93,14 @@ own preview URL. `vercel.json` carries the rest, including an `ignoreCommand`
 that skips a deployment when the push changed nothing under `site/` — so an
 unrelated commit to the monorepo does not redeploy the page.
 
+The repository root's `.vercelignore` applies to **both** deploy paths, not
+just to `vercel deploy`, and it runs *before* the ignore command — so it has to
+keep `.git`, or `git diff` has nothing to read and the deployment fails rather
+than deciding. The command answers `exit 1` (build) for anything other than a
+clean "nothing under `site/` changed", so a git invocation that cannot run is
+never mistaken for a skip. Both branches are worth keeping straight: this cost
+one failed production deployment to learn.
+
 Root Directory is the one setting `vercel.json` cannot express, so it lives in
 the project rather than in this repository. It must stay `site`: at the
 repository root Vercel would find the monorepo's `package.json` and run the
@@ -122,10 +130,11 @@ npx vercel --prod     # production
 
 Run these **from the repository root**, not from `site/` — the project's Root
 Directory is `site`, so a deploy launched inside `site/` looks for `site/site`
-and fails. The repository root's `.vercelignore` keeps the upload to `site/`
-alone; the rest of the monorepo is source for the npm package and the container
-image and has no business on a CDN. Verified: the deployed page answers 200 while
-`/package.json`, `/README.md` and `/.env.local` all answer 404.
+and fails. `.vercelignore` keeps the upload to `site/` and `.git`; the rest of
+the monorepo is source for the npm package and the container image, including
+`idea.txt`, which is deliberately unpublished. Verified: the deployed page
+answers 200 while `/package.json`, `/README.md` and `/.env.local` all answer
+404.
 
 `vercel link` writes `.vercel` and an `.env.local` holding a short-lived OIDC
 token into the repository root. Both are gitignored, and `.vercelignore`

@@ -3,7 +3,7 @@
   "buildCommand": "",
   "installCommand": "",
   "outputDirectory": ".",
-  "ignoreCommand": "git diff --quiet HEAD^ HEAD -- .",
+  "ignoreCommand": "git rev-parse --git-dir > /dev/null 2>&1 && git diff --quiet HEAD^ HEAD -- . || exit 1",
   "cleanUrls": true,
   "trailingSlash": false,
   "headers": [
