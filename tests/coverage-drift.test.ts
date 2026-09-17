@@ -297,14 +297,25 @@ describe('the manifests are well formed', () => {
 describe('the published table', () => {
   it('matches what the manifests hold', async () => {
     // The README and the landing page in `site/` are where a visitor forms
-    // their expectations, so the numbers on them have to be the ones this file
-    // enforces. Regenerate with `npm run coverage:table` — a stale table fails
-    // here rather than quietly overstating what the emulator serves.
-    const { GENERATED } = await import('../scripts/coverage-table.js');
+    // their expectations, so the facts on them have to be the ones this file
+    // enforces. Regenerate with `npm run generate` — a stale block fails here
+    // rather than quietly overstating what the emulator serves, or naming a
+    // version that is no longer the published one.
+    const { GENERATED } = await import('../scripts/generated-blocks.js');
     for (const target of GENERATED) {
       const contents = readFileSync(target.path, 'utf8');
       expect(target.replace(contents), `${target.path} is stale`).toBe(contents);
     }
+  });
+
+  it('names the published version on the landing page', async () => {
+    // The page prints a version in its title plate. A wrong one is worse than
+    // none, so it comes from the package that ships and is checked here.
+    const { publishedVersion } = await import('../scripts/generated-blocks.js');
+    const html = readFileSync('site/index.html', 'utf8');
+    expect(html).toContain(
+      `<!-- version:start -->${publishedVersion()}<!-- version:end -->`,
+    );
   });
 
   it('says Partial for every adapter on the landing page', () => {

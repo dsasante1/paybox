@@ -1,6 +1,0 @@
-# What is in this directory for the repository's benefit, not the visitor's.
-# `.env.local` is written by `vercel link` and holds a short-lived OIDC token —
-# a static deployment would serve it verbatim.
-.env*
-.gitignore
-README.md

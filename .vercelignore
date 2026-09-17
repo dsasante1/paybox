@@ -1,0 +1,6 @@
+# Only the landing page is deployed. Everything else in this monorepo is
+# source for the npm package and the container image, and a CLI deploy has no
+# reason to upload it. Git deployments use the project's Root Directory
+# (`site`) and ignore this file entirely.
+/*
+!/site

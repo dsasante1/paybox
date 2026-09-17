@@ -8,15 +8,25 @@ A release is a tag. Everything after the tag is `.github/workflows/release.yml`.
 # 1. Bump the version. One field, one file.
 npm version 0.2.0 --workspace apps/paybox --no-git-tag-version
 
-# 2. Date CHANGELOG.md's Unreleased section as the new version.
+# 2. Carry it into the pages that print it. The landing page's title plate
+#    names the published version, generated from that same field.
+npm run generate
 
-# 3. Land both through a pull request like any other change: main is protected.
+# 3. Date CHANGELOG.md's Unreleased section as the new version.
 
-# 4. Tag the merged commit and push the tag.
+# 4. Land all three through a pull request like any other change: main is
+#    protected.
+
+# 5. Tag the merged commit and push the tag.
 git checkout main && git pull
 git tag v0.2.0
 git push origin v0.2.0
 ```
+
+Step 2 is not optional: `tests/coverage-drift.test.ts` fails if the landing
+page names a version other than the one in `apps/paybox/package.json`, so
+skipping it turns the release pull request red rather than shipping a page that
+lies about what `npx paybox-emulator` installs.
 
 The tag must equal the version in `apps/paybox/package.json`; the workflow
 checks that before it runs anything else and refuses a mismatch. If that
