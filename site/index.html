@@ -244,8 +244,8 @@ main,.sec,.offset,.fig,.fig-body,.panel,.schedule,.index-in,.split>*{min-width:0
 .hero{padding:clamp(40px,7vw,86px) 0 54px;display:grid;
   grid-template-columns:minmax(0,1.55fr) minmax(0,1fr);gap:clamp(28px,5vw,64px)}
 @media (max-width:900px){.hero{grid-template-columns:1fr;gap:34px}}
-.hero h1{font-size:clamp(31px,5.2vw,58px);letter-spacing:-.035em;max-width:19ch}
-.hero h1 em{font-style:normal;color:var(--accent)}
+.hero h1{font-size:clamp(30px,4.9vw,54px);letter-spacing:-.035em;max-width:22ch}
+.hero h1 em{font-style:normal;color:var(--accent);white-space:nowrap}
 .hero .lede{margin-top:22px;font-size:clamp(15px,1.5vw,17.5px);color:var(--ink-2);max-width:54ch}
 .hero .lede b{font-weight:500;color:var(--ink)}
 .cmd{display:flex;align-items:stretch;border:1px solid var(--ink);margin-top:30px;
@@ -627,7 +627,7 @@ thead th:nth-child(3){text-align:right}
       <div class="hero">
         <div>
           <p class="lbl">§00</p>
-          <h1>Test the payment flows a <em>sandbox won't reach.</em></h1>
+          <h1>Test the parts of payments that are <em>hard to test.</em></h1>
           <p class="lede">
             paybox is a local payment infrastructure emulator. Point an existing
             Paystack, Stripe, Flutterwave, Kora, Quid Payments, WeWire or Wise
