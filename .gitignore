@@ -2,7 +2,7 @@ node_modules/
 dist/
 data/
 *.tsbuildinfo
-.env
+.env*
 
 # Build output of scripts/build.mjs besides dist/: the LICENCE copy npm needs
 # inside the package directory, and anything `npm pack` left behind.
@@ -13,3 +13,8 @@ apps/paybox/LICENSE
 # comments as `spec §N`, but not published: it is a working document, not
 # documentation. docs/spec-references.md indexes the sections the code cites.
 idea.txt
+
+# Vercel's local project link, and the OIDC token `vercel link` writes beside
+# it. The deployed page is site/; the link lives here because that is the
+# directory a CLI deploy must run from.
+.vercel

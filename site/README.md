@@ -81,54 +81,61 @@ than reading `textContent`.
 
 ## Deploying it on Vercel
 
-This directory is the deployment root, so a Vercel project must be pointed at
-it rather than at the repository root — the repository root is a TypeScript
-monorepo and Vercel would try to build it.
+Production is **https://paybox-emulator.vercel.app** — project
+`paybox-emulator` in the `verbsghs-projects` scope.
 
-**From the CLI**, once, from inside this directory:
+### On merge, automatically
+
+The project is configured for git deployments: **Root Directory `site`**, with
+no install or build command, because this directory holds no `package.json` and
+nothing to compile. A push to `main` deploys production; a pull request gets its
+own preview URL. `vercel.json` carries the rest, including an `ignoreCommand`
+that skips a deployment when the push changed nothing under `site/` — so an
+unrelated commit to the monorepo does not redeploy the page.
+
+Root Directory is the one setting `vercel.json` cannot express, so it lives in
+the project rather than in this repository. It must stay `site`: at the
+repository root Vercel would find the monorepo's `package.json` and run the
+package bundler.
+
+**One manual step is outstanding.** The Vercel GitHub App is installed on the
+`dsasante1` account but scoped to selected repositories, and `paybox` is not
+among them, so Vercel cannot yet watch this repo. Granting it needs a click
+that no token can make on the app's behalf:
+
+1. <https://github.com/settings/installations> → **Vercel** → **Configure**
+2. Under *Repository access*, add `dsasante1/paybox`
+3. Then, from the repository root:
+   ```bash
+   npx vercel git connect
+   ```
+
+Until that is done, git deployments do not fire and the manual path below is
+the only one.
+
+### By hand
 
 ```bash
 npx vercel            # preview deployment
 npx vercel --prod     # production
 ```
 
-`vercel link` will ask which scope and project to use; answer once and the
-answers are stored in `site/.vercel`, which is gitignored.
+Run these **from the repository root**, not from `site/` — the project's Root
+Directory is `site`, so a deploy launched inside `site/` looks for `site/site`
+and fails. The repository root's `.vercelignore` keeps the upload to `site/`
+alone; the rest of the monorepo is source for the npm package and the container
+image and has no business on a CDN. Verified: the deployed page answers 200 while
+`/package.json`, `/README.md` and `/.env.local` all answer 404.
 
-**From the dashboard**, importing `dsasante1/paybox`:
-
-| Setting | Value |
-|---|---|
-| Framework Preset | Other |
-| Root Directory | `site` |
-| Build Command | *(empty)* |
-| Output Directory | `.` |
-| Install Command | *(empty — there is nothing to install)* |
-
-`vercel.json` carries the rest: `cleanUrls`, a content-security policy that
-allows only this page's own assets, and the usual hardening headers.
-
-Preview it locally with any static server:
-
-```bash
-npx serve site        # or: python3 -m http.server --directory site
-```
-
-### Where it is deployed
-
-Project `paybox-emulator` in the `verbsghs-projects` scope, aliased to
-**https://paybox-emulator.vercel.app**. `vercel link` has already been run
-here, so `npx vercel --prod` from this directory deploys to that project;
-`site/.vercel` and the `.env.local` the link step writes are both local and
-gitignored, and `.vercelignore` keeps them — and this file — out of the upload,
-since a static deployment would otherwise serve the token file verbatim.
+`vercel link` writes `.vercel` and an `.env.local` holding a short-lived OIDC
+token into the repository root. Both are gitignored, and `.vercelignore`
+excludes them from an upload.
 
 ### The canonical URL
 
 `index.html` carries `<link rel="canonical">` and `og:url` pointing at
-`https://paybox-emulator.vercel.app/`, which assumes the Vercel project is
-named `paybox-emulator`. If it ends up on a different hostname — a custom
-domain, or a different project name — change both, or search engines and link
+`https://paybox-emulator.vercel.app/`, which is where it is deployed. On a
+custom domain or a renamed project, change both, or search engines and link
 previews will point at a URL that does not resolve.
 
 ## The generated blocks
