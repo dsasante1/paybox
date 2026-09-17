@@ -1,8 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <rect width="32" height="32" fill="#f8f9fa"/>
-  <g fill="none" stroke="#121212" stroke-width="2">
+  <style>
+    :root{--paper:#f8f9fa;--ink:#121212;--accent:#1b44e0}
+    @media (prefers-color-scheme:dark){
+      :root{--paper:#0f1216;--ink:#e9ecf1;--accent:#7aa2ff}
+    }
+  </style>
+  <rect width="32" height="32" fill="var(--paper)"/>
+  <g fill="none" stroke="var(--ink)" stroke-width="2">
     <rect x="3" y="7" width="26" height="18"/>
     <path d="M3 13h26M20 20h6"/>
   </g>
-  <circle cx="9.5" cy="20" r="2.5" fill="none" stroke="#1b44e0" stroke-width="2"/>
+  <circle cx="9.5" cy="20" r="2.5" fill="none" stroke="var(--accent)" stroke-width="2"/>
 </svg>
