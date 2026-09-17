@@ -36,11 +36,31 @@ lettered on a real drawing.
 the figure: `time advance` in FIG. 1, the exhausted delivery in FIG. 2, the
 provider layer in FIG. 3. It is also the link colour, and nothing else uses it.
 
+### On a phone
+
+The sheet itself never scrolls sideways — every grid track between a figure and
+the page has a zero minimum, or the 640px drawings would push the whole layout
+across. What is deliberately different at 620px and below:
+
+- **The index moves below the sheet.** Without a column beside it, it is a wall
+  of links in front of the page; the hero is what a phone should open on.
+- **The coverage schedule stops being a table.** Four columns of one fact each
+  become one block per adapter, so it needs no sideways scroll. The endpoint
+  count grows the word `endpoints`, because the column heading it used to sit
+  under is hidden.
+- **FIG. 1 and FIG. 2 still scroll inside their frames**, because shrinking them
+  to fit makes the lettering unreadable. Their frames say `SWIPE →` — set from
+  `main.js` by a `ResizeObserver` against the real widths, so it appears only
+  when the drawing genuinely does not fit and disappears the moment it does.
+  FIG. 3's floor is 300px, which fits.
+- **Targets and lettering are bigger**: 44px minimum on every control (the
+  index links were 22px), and the smallest mono labels go from 10.5px to
+  11.5px.
+
 ### Verifying a change
 
 There is no test for the visual design, so check it in a browser before
-deploying — including at a phone width, where the figures scroll inside their
-own frames and the index moves below the sheet:
+deploying — including at a phone width:
 
 ```bash
 python3 -m http.server 8099 --directory site

@@ -70,3 +70,29 @@ for (const list of document.querySelectorAll('[role=tablist]')) {
     });
   }
 }
+
+// ---- figures that do not fit ----------------------------------------------
+// A drawing wider than the screen scrolls inside its own frame, which is only
+// discoverable if the frame says so. Measured rather than assumed, so the cue
+// appears on a phone and disappears the moment the figure fits.
+
+const figures = [...document.querySelectorAll('.fig')]
+  .map((fig) => ({ fig, body: fig.querySelector('.fig-body') }))
+  .filter(({ body }) => body);
+
+function markOverflow() {
+  for (const { fig, body } of figures) {
+    fig.classList.toggle('over', body.scrollWidth > body.clientWidth + 4);
+  }
+}
+
+// A ResizeObserver rather than a call here plus a resize listener: this script
+// runs while the figures are still being laid out, where both widths read the
+// same and the cue would be missed. The observer fires once the box is real,
+// and again whenever it or the drawing inside it changes size.
+const watcher = new ResizeObserver(markOverflow);
+for (const { body } of figures) {
+  watcher.observe(body);
+  const svg = body.querySelector('svg');
+  if (svg) watcher.observe(svg);
+}

@@ -73,7 +73,8 @@ code,kbd{font-family:var(--mono);font-size:.86em;letter-spacing:0}
 .plate-in{display:flex;align-items:stretch;min-height:56px}
 .mark{display:flex;align-items:center;gap:10px;padding:0 20px 0 var(--pad);
   border-right:1px solid var(--rule)}
-.mark a{display:flex;align-items:center;gap:10px;color:var(--ink);border:0}
+.mark a{display:flex;align-items:center;gap:10px;color:var(--ink);border:0;
+  align-self:stretch}
 .mark svg{display:block}
 .mark b{font:500 17px/1 var(--sans);letter-spacing:-.04em}
 .plate .cell{display:flex;flex-direction:column;justify-content:center;gap:3px;
@@ -140,7 +141,7 @@ main,.sec,.offset,.fig,.fig-body,.panel,.schedule,.index-in,.split>*{min-width:0
 }
 
 /* ---------- sections ---------- */
-.sec{border-bottom:1px solid var(--ink);padding:0 var(--pad) 56px}
+.sec{border-bottom:1px solid var(--ink);padding:0 var(--pad) 56px;scroll-margin-top:68px}
 .sec:last-of-type{border-bottom:0}
 #s00{padding-bottom:0}
 .sec-head{display:grid;grid-template-columns:76px minmax(0,1fr);gap:0 22px;
@@ -205,9 +206,9 @@ figure{margin:0}
 .fig-bar .ti{font:400 10.5px/1.1 var(--mono);letter-spacing:.08em;color:var(--ink-3);
   text-transform:uppercase}
 .fig-bar .sc{margin-left:auto;font:400 10.5px/1.1 var(--mono);color:var(--ink-3)}
-.fig-body{padding:20px 16px;overflow-x:auto}
+.fig-body{padding:20px 16px;overflow-x:auto;overscroll-behavior-x:contain}
 .fig svg{display:block;width:100%;height:auto;min-width:640px}
-.fig-body.tall svg{min-width:380px;max-width:600px;margin:0 auto}
+.fig-body.tall svg{min-width:300px;max-width:600px;margin:0 auto}
 figcaption{margin-top:12px;font:400 12px/1.6 var(--mono);color:var(--ink-3);max-width:88ch}
 figcaption b{font-weight:500;color:var(--ink-2)}
 /* figure line vocabulary */
@@ -328,6 +329,66 @@ thead th:nth-child(3){text-align:right}
 .legal{max-width:108ch;margin:0 auto;text-align:center}
 .legal p{font:400 12px/1.75 var(--mono);color:#fff;max-width:none}
 .legal p+p{margin-top:5px;color:rgba(255,255,255,.66)}
+/* ---------- phones ----------------------------------------------------------
+   Measured at 390px: the sheet itself never overflowed, but four frames
+   scrolled sideways with nothing saying so, the index links were 22px tall
+   against a 44px target, and the mono lettering was 10.5px. */
+@media (max-width:620px){
+  /* Lettering that is fine on a desk is too small in the hand. */
+  .lbl,.plate .cell i,.toc span,.fig-bar .id,.fig-bar .ti,.fig-bar .sc,
+  .specs dt,.tree summary,.index .meta,.foot-links a,.panel-foot,
+  .cmd button,.acts a,.plate nav a{font-size:11.5px}
+  .note,figcaption,.legal p{font-size:12.5px}
+  .specs dd{font-size:13px}
+
+  /* Touch targets: 44px minimum, which the index lists missed by half. */
+  .toc li{padding:0}
+  .toc a{padding:11px 0;flex:1}
+  .tree a,.tree summary{padding:11px 0}
+  .cards a{padding:18px}
+  .foot-links a{padding:14px 16px}
+  .acts a{padding:15px 16px}
+  /* Both bars wrap on a phone, and a wrapped flex item gets no height from
+     `stretch` — so the copy buttons need real vertical padding. */
+  .cmd button{padding:14px 18px}
+  [role=tab]{padding:14px 16px}
+  .panel-bar button.copy{padding:14px 18px;margin-left:0;
+    border-left:0;border-top:1px solid var(--rule);width:100%;text-align:left}
+  /* The contract link is the row's one action, so it gets a target. */
+  .schedule tbody td a{display:inline-block;padding:5px 0}
+  .skip:focus{padding:12px 16px}
+
+  /* The coverage schedule is four columns of one fact each; on a phone it
+     reads better as one block per adapter than as a 560px sideways scroll. */
+  .schedule{overflow-x:visible}
+  .schedule table{min-width:0;display:block}
+  .schedule thead{display:none}
+  .schedule tbody,.schedule tr,.schedule th,.schedule td{display:block}
+  .schedule tbody tr{padding:14px 16px;border-bottom:1px solid var(--rule)}
+  .schedule tbody tr:last-child{border-bottom:0}
+  .schedule tbody th,.schedule tbody td{border:0;padding:0}
+  .schedule tbody th{font-size:15.5px;margin-bottom:5px}
+  .schedule tbody td{display:inline-block;margin:0 12px 0 0;font-size:12.5px;
+    text-align:left;vertical-align:middle}
+  /* Without the column heading above it, the count has to say what it counts. */
+  .schedule td.num::after{content:" endpoints";color:var(--ink-3)}
+  .schedule>.note{padding:13px 16px}
+  .schedule tbody td a{padding:7px 0 2px;line-height:1.2}
+
+  /* Four items in the figure bar wrap into a ragged block at this width, so
+     they stack flush left instead. */
+  .fig-bar{display:block}
+  .fig-bar>span{display:block}
+  .fig-bar .sc{margin-left:0}
+  .fig.over .fig-bar::after{display:block;margin-left:0}
+}
+
+/* A frame whose drawing is wider than the screen says so, and stops saying it
+   as soon as it is not. `.over` is set from main.js against the real widths. */
+.fig.over .fig-bar::after{content:"SWIPE →";margin-left:auto;
+  font:500 10.5px/1 var(--mono);letter-spacing:.12em;color:var(--accent)}
+.fig.over .fig-bar .sc{margin-left:0}
+
 @media (prefers-reduced-motion:no-preference){html{scroll-behavior:smooth}}
 </style>
 </head>
