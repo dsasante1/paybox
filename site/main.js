@@ -96,3 +96,23 @@ for (const { body } of figures) {
   const svg = body.querySelector('svg');
   if (svg) watcher.observe(svg);
 }
+
+// ---- the index -------------------------------------------------------------
+// One list in one place: a column beside the sheet where there is room for
+// one, a closed menu where there is not. The `open` attribute is synced to the
+// width rather than the markup being duplicated, and the page ships it open,
+// so without this script the index degrades to the plain list of links it is.
+
+const shell = document.querySelector('.index-shell');
+if (shell) {
+  const compact = matchMedia('(max-width: 980px)');
+  const sync = () => { shell.open = !compact.matches; };
+  sync();
+  compact.addEventListener('change', sync);
+  // Choosing from a menu should close it, not leave you looking at it.
+  for (const link of shell.querySelectorAll('a')) {
+    link.addEventListener('click', () => {
+      if (compact.matches) shell.open = false;
+    });
+  }
+}

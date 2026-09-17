@@ -129,14 +129,32 @@ main,.sec,.offset,.fig,.fig-body,.panel,.schedule,.index-in,.split>*{min-width:0
 .tree details[open]>summary::before{content:"–"}
 .tree summary:hover{color:var(--accent)}
 .index .meta{margin-top:14px;font:400 11px/1.55 var(--mono);color:var(--ink-3)}
+/* Beside the sheet the index is simply a column: the disclosure is held open
+   and its summary is not drawn. */
+.index-shell>summary{display:none}
 @media (max-width:980px){
-  /* Without a column beside it the index is a wall of links in front of the
-     page, so it moves below the sheet. DOM order is unchanged: both are
-     navigation, and the hero is what a phone should open on. */
+  /* With no column to put it in, the index becomes a menu: one row under the
+     title plate, closed until asked for. Open, it is a wall of links in front
+     of the page; at the foot of the page it cannot be used to navigate to
+     anything without scrolling past everything first. */
   .frame{display:flex;flex-direction:column}
+  .index{order:0;border-right:0;border-bottom:1px solid var(--ink);padding:0}
   main{order:1}
-  .index{order:2;border-right:0;border-top:1px solid var(--ink);padding:26px 0 8px}
-  .index-in{position:static;max-height:none;padding:0 var(--pad)}
+  .index-shell>summary{display:flex;align-items:center;gap:10px;cursor:pointer;
+    list-style:none;padding:15px var(--pad);color:var(--ink);
+    font:500 11.5px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase}
+  .index-shell>summary::-webkit-details-marker{display:none}
+  .index-shell>summary::after{content:"+";margin-left:auto;font-size:14px;
+    color:var(--ink-3);line-height:1}
+  .index-shell[open]>summary::after{content:"–"}
+  .index-shell>summary:hover{color:var(--accent)}
+  .index-shell[open]>summary{border-bottom:1px solid var(--rule)}
+  /* A menu should be a panel, not a page: bounded, and scrolling on its own. */
+  .index-in{position:static;max-height:62vh;overflow-y:auto;
+    overscroll-behavior:contain;padding:20px var(--pad) 26px}
+  /* The summary already says Index; the first list does not need to repeat it. */
+  .index-sec:first-child>h2{display:none}
+  .index-sec:first-child{padding-bottom:18px;margin-bottom:18px}
   .index-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:0 32px}
 }
 
@@ -443,7 +461,9 @@ thead th:nth-child(3){text-align:right}
 
   <!-- ============ sidebar: sheet index + documentation tree ============ -->
   <aside class="index" aria-label="Sheet index and documentation">
-    <div class="index-in">
+    <details class="index-shell" open>
+      <summary>Index</summary>
+      <div class="index-in">
       <div class="index-cols">
         <div class="index-sec">
           <h2 class="lbl lbl-ink">Sheet index</h2>
@@ -527,8 +547,9 @@ thead th:nth-child(3){text-align:right}
           </ul>
           <p class="meta">MIT · Node ≥ 22.5<br>no network path to a provider</p>
         </div>
+        </div>
       </div>
-    </div>
+    </details>
   </aside>
 
   <!-- ============ main sheet ============ -->

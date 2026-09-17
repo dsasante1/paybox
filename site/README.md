@@ -42,8 +42,14 @@ The sheet itself never scrolls sideways — every grid track between a figure an
 the page has a zero minimum, or the 640px drawings would push the whole layout
 across. What is deliberately different at 620px and below:
 
-- **The index moves below the sheet.** Without a column beside it, it is a wall
-  of links in front of the page; the hero is what a phone should open on.
+- **The index becomes a menu.** One 44px row under the title plate, closed
+  until tapped, opening into a panel bounded at 62vh that scrolls on its own.
+  It is the same list in the same place in the DOM -- `main.js` syncs the
+  `<details>` element's `open` attribute to the width instead of the markup
+  carrying two copies, and the page ships it open, so with no JavaScript the
+  index degrades to the plain column of links it is. Choosing from it closes
+  it. It was below the sheet before, where it could not be used to reach
+  anything without scrolling past everything first.
 - **The coverage schedule stops being a table.** Four columns of one fact each
   become one block per adapter, so it needs no sideways scroll. The endpoint
   count grows the word `endpoints`, because the column heading it used to sit
