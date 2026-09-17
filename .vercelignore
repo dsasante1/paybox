@@ -1,6 +1,10 @@
-# Only the landing page is deployed. Everything else in this monorepo is
-# source for the npm package and the container image, and a CLI deploy has no
-# reason to upload it. Git deployments use the project's Root Directory
-# (`site`) and ignore this file entirely.
+# Only the landing page is deployed. Everything else in this monorepo is source
+# for the npm package and the container image, and has no business on a CDN --
+# including idea.txt, which is deliberately unpublished.
+#
+# This applies to git deployments as well as to `vercel deploy`, which is why
+# `.git` has to survive it: vercel.json's ignoreCommand runs `git diff` after
+# these rules have been applied, and without a repository it cannot answer.
 /*
 !/site
+!/.git
