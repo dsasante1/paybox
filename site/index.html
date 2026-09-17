@@ -325,12 +325,13 @@ thead th:nth-child(3){text-align:right}
   color:var(--ink-2);font:500 10.5px/1 var(--mono);letter-spacing:.12em;
   text-transform:uppercase}
 .foot-links a:hover{color:var(--accent)}
-/* The legal notes open the sheet, in their own frame above the title plate —
-   the first thing on the page rather than the last. */
-.notice{padding:clamp(16px,2.6vw,28px) var(--pad)}
-.legal{border:2px solid var(--ink);padding:clamp(22px,3.4vw,38px)}
-.legal p{font:400 11.5px/1.7 var(--mono);color:var(--ink-3);max-width:92ch}
-.legal p+p{margin-top:10px}
+/* The legal notes open the sheet as an inverted band: full bleed, no frame.
+   The one place on the drawing where the ink is the ground rather than the
+   line, which is what makes it read before anything else. */
+.notice{background:var(--ink);padding:clamp(15px,2vw,22px) var(--pad)}
+.legal{max-width:108ch;margin:0 auto;text-align:center}
+.legal p{font:400 12px/1.75 var(--mono);color:#fff;max-width:none}
+.legal p+p{margin-top:5px;color:rgba(255,255,255,.66)}
 @media (prefers-reduced-motion:no-preference){html{scroll-behavior:smooth}}
 </style>
 </head>
