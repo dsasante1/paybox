@@ -319,18 +319,18 @@ thead th:nth-child(3){text-align:right}
 .cards a span{font:400 11.5px/1.5 var(--mono);color:var(--ink-3)}
 
 /* ---------- foot plate ---------- */
-.foot{border-top:1px solid var(--ink);padding:26px var(--pad) 46px}
-.foot-links{display:flex;flex-wrap:wrap;gap:0;border:1px solid var(--rule);
-  margin-bottom:22px}
+.foot{border-top:1px solid var(--ink);padding:26px var(--pad) 40px}
+.foot-links{display:flex;flex-wrap:wrap;gap:0;border:1px solid var(--rule)}
 .foot-links a{padding:11px 16px;border:0;border-right:1px solid var(--rule);
   color:var(--ink-2);font:500 10.5px/1 var(--mono);letter-spacing:.12em;
   text-transform:uppercase}
 .foot-links a:hover{color:var(--accent)}
-/* The legal notes sit inside their own frame, flush with the links bar above
-   them — a notes box on the sheet rather than loose text under it. */
+/* The legal notes open the sheet, in their own frame above the title plate —
+   the first thing on the page rather than the last. */
+.notice{padding:clamp(16px,2.6vw,28px) var(--pad)}
 .legal{border:2px solid var(--ink);padding:clamp(22px,3.4vw,38px)}
-.foot p{font:400 11.5px/1.7 var(--mono);color:var(--ink-3);max-width:92ch}
-.foot p+p{margin-top:10px}
+.legal p{font:400 11.5px/1.7 var(--mono);color:var(--ink-3);max-width:92ch}
+.legal p+p{margin-top:10px}
 @media (prefers-reduced-motion:no-preference){html{scroll-behavior:smooth}}
 </style>
 </head>
@@ -338,6 +338,19 @@ thead th:nth-child(3){text-align:right}
 <a class="skip" href="#sheet">Skip to content</a>
 
 <div class="sheet">
+
+<div class="notice">
+  <div class="legal">
+    <p>
+      MIT licensed. Not affiliated with, endorsed by, or connected to Paystack,
+      Stripe, Flutterwave, Kora, Quid Payments, WeWire or Wise. Provider names are
+      used only to describe API compatibility.
+    </p>
+    <p>
+      This page is static. paybox itself runs on your machine and never talks to it.
+    </p>
+  </div>
+</div>
 
 <header class="plate">
   <div class="plate-in">
@@ -1059,16 +1072,6 @@ thead th:nth-child(3){text-align:right}
     <a href="https://github.com/dsasante1/paybox/blob/main/CHANGELOG.md">Changelog</a>
     <a href="https://github.com/dsasante1/paybox/blob/main/SECURITY.md">Security</a>
     <a href="https://github.com/dsasante1/paybox/blob/main/CONTRIBUTING.md">Contributing</a>
-  </div>
-  <div class="legal">
-    <p>
-      MIT licensed. Not affiliated with, endorsed by, or connected to Paystack,
-      Stripe, Flutterwave, Kora, Quid Payments, WeWire or Wise. Provider names are
-      used only to describe API compatibility.
-    </p>
-    <p>
-      This page is static. paybox itself runs on your machine and never talks to it.
-    </p>
   </div>
 </footer>
 
