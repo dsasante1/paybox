@@ -23,6 +23,7 @@ export function printBanner(options: {
     koraKeys,
     wewireKeys,
     quiddpayKeys,
+    tinggKeys,
     wiseKeys,
   } = context;
   const out = (line = '') => process.stdout.write(`${line}\n`);
@@ -42,6 +43,7 @@ export function printBanner(options: {
   out(`    Flutterwave ${baseUrl}/flutterwave partial — see docs/flutterwave.md`);
   out(`    Kora       ${baseUrl}/kora        partial — see docs/kora.md`);
   out(`    Quid Payments ${baseUrl}/quiddpay partial — see docs/quiddpay.md`);
+  out(`    Tingg      ${baseUrl}/tingg       partial — see docs/tingg.md`);
   out(`    WeWire     ${baseUrl}/wewire      partial — see docs/wewire.md`);
   out(`    Wise       ${baseUrl}/wise        partial — see docs/wise.md`);
   for (const id of [] as string[]) {
@@ -62,6 +64,13 @@ export function printBanner(options: {
   // Quid signs webhooks with a dashboard-issued secret distinct from the API
   // key, so a verifier cannot be written without seeing it.
   out(`    Quid Payments webhook signing secret ${quiddpayKeys.signingSecret}`);
+  // Tingg needs four: Checkout 3.0 takes the apiKey header *and* an OAuth
+  // token minted from the client credentials, and Payouts takes a separate
+  // username/password pair in the request body.
+  out(`    Tingg apiKey ${tinggKeys.apiKey}`);
+  out(`    Tingg client_id ${tinggKeys.clientId}`);
+  out(`    Tingg client_secret ${tinggKeys.clientSecret}`);
+  out(`    Tingg payouts ${tinggKeys.payoutsUsername} / ${tinggKeys.payoutsPassword}`);
   out(`    WeWire     ${wewireKeys.secretKey}`);
   out(`    Wise       ${wiseKeys.apiToken}`);
   out();
@@ -71,6 +80,7 @@ export function printBanner(options: {
   out(`    FLW_BASE_URL=${baseUrl}/flutterwave`);
   out(`    KORA_BASE_URL=${baseUrl}/kora`);
   out(`    QUIDDPAY_BASE_URL=${baseUrl}/quiddpay`);
+  out(`    TINGG_BASE_URL=${baseUrl}/tingg`);
   out(`    WEWIRE_BASE_URL=${baseUrl}/wewire`);
   out(`    WISE_API_BASE=${baseUrl}/wise`);
   out();

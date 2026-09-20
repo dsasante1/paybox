@@ -16,9 +16,9 @@ All packages are implemented and the vertical slice runs end to end: `shared`, `
 
 **The published artifact is `paybox-emulator` on npm** (`npx paybox-emulator start`; the installed command is `paybox`) **and `dsasante1/paybox` on Docker Hub** (also pushed to `ghcr.io/dsasante1/paybox`, but Docker Hub is the address the docs use). The workspace packages export TypeScript source and are private, so none of them is installable on its own; `apps/paybox` is the one package that ships. `scripts/build.mjs` bundles the `@paybox/*` code into `apps/paybox/dist/paybox.js` and leaves third-party packages as ordinary dependencies — then fails if `apps/paybox/package.json` and the bundle's actual imports disagree in either direction. `apps/paybox/bin/paybox.js` is the launcher: it refuses Node < 22.5 with a readable message and keeps `node:sqlite`'s ExperimentalWarning off stderr on Node 22. `scripts/smoke-package.mjs` installs the packed tarball into an empty directory and runs it; CI runs both. A `v*` tag runs `.github/workflows/release.yml`; `docs/releasing.md` has the one-time setup. (`paybox` itself on npm is an unrelated 2013 client for the French Paybox gateway, hence the name.)
 
-**All seven providers are implemented**, each partially: Paystack, Stripe, Flutterwave, Kora, Quid Payments, WeWire and Wise. Flutterwave ships two live APIs — v3 (`FLWSECK_TEST-` keys, `{status:"success",…}`) and v4 (OAuth2, `{status:"failed", error:{…}}`) — with different authentication, envelopes and webhook signatures, so they are **two adapters** at `/flutterwave/v3` and `/flutterwave/v4` rather than one with a flag.
+**All eight providers are implemented**, each partially: Paystack, Stripe, Flutterwave, Kora, Quid Payments, Tingg, WeWire and Wise. Flutterwave ships two live APIs — v3 (`FLWSECK_TEST-` keys, `{status:"success",…}`) and v4 (OAuth2, `{status:"failed", error:{…}}`) — with different authentication, envelopes and webhook signatures, so they are **two adapters** at `/flutterwave/v3` and `/flutterwave/v4` rather than one with a flag. Tingg is the mirror image: Checkout 3.0 and Payouts share even less (OAuth+apiKey headers vs credentials in the body; REST vs RPC; snake_case vs camelCase; two envelopes), but a real client points **one** base URL at `api.tingg.africa` and calls both, so they are one adapter at `/tingg` with two route groups. Prefix follows what a client targets, not how different the APIs are.
 
-Coverage for each is documented honestly in `docs/paystack.md`, `docs/stripe.md`, `docs/flutterwave.md`, `docs/kora.md`, `docs/quiddpay.md`, `docs/wewire.md` and `docs/wise.md` — those files are contracts, not marketing. If something is missing from one, assume it is not implemented.
+Coverage for each is documented honestly in `docs/paystack.md`, `docs/stripe.md`, `docs/flutterwave.md`, `docs/kora.md`, `docs/quiddpay.md`, `docs/tingg.md`, `docs/wewire.md` and `docs/wise.md` — those files are contracts, not marketing. If something is missing from one, assume it is not implemented.
 
 **The contract is enforced, not just written.** Each adapter declares what it serves in a `coverage.ts` manifest, and `tests/coverage-drift.test.ts` fails if the manifest and the router disagree in either direction, or if an entry has nothing in the provider's docs file. The README's endpoint table — and the landing page's — is generated from the same manifests (`npm run generate`, `scripts/generated-blocks.ts`) and a test fails if either is stale, so the counts on the repo's front page cannot overstate what the emulator serves. That script owns every generated block in a published page, including the version the landing page's title plate prints. `paybox coverage` prints the same figures; `paybox coverage <provider>` breaks one down.
 
@@ -27,6 +27,8 @@ Coverage for each is documented honestly in `docs/paystack.md`, `docs/stripe.md`
 `.github/workflows/ci.yml` runs typecheck, lint, the full suite, the package build and the packed-tarball smoke test on every pull request and every push to `main`, across Node 22 and Node 24, and a separate `image` job builds and boots the Docker image. The coverage contract and the determinism rules only protect anything if they actually run.
 
 **`main` is protected**: both `verify` checks and the `image` job are required, administrators included, and force-pushes are refused — the repository is public now, which is what made that available. Two older client-side guards remain, and both are guards rather than gates: `npm run ship -- <pr>` merges only when every check has passed (and refuses a PR with *no* checks), and `.githooks/pre-push` refuses a direct push to `main`. `npm install` wires the hook up via `core.hooksPath`. `docs/ci.md` has the details.
+
+Adding Tingg was the test of the *webhook* layer, and it also needed three seams rather than a rewrite: `WebhookFormatter.interpretResponse` (a 2xx is not an acknowledgement at Tingg), a per-formatter `retry` policy (a flat 30-second ladder, not exponential), and `FormattedWebhook.deliverTo` (Tingg's callback address arrives per request, not from a dashboard). All three are opt-in, so the seven other adapters are unaffected by construction. See `docs/architecture.md`.
 
 Adding Stripe was the test of the injection design, and it needed three new seams rather than a rewrite: a `retry` transition flag (Stripe's PaymentIntent has no terminal failure), a clock-aware webhook signature with per-attempt re-signing, and webhook fan-out (one canonical event can be several provider events). All three are in `docs/architecture.md`.
 
@@ -56,6 +58,9 @@ Provider-specific facts worth knowing before touching an adapter:
 - **Quid has no card rail at all**, and says so ("Merchants must not submit card data"), so the adapter has no card schema and no field that could carry a PAN. Mobile-money outcomes are selected by the **phone number**; the PIN only proves the payer is present.
 - **Quid ships its own test endpoint** (`POST /api/v1/test/payment-attempts/{ref}/simulate`), the same idea as `paybox simulate` and Wise's simulation routes. It is the only way to settle a bank transfer or a cash deposit locally — there is no teller. Three of its eight outcomes (`pending`, `manual_review`, `amount_mismatch`) deliberately do **not** finalise the session, so no `checkout.session.*` webhook follows them.
 - **Quid sends only *final* checkout events** (`completed`/`failed`/`expired`) but the *whole* payout lifecycle (all six `payout.*`). That asymmetry is the provider's, and is preserved. `test.payment.*` events fan out beside the checkout event, gated on a metadata marker so an ordinary checkout does not double-fire.
+- **Tingg signs nothing, and a 2xx is not an acknowledgement.** No HMAC, no signature header, no secret — and the Payouts callback authenticates by echoing the merchant's own username and password *inside the body*. Reproduced deliberately (`providers/tingg/src/signature.ts` explains at length). Tingg re-posts an unacknowledged IPN every 30 seconds for 24 hours until the response **body** carries `status_code` 183, 180 or 188; paybox runs the same interval and caps at 20 attempts, with both figures stated in `docs/tingg.md`.
+- **Tingg carries two country vocabularies that disagree**: Checkout sends `KEN`, Payouts sends `KE`. Preserved, not normalised. Amounts are **major units** on the wire, converted in the zod schema like Flutterwave's. Its status vocabulary is numeric (130 pending, 183 successful, 180 rejected), and `status_code` is not consistently an HTTP status — express checkout answers 200, `checkout-charge` answers 1.
+- **Tingg's card rail is deliberately absent.** Direct Card's `source_Of_funds` is documented only as an "encrypted string"; the scheme is published nowhere readable, and `dev-portal.tingg.africa` 403s automated fetches the way `paystack.com/docs` does. Blocked on documentation, not effort — do not guess at it.
 - **Wise's `reference` is statement text, not an identifier.** Two payouts to the same vendor routinely share one, so the adapter stores `customerTransactionId` (unique by contract) as paybox's `Transfer.reference` and keeps the display reference on metadata.
 - **WeWire is FX-centric, and the "no FX conversion" invariant still holds.** The rate lives in `providers/wewire/src/rates.ts` — a fixed table, because a moving rate would break determinism — and a cross-currency payout is stored as integer minor units in the source currency with the destination amount and rate as metadata. The adapter quotes; core only records what was quoted, and `getBalance` still folds per currency.
 
@@ -84,15 +89,17 @@ Dependency direction is strict and one-way:
 ```
 shared ──> core ──> (storage, webhooks, simulator) ──> providers/* ──> apps/api ──> apps/cli
 
-providers/ now holds seven packages and eight adapters (Flutterwave serves two
-API versions). Anything a provider needs from core reaches it as an injected
+providers/ now holds eight packages and nine adapters (Flutterwave serves two
+API versions; Tingg serves two APIs from one prefix). Anything a provider needs
+from core reaches it as an injected
 function -- ProviderStatusResolver, AuthorizationMinter, InstrumentResolver,
 SetupAuthorizationMinter -- never an import. Adding Stripe was the first test
 of that and needed three new seams; Flutterwave, Kora and WeWire needed none
 at all. Wise needed two, both narrow and both general: a `reserve` flag on
 createTransfer (a Wise transfer commits nothing until a separate funding
 call) and a provider-scoped key/value store for short-lived state the engine
-has no concept of. See docs/architecture.md.
+has no concept of. Tingg needed three, all in @paybox/webhooks rather than
+core. See docs/architecture.md.
 ```
 
 - **`packages/shared`** — types and pure helpers with no runtime deps: canonical statuses, the domain model, seeded `Random`, `IdFactory`, the `Clock` *port* (interface only), currency, and the `PayboxError` taxonomy.
@@ -163,7 +170,7 @@ The engine only raises `PayboxError` with a code from the `ERROR_CODES` list. Ea
 
 ## Testing
 
-48 suites, 802 tests. The load-bearing one is in `tests/paystack-subscriptions.test.ts`: a monthly subscription plus a single `advance` must yield twelve invoices one calendar month apart, each payment stamped at its own period start. If that breaks, `VirtualClock#at` has broken.
+51 suites, 867 tests. The load-bearing one is in `tests/paystack-subscriptions.test.ts`: a monthly subscription plus a single `advance` must yield twelve invoices one calendar month apart, each payment stamped at its own period start. If that breaks, `VirtualClock#at` has broken.
 
 `tests/helpers.ts` exposes `createHarness()` — in-memory SQLite, clock frozen at a fixed instant, fixed seed. Assertions can therefore be exact (literal ids, exact timestamps, gapless sequence numbers) rather than approximate. Prefer it over ad-hoc setup.
 

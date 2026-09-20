@@ -78,6 +78,7 @@ const DEFAULTS: PayboxConfig = {
     flutterwave: { enabled: true },
     kora: { enabled: true },
     quiddpay: { enabled: true },
+    tingg: { enabled: true },
     wewire: { enabled: true },
     wise: { enabled: true },
   },

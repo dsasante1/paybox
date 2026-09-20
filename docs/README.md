@@ -10,8 +10,8 @@ change it instead, start with [CONTRIBUTING.md](../CONTRIBUTING.md) and
 |---|---|
 | Install it and make a first payment | [Getting started](getting-started.md) |
 | Understand the model — canonical statuses, virtual time, the event log | [Concepts](concepts.md) |
-| Point a Paystack, Stripe, Flutterwave, Kora, Quid Payments, WeWire or Wise integration at it | [Providers](providers.md) |
-| Know exactly what each adapter does and does not implement | [paystack](paystack.md) · [stripe](stripe.md) · [flutterwave](flutterwave.md) · [kora](kora.md) · [quiddpay](quiddpay.md) · [wewire](wewire.md) · [wise](wise.md) |
+| Point a Paystack, Stripe, Flutterwave, Kora, Quid Payments, Tingg, WeWire or Wise integration at it | [Providers](providers.md) |
+| Know exactly what each adapter does and does not implement | [paystack](paystack.md) · [stripe](stripe.md) · [flutterwave](flutterwave.md) · [kora](kora.md) · [quiddpay](quiddpay.md) · [tingg](tingg.md) · [wewire](wewire.md) · [wise](wise.md) |
 | Pick a card number or phone number that produces a given outcome | [Test instruments](test-instruments.md) |
 | Drive payments, refunds, transfers, subscriptions and disputes | [Payment lifecycle](payment-lifecycle.md) |
 | Fast-forward retries, expiries and renewals | [Time control](time.md) |

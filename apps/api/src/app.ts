@@ -5,6 +5,7 @@ import { stripePlugin } from '@paybox/stripe';
 import { flutterwavePlugin, flutterwaveV4Plugin } from '@paybox/flutterwave';
 import { koraPlugin } from '@paybox/kora';
 import { quiddpayPlugin } from '@paybox/quiddpay';
+import { tinggPlugin } from '@paybox/tingg';
 import { wewirePlugin } from '@paybox/wewire';
 import { wisePlugin } from '@paybox/wise';
 import { paystackPlugin, fail } from '@paybox/paystack';
@@ -306,6 +307,48 @@ export async function buildApp(context: PayboxContext): Promise<FastifyInstance>
         });
       },
       { prefix: '/quiddpay' },
+    );
+  }
+
+  if (context.config.providers.tingg?.enabled !== false) {
+    await app.register(
+      async (scope) => {
+        await scope.register(networkPlugin, {
+          simulator: context.network,
+          // Tingg's checkout envelope. `status.status_code` is the field its
+          // own samples branch on, and 500 is its published code for a
+          // platform-side failure -- so a simulated outage stays inside the
+          // documented list rather than inventing a code beside it.
+          errorBody: (status) => ({
+            status: {
+              status_code: 500,
+              status_description:
+                status === 429
+                  ? 'Too many requests'
+                  : 'The provider is temporarily unavailable (simulated by paybox).',
+            },
+          }),
+        });
+        // No `idempotencyPlugin`: Tingg publishes no idempotency header. Its
+        // replay protection is `merchant_transaction_id` on checkout and
+        // `payerTransactionID` on a payout, both unique by contract, and the
+        // adapter enforces each itself. Same reasoning as WeWire and Wise.
+        await scope.register(tinggPlugin, {
+          engine: context.engine,
+          simulator: context.simulator,
+          storage: context.storage,
+          clock: context.clock,
+          ids: context.ids,
+          baseUrl: context.baseUrl,
+          basePath: '/tingg',
+          credentials: context.tinggKeys,
+          allowAnyKey: context.config.security.allowAnyKey,
+          autoAdvance: context.config.simulation.autoAdvance,
+          autoAdvanceDelayMs: context.config.simulation.autoAdvanceDelayMs,
+          transferFee: context.config.balance.transferFee,
+        });
+      },
+      { prefix: '/tingg' },
     );
   }
 

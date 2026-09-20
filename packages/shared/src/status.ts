@@ -204,6 +204,7 @@ export const PROVIDERS = [
   'flutterwave',
   'kora',
   'quiddpay',
+  'tingg',
   'wewire',
   'wise',
 ] as const;

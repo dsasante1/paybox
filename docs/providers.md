@@ -23,6 +23,7 @@ The pattern is the same everywhere:
 | Flutterwave v4 | `http://127.0.0.1:8080/flutterwave/v4` | `flw-test-local-…` / `flwsec-test-local-…` | OAuth2 client credentials → `Bearer <token>` |
 | Kora | `http://127.0.0.1:8080/kora` | `sk_test_local_…` | `Authorization: Bearer` |
 | Quid Payments | `http://127.0.0.1:8080/quiddpay` | `ak_test_local_…` | `Authorization: Bearer` |
+| Tingg | `http://127.0.0.1:8080/tingg` | `paybox_local_tingg_…` (+ OAuth client credentials) | `apiKey:` header **and** `Authorization: Bearer <token>` |
 | WeWire | `http://127.0.0.1:8080/wewire` | `sk_test_local_…` | `ww-api-key: <key>` — no Bearer |
 | Wise | `http://127.0.0.1:8080/wise` | `wise_test_local_…` | `Authorization: Bearer` |
 
@@ -37,6 +38,10 @@ Credentials are regenerated from the seed on every start; with a fixed
 - **A key of the wrong shape — HTTP 401** unless `PAYBOX_ALLOW_ANY_KEY=1`.
   Nothing checks *which* test key you send: any `sk_test_…` works for
   Paystack, Kora and WeWire, and any `ak_test_…` for Quid Payments.
+- **Tingg is the exception, and deliberately so.** Tingg publishes no test-key
+  prefix at all, so there is nothing to pattern-match. paybox matches the key
+  it generated instead, which refuses a real live key rather than accepting it.
+  See [tingg.md](tingg.md#authentication).
 - **A wrong header.** WeWire with `Authorization: Bearer` fails, because that
   is what WeWire does.
 
@@ -72,6 +77,7 @@ body sees exactly what its provider would send:
 | Flutterwave v4 | `{ "status": "failed", "error": { "type": "SERVER_ERROR", "code": "10500", "message": "…" } }` |
 | Kora | `{ "status": false, "message": "…", "data": null }` |
 | Quid Payments | `{ "error": { "code": "PROVIDER_RAIL_UNAVAILABLE", "message": "…" } }` (429: `RATE_LIMITED`) |
+| Tingg | `{ "status": { "status_code": 500, "status_description": "…" } }` |
 | WeWire | `{ "success": false, "error": { "code": "INTEGRATION_UNAVAILABLE", "message": "…", "statusCode": 500 } }` |
 | Wise | `{ "timestamp": "…", "errors": [ { "code": "unexpected.error", "message": "…" } ] }` |
 
@@ -324,6 +330,69 @@ Events: `checkout.session.completed`, `.failed`, `.expired`; the six
 `payout.*`; and `test.payment.*` for outcomes driven through the test endpoint.
 Contract: [quiddpay.md](quiddpay.md).
 
+## Tingg
+
+```env
+TINGG_BASE_URL=http://127.0.0.1:8080/tingg    # then /v3/checkout-api/… or /v1/global-api/…
+TINGG_API_KEY=paybox_local_tingg_apikey_…
+TINGG_CLIENT_ID=paybox_local_tingg_client_…
+TINGG_CLIENT_SECRET=paybox_local_tingg_secret_…
+```
+
+Tingg is **two APIs under one prefix**, because a real integration points one
+base URL at `api.tingg.africa` and calls both. Checkout 3.0 needs *two*
+credentials on every call — the `apiKey` header **and** a bearer token:
+
+```bash
+TOKEN=$(curl -s -X POST $TINGG_BASE_URL/v1/oauth/token/request \
+  -H "apiKey: $TINGG_API_KEY" -H 'content-type: application/json' \
+  -d "{\"client_id\":\"$TINGG_CLIENT_ID\",\"client_secret\":\"$TINGG_CLIENT_SECRET\",\"grant_type\":\"client_credentials\"}" \
+  | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+
+curl -X POST $TINGG_BASE_URL/v3/checkout-api/checkout-request/express-request \
+  -H "apiKey: $TINGG_API_KEY" -H "Authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"customer_first_name":"John","customer_last_name":"Doe","msisdn":"254700000000",
+       "account_number":"ACC_0001","request_amount":600,"merchant_transaction_id":"MTX-0001",
+       "service_code":"TINGGTEST","country_code":"KEN","currency_code":"KES",
+       "callback_url":"https://you.example/ipn","success_redirect_url":"https://you.example/ok",
+       "fail_redirect_url":"https://you.example/no"}'
+```
+
+Payouts is different in every respect — one RPC path, and credentials in the
+**body**:
+
+```bash
+curl -X POST $TINGG_BASE_URL/v1/global-api/payments -H 'content-type: application/json' \
+  -d '{"function":"BEEP.queryFloatBalance","countryCode":"KE","payload":{
+       "credentials":{"username":"sandboxUser","password":"sandboxPassword!"},
+       "packet":[{"serviceCode":"KE-BANK-PAYOUT"}]}}'
+```
+
+**Amounts are major units** (`600` means KES 600), and Tingg's status
+vocabulary is numeric: `130` pending, `183` successful, `180` rejected.
+
+**Webhooks — read this before you write a handler.** Tingg **signs nothing**;
+there is no signature header and no secret. And a `200 OK` is **not** an
+acknowledgement — Tingg reads a code out of your response *body* and re-posts
+every 30 seconds for 24 hours until it sees one:
+
+```js
+// Anything else, including a bare 200 OK, and Tingg keeps coming back.
+res.status(200).json({
+  status_code: '183',              // 183 accepted · 180 rejected · 188 ack later
+  checkout_request_id: body.checkout_request_id,
+  merchant_transaction_id: body.merchant_transaction_id,
+  receipt_number: 'R-1',
+  status_description: 'ok',
+});
+```
+
+The callback address is **per request** (`callback_url` on the checkout,
+`extraData.callbackUrl` on a payout), not a dashboard setting — so
+`paybox webhook add --provider tingg` will not receive these.
+Contract: [tingg.md](tingg.md).
+
 ## WeWire
 
 ```env
@@ -416,8 +485,8 @@ SDK's own documentation; confirm against the version you run.
 
 **1. Base URL from configuration.** Most integrations build requests against
 an env var or a constant. Change it; done. This covers every hand-rolled
-client and the Paystack, Flutterwave, Kora, Quid Payments, WeWire and Wise
-examples above.
+client and the Paystack, Flutterwave, Kora, Quid Payments, Tingg, WeWire and
+Wise examples above.
 
 **2. An SDK setting that accepts a path.** Stripe's server SDKs expose one:
 

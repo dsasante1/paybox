@@ -93,6 +93,7 @@ exactly the class of bug this tool exists to help people find.
 | `@paybox/webhooks` | Dispatcher, retry policy, transports, chaos | core |
 | `@paybox/simulator` | Test instruments, outcome→transition plans, scenario runner | core |
 | `@paybox/paystack` | Routes, schemas, mappers, signature, checkout page, error mapper | core, webhooks, simulator |
+| `@paybox/tingg` (and six more) | One per provider; same shape | core, webhooks, simulator |
 | `@paybox/api` | Fastify assembly, control plane, dashboard, config | all |
 | `@paybox/cli` | Thin REST client over the control plane | api |
 
@@ -411,6 +412,75 @@ reasons:
 So `provider_state` is a provider-scoped key/value table with an upsert, read
 by nothing in `packages/core`. An adapter owning its own short-lived state is
 the same principle as an adapter owning its own status vocabulary.
+
+## Three seams Tingg needed, and why they are general
+
+Tingg's subscriber protocol is unlike the other seven, and it took three
+additions to the webhook layer. All three are opt-in, so a formatter that
+declares none behaves exactly as before — which is what made it safe to change
+a file seven adapters depend on.
+
+### `WebhookFormatter.interpretResponse`
+
+Every other provider ends a delivery on any 2xx, and the dispatcher encoded
+that directly:
+
+```ts
+const ok = result.status !== null && result.status >= 200 && result.status < 300;
+```
+
+Tingg does not accept an HTTP status as an answer. It reads a `status_code` out
+of the response **body** — `183` accepted, `180` rejected, `188` acknowledged
+later — and re-posts until it sees one. A bare `200 OK` is not an
+acknowledgement.
+
+So a formatter may now say what a delivery means. The hook is consulted **only
+after the HTTP layer already succeeded**, which is the property that keeps it
+safe: no formatter can mark a 500 or a timeout delivered, however its body
+parses. Absent, the rule above is unchanged.
+
+This is the most valuable thing the Tingg adapter offers. An integration that
+answers `200 OK` is correct against all seven other providers and gets
+re-posted for twenty-four hours in production — a bug that a provider sandbox
+makes very hard to find and that this makes trivial.
+
+### `WebhookFormatter.retry`
+
+`DispatcherOptions.retry` is one policy for the whole emulator, which was right
+while every provider backed off exponentially. Paystack's fixed ten-attempt
+ladder already stretched it: the composition root has to override `maxAttempts`
+and `backoff` together, globally, to run it.
+
+Tingg's ladder is a flat 30-second interval bounded by *elapsed time* rather
+than attempt count. Averaging that into an exponential curve would produce a
+schedule that is neither, so a formatter may now carry its own.
+
+The global switch still wins. `#policyFor` falls back to the dispatcher's
+policy whenever retries are disabled, or `PAYBOX_WEBHOOK_RETRY=0` would
+silently exempt whichever provider declared one — the opposite of what the flag
+says.
+
+### `FormattedWebhook.deliverTo`
+
+`endpointsFor(provider, eventType)` resolves endpoints registered up front,
+which is how every other provider works: a subscriber is configured in a
+dashboard and receives what it subscribed to.
+
+Tingg has no dashboard-registered address. `callback_url` arrives on the
+checkout payload and `extraData.callbackUrl` on a payout packet, so the set of
+subscribers is discovered as requests come in, and two concurrent checkouts can
+legitimately name two different URLs. Fanning one payment's IPN out to the
+other's address would be wrong.
+
+The adapter records each address as it sees it and names it on the formatted
+webhook; the dispatcher narrows its fan-out to that one endpoint. Absent, the
+fan-out is unchanged.
+
+Note the division of labour, which is the part that generalises: the adapter
+decides *which* address, because that is provider knowledge, and the dispatcher
+only filters. The alternative considered — having the dispatcher create
+endpoints on demand — would have put resource lifecycle in the component whose
+whole job is delivery.
 
 ## RSA webhook signatures
 

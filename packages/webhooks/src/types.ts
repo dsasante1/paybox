@@ -19,6 +19,20 @@ export interface FormattedWebhook {
    * provider with one format.
    */
   variant?: string;
+  /**
+   * Deliver only to this exact URL, for a provider that takes its callback
+   * address **per request** rather than from a dashboard.
+   *
+   * Tingg does: `callback_url` travels on the checkout payload, so two
+   * concurrent checkouts can legitimately name two different endpoints, and
+   * fanning one payment's IPN out to the other's URL would be wrong. The
+   * adapter registers an endpoint for the URL when it takes the request and
+   * names it here; the dispatcher then narrows its fan-out to that one.
+   *
+   * Omit it for the normal case -- a provider whose subscribers are
+   * registered once and receive everything they subscribed to.
+   */
+  deliverTo?: string;
 }
 
 export interface FormatterContext {
@@ -95,6 +109,39 @@ export interface WebhookFormatter {
    * makes the delivery log trustworthy.
    */
   readonly resignsPerAttempt?: boolean;
+  /**
+   * Whether a 2xx actually means the subscriber accepted the webhook.
+   *
+   * Every provider here but one ends delivery on any 2xx, which is what the
+   * dispatcher does when this is absent. Tingg does not: it reads a
+   * `status_code` out of the **response body** -- 183 accepted, 180 rejected,
+   * 188 acknowledged later -- and keeps retrying until it sees one, so a bare
+   * `200 OK` is not an acknowledgement there.
+   *
+   * Consulted only after the HTTP layer already succeeded: a 500 or a timeout
+   * is a retry whatever the body says, so a formatter cannot accidentally
+   * mark a transport failure delivered.
+   *
+   * Returning 'retry' records the attempt as failed and schedules the next
+   * one, exactly as an HTTP error would.
+   */
+  interpretResponse?(result: { status: number | null; body: string | null }):
+    | 'delivered'
+    | 'retry';
+  /**
+   * This provider's own retry ladder, overriding the dispatcher's.
+   *
+   * The default is one policy for the whole emulator, which is right while
+   * every provider backs off exponentially. Tingg's published ladder is a
+   * *fixed* 30-second interval bounded by elapsed time rather than by attempt
+   * count, and averaging it into an exponential curve would produce a
+   * schedule that is neither.
+   *
+   * The global switch still wins: turning retries off turns them off
+   * everywhere, or `PAYBOX_WEBHOOK_RETRY=0` would silently exempt whichever
+   * provider declared its own.
+   */
+  readonly retry?: RetryPolicy;
 }
 
 /** Outcome of one HTTP attempt. */
