@@ -1,7 +1,14 @@
 # Proposal: adding Tingg (Cellulant) to paybox
 
-**Status:** proposal, nothing implemented. This is not a coverage contract — when
-the adapter exists, `docs/tingg.md` becomes the contract and this file goes away.
+**Status: implemented.** All of it, in commit `ed9c01a`. This file is kept as the
+record of *why* the design is what it is — the alternatives weighed, and the two
+judgment calls (one prefix rather than two; capping the retry ladder) that a
+reader of the finished code would otherwise have to reconstruct.
+
+It is **not** a coverage contract. [`docs/tingg.md`](../tingg.md) is, and it is
+the file to trust about what the adapter actually serves. The three seams are
+described in [`docs/architecture.md`](../architecture.md). Where this file and
+those two disagree, they are right and this one is stale.
 
 **Sources.** Everything below was read from `docs.tingg.africa` on **2026-09-20**;
 each claim carries its page. `dev-portal.tingg.africa` — the Stoplight portal the
@@ -222,6 +229,12 @@ guessed at:
   search results but on no page fetched here.
 
 ## 8. Recommendation
+
+*(Retained as written. What actually shipped: all four phases except the Direct
+Card rail of phase 4, which is blocked exactly as §7 predicted. Seam 3 went the
+way §3 recommended — per-request URLs resolved through an adapter-registered
+endpoint, with the dispatcher only filtering — so no fallback to option 2 was
+needed.)*
 
 Build it, in the phase order above, and treat §2.3 as the headline feature rather
 than a footnote — an emulator that can prove a developer's callback handler
