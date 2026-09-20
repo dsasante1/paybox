@@ -5,8 +5,38 @@ What each published version of `paybox-emulator` (npm) and `dsasante1/paybox`
 merging to `main` publishes nothing, and everything under **Unreleased** goes
 out with the next tag — see [docs/releasing.md](docs/releasing.md).
 
-## Unreleased
+## 0.3.0 — 2026-09-20
 
+- **An eighth provider: Tingg** (Cellulant) — `/tingg`, 11 endpoints,
+  [contract](docs/tingg.md). Two APIs served from one prefix: Checkout 3.0
+  (OAuth2 bearer *plus* an `apiKey` header, REST, `snake_case`) and Payouts
+  (BEEP — credentials in the request body, RPC on a `function` field,
+  `camelCase`). They share almost nothing, but a real client points one base
+  URL at `api.tingg.africa` and calls both, so prefix follows what a client
+  targets rather than how different the APIs are. Express and custom checkout,
+  the mobile-money prompt, query, acknowledgement, refunds, and five BEEP
+  functions including a float balance folded from the same ledger a payout
+  reserves against. No card rail: Tingg documents `source_Of_funds` only as an
+  "encrypted string", and guessing the scheme would mean inventing the one
+  thing a developer's encryption code has to match exactly.
+- **A 2xx is no longer assumed to mean "delivered".**
+  `WebhookFormatter.interpretResponse` lets an adapter decide what a
+  subscriber's response actually meant. Tingg reads a `status_code` out of the
+  response **body** — 183, 180 or 188 — and re-posts until it sees one, so an
+  integration answering a bare `200 OK` is correct against every other
+  provider here and gets re-posted for twenty-four hours in production. The
+  hook is consulted only after the HTTP layer already succeeded, so no
+  formatter can mark a 500 or a timeout delivered. Absent, behaviour is
+  unchanged.
+- **A formatter can carry its own retry ladder** (`WebhookFormatter.retry`).
+  Tingg's is a flat 30 seconds bounded by elapsed time rather than attempt
+  count; paybox runs the same interval and caps at 20 attempts instead of
+  2,880, with both figures stated in its contract. The global switch still
+  wins, so turning retries off turns them off everywhere.
+- **A webhook can name its own destination** (`FormattedWebhook.deliverTo`).
+  Tingg has no dashboard-registered callback address — it arrives per request —
+  so two concurrent checkouts can legitimately name two URLs, and neither may
+  receive the other's notification.
 - **A seventh provider: Quid Payments** (`/quiddpay`, 36 endpoints,
   [contract](docs/quiddpay.md)). The first hosted-checkout adapter here: a
   merchant creates a session, redirects the payer to `checkout_url` and waits
