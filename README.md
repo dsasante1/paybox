@@ -32,6 +32,7 @@ reaches a payment network, and it refuses live API keys.
 | Flutterwave v4 | `/flutterwave/v4` | 11 | **Partial** — [what works](docs/flutterwave.md) |
 | Kora | `/kora` | 29 | **Partial** — [what works](docs/kora.md) |
 | Quid Payments | `/quiddpay` | 36 | **Partial** — [what works](docs/quiddpay.md) |
+| Tingg | `/tingg` | 11 | **Partial** — [what works](docs/tingg.md) |
 | WeWire | `/wewire` | 25 | **Partial** — [what works](docs/wewire.md) |
 | Wise | `/wise` | 30 | **Partial** — [what works](docs/wise.md) |
 <!-- coverage:end -->

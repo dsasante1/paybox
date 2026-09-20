@@ -27,7 +27,8 @@ outcome by hand.
 
 ## The generic convention
 
-Works for every provider that has no published table (Kora, Quid Payments),
+Works for every provider that has no published table (Kora, Quid Payments,
+Tingg),
 and alongside
 the published tables everywhere else.
 
@@ -174,6 +175,23 @@ Kora's own sandbox endpoints are implemented as published:
 `POST /virtual-bank-account/sandbox/credit` pays into a virtual account. Card
 payloads may be AES-256-GCM encrypted in `charge_data` under the secret key,
 or sent plain.
+
+## Tingg
+
+Tingg publishes no test instruments, so the **shared last-four convention**
+above applies to the payer's `msisdn`: `…0000` succeeds, `…0001` declines, and
+so on.
+
+Two conventions are paybox's own, and are labelled as such in
+[tingg.md](tingg.md#test-instruments):
+
+| Where | Ending | Outcome |
+|---|---|---|
+| `BEEP.postPayment` `accountNumber` | `0000` | The rail rejects the payout |
+| `BEEP.validateAccount` `accountNumber` | `0000` | Invalid account (`306`) |
+| `BEEP.validateAccount` `accountNumber` | `9999` | Validation unavailable (`301`) |
+
+Anything else settles or validates.
 
 ## Quid Payments
 

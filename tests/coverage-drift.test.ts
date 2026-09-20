@@ -20,6 +20,7 @@ import {
 } from '@paybox/flutterwave';
 import { KORA_COVERAGE, registerKora } from '@paybox/kora';
 import { QUIDDPAY_COVERAGE, registerQuiddpay } from '@paybox/quiddpay';
+import { TINGG_COVERAGE, registerTingg } from '@paybox/tingg';
 import { WEWIRE_COVERAGE, registerWewire } from '@paybox/wewire';
 import { WISE_COVERAGE, registerWise } from '@paybox/wise';
 
@@ -153,6 +154,16 @@ beforeAll(async () => {
     ),
   });
   subjects.push({
+    manifest: TINGG_COVERAGE,
+    routes: await routesOf('/tingg', (app) =>
+      registerTingg(app, {
+        ...common,
+        basePath: '/tingg',
+        credentials: context.tinggKeys,
+      }),
+    ),
+  });
+  subjects.push({
     manifest: WEWIRE_COVERAGE,
     routes: await routesOf('/wewire', (app) =>
       registerWewire(app, { ...common, basePath: '/wewire', random: context.random }),
@@ -176,6 +187,7 @@ describe('every route is declared', () => {
     'flutterwave-v4',
     'kora',
     'quiddpay',
+    'tingg',
     'wewire',
     'wise',
   ])(
@@ -204,6 +216,7 @@ describe('every declaration is real', () => {
     'flutterwave-v4',
     'kora',
     'quiddpay',
+    'tingg',
     'wewire',
     'wise',
   ])(
@@ -233,6 +246,7 @@ describe('every declaration is documented', () => {
     'flutterwave-v4',
     'kora',
     'quiddpay',
+    'tingg',
     'wewire',
     'wise',
   ])(
@@ -350,9 +364,11 @@ describe('the published table', () => {
 
 describe('what the manifests report', () => {
   it('covers every adapter the app serves', () => {
-    // Eight adapters across seven providers: Flutterwave serves two API
-    // versions that share nothing.
-    expect(subjects).toHaveLength(8);
+    // Nine adapters across eight providers: Flutterwave serves two API
+    // versions that share nothing. Tingg goes the other way -- two APIs that
+    // also share nothing, served from one prefix because a real client points
+    // one base URL at both. See providers/tingg/src/routes.ts.
+    expect(subjects).toHaveLength(9);
     expect(subjects.map((s) => s.manifest.id).sort()).toEqual([
       'flutterwave-v3',
       'flutterwave-v4',
@@ -360,6 +376,7 @@ describe('what the manifests report', () => {
       'paystack',
       'quiddpay',
       'stripe',
+      'tingg',
       'wewire',
       'wise',
     ]);

@@ -34,6 +34,21 @@ export function createRetryPolicy(
   };
 }
 
+/**
+ * A flat interval between every attempt.
+ *
+ * Tingg's published ladder is one: it re-posts an unacknowledged IPN "every
+ * 30sec within 24 hours of the transaction". Nothing backs off, so the
+ * exponential default would misrepresent it in both directions -- too eager
+ * early, far too patient later.
+ *
+ * Unjittered on purpose. Fixed-interval is the observable property a developer
+ * is checking here, and spreading it would hide the very thing being modelled.
+ */
+export function fixedInterval(intervalMs: number): (attempt: number) => number {
+  return () => intervalMs;
+}
+
 /** No retries -- one attempt, success or failure. */
 export const NO_RETRY: RetryPolicy = {
   enabled: false,

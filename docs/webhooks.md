@@ -70,6 +70,31 @@ paybox time advance 2h    # runs the entire ladder to exhaustion, instantly
 paybox webhook list
 ```
 
+### Two providers do not use that ladder
+
+**Paystack** has its own — a fixed ten attempts, hourly in test mode. Set
+`webhooks.retry.schedule` to `paystack` to run it.
+
+**Tingg** is the odd one out twice over, and both are worth knowing about
+before you write a handler:
+
+- Its ladder is a **flat 30 seconds**, not exponential, and it runs for 24
+  hours. paybox uses the same interval and stops at 20 attempts; see
+  [tingg.md](tingg.md#the-retry-ladder-is-fixed-interval-and-paybox-caps-it)
+  for why, and for the real figure.
+- **A 2xx is not an acknowledgement.** Tingg reads a `status_code` out of your
+  response *body* — `183`, `180` or `188` — and keeps re-posting until it sees
+  one. A bare `200 OK` does not stop it.
+
+That second point is the one that bites. An integration that returns `200 OK`
+is correct against every other provider here and gets re-posted for a day in
+production, and paybox reproduces that exactly so you can find it locally.
+
+If you are adding a provider whose subscriber protocol works this way,
+`WebhookFormatter.interpretResponse` is the seam; `WebhookFormatter.retry`
+carries its own ladder. Both are opt-in, so a provider that has neither is
+unaffected by construction.
+
 ## Retry vs replay
 
 They are different and the difference matters.

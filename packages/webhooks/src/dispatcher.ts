@@ -78,6 +78,36 @@ export class WebhookDispatcher {
     this.#formatters.set(formatter.provider, formatter);
   }
 
+  /**
+   * The ladder this provider's deliveries climb.
+   *
+   * A formatter may declare its own, because a published retry schedule is
+   * provider behaviour like any other -- but only while retries are on at all.
+   * Letting a formatter's policy survive the global switch would mean
+   * `PAYBOX_WEBHOOK_RETRY=0` silently exempted whichever provider declared one.
+   */
+  #policyFor(provider: ProviderId): RetryPolicy {
+    const own = this.#formatters.get(provider)?.retry;
+    if (!own || !this.#retry.enabled) return this.#retry;
+    return own;
+  }
+
+  /**
+   * Whether the subscriber actually accepted this delivery.
+   *
+   * A 2xx is the answer for every provider but Tingg, which reads an
+   * acknowledgement code out of the response *body* and retries until it sees
+   * one. The formatter is consulted only once the HTTP layer has already
+   * succeeded, so no formatter can mark a 500 or a timeout delivered.
+   */
+  #accepted(provider: ProviderId, result: TransportResult): boolean {
+    const httpOk = result.status !== null && result.status >= 200 && result.status < 300;
+    if (!httpOk) return false;
+    const formatter = this.#formatters.get(provider);
+    if (!formatter?.interpretResponse) return true;
+    return formatter.interpretResponse({ status: result.status, body: result.body }) === 'delivered';
+  }
+
   attachTo(bus: EventBus): void {
     bus.onAny(async (event) => {
       await this.onEvent(event);
@@ -129,14 +159,23 @@ export class WebhookDispatcher {
 
     const created: WebhookDelivery[] = [];
     for (const webhook of webhooks) {
-      const endpoints = await this.#storage.webhooks.endpointsFor(
+      const matched = await this.#storage.webhooks.endpointsFor(
         event.provider,
         webhook.eventType,
       );
+      // A provider that takes its callback address per request narrows the
+      // fan-out to the one URL this resource named. The adapter registers the
+      // endpoint when it takes the request, so an empty result here means the
+      // developer's URL was never recorded -- worth saying out loud, because
+      // the symptom is a webhook that simply never arrives.
+      const endpoints = webhook.deliverTo
+        ? matched.filter((endpoint) => endpoint.url === webhook.deliverTo)
+        : matched;
       if (endpoints.length === 0) {
         this.#logger.debug('No webhook endpoint matched', {
           provider: event.provider,
           eventType: webhook.eventType,
+          ...(webhook.deliverTo ? { deliverTo: webhook.deliverTo } : {}),
         });
         continue;
       }
@@ -189,7 +228,10 @@ export class WebhookDispatcher {
       },
       status: 'pending',
       attempt: 0,
-      maxAttempts: this.#retry.enabled ? this.#retry.maxAttempts : 1,
+      maxAttempts: (() => {
+        const policy = this.#policyFor(endpoint.provider);
+        return policy.enabled ? policy.maxAttempts : 1;
+      })(),
       responseStatus: null,
       responseBody: null,
       errorMessage: null,
@@ -261,7 +303,8 @@ export class WebhookDispatcher {
 
     const result = await this.#attempt(delivery);
     const attempt = delivery.attempt + 1;
-    const ok = result.status !== null && result.status >= 200 && result.status < 300;
+    const policy = this.#policyFor(delivery.provider);
+    const ok = this.#accepted(delivery.provider, result);
 
     if (ok) {
       return this.#storage.webhooks.updateDelivery(deliveryId, {
@@ -276,34 +319,49 @@ export class WebhookDispatcher {
       });
     }
 
-    const canRetry = this.#retry.enabled && attempt < delivery.maxAttempts;
+    const canRetry = policy.enabled && attempt < delivery.maxAttempts;
     if (!canRetry) {
       return this.#storage.webhooks.updateDelivery(deliveryId, {
         status: 'exhausted',
         attempt,
         responseStatus: result.status,
         responseBody: result.body,
-        errorMessage: result.error ?? `Endpoint responded ${result.status}.`,
+        errorMessage: result.error ?? this.#rejectionMessage(result),
         durationMs: result.durationMs,
         nextRetryAt: null,
         updatedAt: this.#clock.nowISO(),
       });
     }
 
-    const delayMs = this.#retry.backoff(attempt - 1);
+    const delayMs = policy.backoff(attempt - 1);
     const nextRetryAt = new Date(this.#clock.now() + delayMs).toISOString();
     const updated = await this.#storage.webhooks.updateDelivery(deliveryId, {
       status: 'pending',
       attempt,
       responseStatus: result.status,
       responseBody: result.body,
-      errorMessage: result.error ?? `Endpoint responded ${result.status}.`,
+      errorMessage: result.error ?? this.#rejectionMessage(result),
       durationMs: result.durationMs,
       nextRetryAt,
       updatedAt: this.#clock.nowISO(),
     });
     await this.#enqueue(deliveryId, delayMs);
     return updated;
+  }
+
+  /**
+   * Why a delivery was not accepted.
+   *
+   * "Endpoint responded 200" reads as a contradiction on a provider whose
+   * acknowledgement lives in the body, and that is precisely the case a
+   * developer needs the delivery log to explain.
+   */
+  #rejectionMessage(result: TransportResult): string {
+    const httpOk = result.status !== null && result.status >= 200 && result.status < 300;
+    if (httpOk) {
+      return `Endpoint responded ${result.status} but did not acknowledge the webhook.`;
+    }
+    return `Endpoint responded ${result.status}.`;
   }
 
   async #attempt(delivery: WebhookDelivery): Promise<TransportResult> {

@@ -12,6 +12,7 @@ import { parseDuration } from '@paybox/core';
 import type { SimulatedOutcome } from '@paybox/simulator';
 import { generateStripeWebhookSecret } from '@paybox/stripe';
 import { generateWewireWebhookSecret } from '@paybox/wewire';
+import { TINGG_UNUSED_SECRET } from '@paybox/tingg';
 import { WISE_UNUSED_SECRET } from '@paybox/wise';
 import type { PayboxContext } from './context.js';
 
@@ -101,6 +102,7 @@ export const controlApiPlugin: FastifyPluginAsync<{ context: PayboxContext }> = 
     },
     kora: { status: 'partial', keys: context.koraKeys },
     quiddpay: { status: 'partial', keys: context.quiddpayKeys },
+    tingg: { status: 'partial', keys: { ...context.tinggKeys } },
     wewire: { status: 'partial', keys: context.wewireKeys },
     wise: { status: 'partial', keys: context.wiseKeys },
   };
@@ -694,6 +696,11 @@ export const controlApiPlugin: FastifyPluginAsync<{ context: PayboxContext }> = 
         // Quid signs with a per-endpoint secret issued in its dashboard, not
         // with the merchant API key — so the default is the signing secret.
         return context.quiddpayKeys.signingSecret;
+      case 'tingg':
+        // Tingg signs nothing. The endpoint still needs a secret column, so
+        // it carries a value that says what it is rather than one that looks
+        // usable. See providers/tingg/src/signature.ts.
+        return TINGG_UNUSED_SECRET;
       case 'wewire':
         return generateWewireWebhookSecret(context.ids.token(24));
       case 'wise':

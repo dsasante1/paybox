@@ -51,6 +51,12 @@ import {
 } from '@paybox/flutterwave';
 import { KoraWebhookFormatter, generateKoraKeys } from '@paybox/kora';
 import { QuiddpayWebhookFormatter, generateQuiddpayKeys } from '@paybox/quiddpay';
+import {
+  TinggWebhookFormatter,
+  generateTinggKeys,
+  toTinggStatus,
+  type TinggCredentials,
+} from '@paybox/tingg';
 import { WewireWebhookFormatter, generateWewireKeys } from '@paybox/wewire';
 import { WiseWebhookFormatter, generateWiseKeys } from '@paybox/wise';
 import type { PayboxConfig } from './config.js';
@@ -89,6 +95,12 @@ export interface PayboxContext {
    * requests, and a distinct per-endpoint secret signs webhooks.
    */
   quiddpayKeys: { apiKey: string; signingSecret: string };
+  /**
+   * Tingg needs four: an `apiKey` header *and* OAuth client credentials on
+   * Checkout 3.0, plus a username/password pair that Payouts takes in the
+   * request body. One brand, two unrelated authentication schemes.
+   */
+  tinggKeys: TinggCredentials;
   /** WeWire has one key, sent verbatim in `ww-api-key`. */
   wewireKeys: { secretKey: string };
   /** Wise uses a bearer token; its webhooks are RSA-signed, not shared-secret. */
@@ -140,6 +152,9 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
   const providerStatus: ProviderStatusResolver = (provider, status) => {
     if (provider === 'paystack') return toPaystackStatus(status);
     if (provider === 'stripe') return toStripeStatus(status);
+    // Tingg's status vocabulary is numeric -- 130 pending, 183 successful,
+    // 180 rejected -- so the stored providerStatus is a decimal string.
+    if (provider === 'tingg') return toTinggStatus(status);
     return status;
   };
 
@@ -219,6 +234,9 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
   dispatcher.register(new FlutterwaveWebhookFormatter({ version: 'v3' }));
   dispatcher.register(new KoraWebhookFormatter());
   dispatcher.register(new QuiddpayWebhookFormatter());
+  // Tingg is the only formatter that declares its own retry ladder and its
+  // own idea of what counts as a delivery. See providers/tingg/src/webhook.ts.
+  dispatcher.register(new TinggWebhookFormatter());
   dispatcher.register(new WewireWebhookFormatter());
   dispatcher.register(new WiseWebhookFormatter());
   dispatcher.attachTo(bus);
@@ -346,6 +364,7 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
   const flutterwaveKeys = generateFlutterwaveKeys(ids.token(20));
   const koraKeys = generateKoraKeys(ids.token(20));
   const quiddpayKeys = generateQuiddpayKeys(ids.token(20));
+  const tinggKeys = generateTinggKeys(ids.token(20));
   const wewireKeys = generateWewireKeys(ids.token(20));
   const wiseKeys = generateWiseKeys(ids.token(20));
   const flutterwaveV4 = generateV4Credentials(ids.token(20));
@@ -371,6 +390,7 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
     flutterwaveV4,
     koraKeys,
     quiddpayKeys,
+    tinggKeys,
     wewireKeys,
     wiseKeys,
     baseUrl,
