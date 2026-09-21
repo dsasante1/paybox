@@ -5,7 +5,7 @@ What each published version of `paybox-emulator` (npm) and `dsasante1/paybox`
 merging to `main` publishes nothing, and everything under **Unreleased** goes
 out with the next tag — see [docs/releasing.md](docs/releasing.md).
 
-## 0.3.0 — 2026-09-20
+## 0.3.0 — 2026-09-21
 
 - **An eighth provider: Tingg** (Cellulant) — `/tingg`, 11 endpoints,
   [contract](docs/tingg.md). Two APIs served from one prefix: Checkout 3.0
