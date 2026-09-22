@@ -67,6 +67,9 @@ tab renders.
       "keys": { "secretKey": "FLWSECK_TEST-…", "publicKey": "FLWPUBK_TEST-…", "encryptionKey": "…",
                 "v4": { "clientId": "flw-test-local-…", "clientSecret": "flwsec-test-local-…" } } },
     { "id": "kora",   "keys": { "secretKey": "…", "publicKey": "…" } },
+    { "id": "quiddpay", "keys": { "apiKey": "ak_test_local_…", "signingSecret": "…" } },
+    { "id": "tingg",  "keys": { "apiKey": "paybox_local_tingg_…", "clientId": "…", "clientSecret": "…",
+                                "payoutsUsername": "…", "payoutsPassword": "…" } },
     { "id": "wewire", "keys": { "secretKey": "…" } },
     { "id": "wise",   "keys": { "apiToken": "wise_test_local_…" } }
   ],
@@ -84,7 +87,7 @@ adapter, by design — see each provider's contract for what that means.
 | Query | Default | |
 |---|---|---|
 | `status` | — | canonical status |
-| `provider` | — | `paystack`, `stripe`, `flutterwave`, `kora`, `wewire`, `wise` |
+| `provider` | — | `paystack`, `stripe`, `flutterwave`, `kora`, `quiddpay`, `tingg`, `wewire`, `wise` |
 | `reference` | — | exact match |
 | `limit` | `50` | page size |
 | `offset` | `0` | |
@@ -265,7 +268,7 @@ reads and controls them.
     "description": "optional" }
   ```
 
-  `provider` defaults to `paystack` and must be one of the six; an unknown
+  `provider` defaults to `paystack` and must be one of the eight; an unknown
   value is a 400 rather than an endpoint nothing can ever match. An endpoint
   only ever receives its own provider's events. `eventTypes` are **provider**
   event names; empty means everything that provider emits. `secret` is what
@@ -277,6 +280,8 @@ reads and controls them.
   | Paystack, Kora | that provider's local secret key — what they sign with |
   | Flutterwave | the local Flutterwave secret key, standing in for the merchant-chosen hash |
   | Stripe | a fresh `whsec_local…` per endpoint |
+  | Quid Payments | the local Quid signing secret — Quid issues one per endpoint in its dashboard, separate from the API key |
+  | Tingg | `unused-tingg-does-not-sign-webhooks` — Tingg signs nothing, and its callback address arrives per request, so a registered endpoint receives no Tingg events ([providers.md](providers.md#tingg)) |
   | WeWire | a fresh `whsec_<base64>` per endpoint, so Standard Webhooks libraries can decode it |
   | Wise | `wise-rsa-signed` — unused; Wise signs with RSA |
 

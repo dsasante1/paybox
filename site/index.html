@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>paybox — a local payment infrastructure emulator</title>
-<meta name="description" content="Point an existing Paystack, Stripe, Flutterwave, Kora, Quid Payments, WeWire or Wise integration at localhost and test pending payments, webhook retries, duplicate deliveries, timeouts, refunds and idempotency — deterministically, with no provider sandbox.">
+<meta name="description" content="Point an existing Paystack, Stripe, Flutterwave, Kora, Quid Payments, Tingg, WeWire or Wise integration at localhost and test pending payments, webhook retries, duplicate deliveries, timeouts, refunds and idempotency — deterministically, with no provider sandbox.">
 <link rel="canonical" href="https://paybox-emulator.vercel.app/">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <meta name="theme-color" content="#f8f9fa" media="(prefers-color-scheme: light)">
@@ -464,8 +464,8 @@ thead th:nth-child(3){text-align:right}
   <div class="legal">
     <p>
       MIT licensed. Not affiliated with, endorsed by, or connected to Paystack,
-      Stripe, Flutterwave, Kora, Quid Payments, WeWire or Wise. Provider names are
-      used only to describe API compatibility.
+      Stripe, Flutterwave, Kora, Quid Payments, Tingg (Cellulant), WeWire or
+      Wise. Provider names are used only to describe API compatibility.
     </p>
     <p>
       This page is static. paybox itself runs on your machine and never talks to it.
@@ -556,6 +556,7 @@ thead th:nth-child(3){text-align:right}
                         <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/flutterwave.md">flutterwave</a></li>
                         <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/kora.md">kora</a></li>
                         <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/quiddpay.md">quiddpay</a></li>
+                        <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/tingg.md">tingg</a></li>
                         <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/wewire.md">wewire</a></li>
                         <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/wise.md">wise</a></li>
                       </ul>
@@ -617,8 +618,8 @@ thead th:nth-child(3){text-align:right}
           <h1>Test the parts of payments that are <em>hard to test.</em></h1>
           <p class="lede">
             paybox is a local payment infrastructure emulator. Point an existing
-            Paystack, Stripe, Flutterwave, Kora, Quid Payments, WeWire or Wise
-            integration at <code>localhost</code> and drive pending mobile-money
+            Paystack, Stripe, Flutterwave, Kora, Quid Payments, Tingg, WeWire or
+            Wise integration at <code>localhost</code> and drive pending mobile-money
             authorization, webhook retries, duplicate deliveries, timeouts,
             refunds and idempotency — <b>deterministically, offline.</b>
           </p>
@@ -968,7 +969,7 @@ thead th:nth-child(3){text-align:right}
     <section class="sec" id="s04">
       <div class="sec-head">
         <p class="no">§04</p>
-        <h2>Seven providers, eight adapters — each partially implemented.</h2>
+        <h2>Eight providers, nine adapters — each partially implemented.</h2>
         <p class="sub">
           <strong>Partial means partial.</strong> Each contract page lists what is
           implemented, what differs from the real provider and what is absent; if
@@ -1026,7 +1027,7 @@ thead th:nth-child(3){text-align:right}
     <section class="sec" id="s05">
       <div class="sec-head">
         <p class="no">§05</p>
-        <h2>One engine, eight adapters, one direction.</h2>
+        <h2>One engine, nine adapters, one direction.</h2>
         <p class="sub">
           The engine knows nothing about providers: <code>provider</code> is a
           discriminator on a row. Anything an adapter needs from the engine arrives

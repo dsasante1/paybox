@@ -80,6 +80,8 @@ credential, header and SDK settings:
 STRIPE_API_BASE=http://127.0.0.1:8080/stripe
 FLW_BASE_URL=http://127.0.0.1:8080/flutterwave        # v3; v4 is /flutterwave/v4
 KORA_BASE_URL=http://127.0.0.1:8080/kora
+QUIDDPAY_BASE_URL=http://127.0.0.1:8080/quiddpay
+TINGG_BASE_URL=http://127.0.0.1:8080/tingg
 WEWIRE_BASE_URL=http://127.0.0.1:8080/wewire
 WISE_API_BASE=http://127.0.0.1:8080/wise
 ```
