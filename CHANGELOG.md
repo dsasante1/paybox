@@ -5,6 +5,19 @@ What each published version of `paybox-emulator` (npm) and `dsasante1/paybox`
 merging to `main` publishes nothing, and everything under **Unreleased** goes
 out with the next tag — see [docs/releasing.md](docs/releasing.md).
 
+## Unreleased
+
+- **Tingg is named wherever the other providers are.** It was in the generated
+  endpoint tables but not in the hand-written prose beside them: the landing
+  page's description, notice and docs index, the README's introduction and
+  contract links, the npm description and keywords, and the Docker Hub short
+  description. The documentation pages that enumerate providers — the control
+  API's `provider` filter and `GET /api/providers` example, the `providers:`
+  config block, the getting-started `.env`, the surfaces diagram, the transfer
+  and vocabulary notes in the payment lifecycle, and the key-shape list in
+  troubleshooting — now list Quid Payments and Tingg too. Nothing served
+  changes.
+
 ## 0.3.0 — 2026-09-21
 
 - **An eighth provider: Tingg** (Cellulant) — `/tingg`, 11 endpoints,

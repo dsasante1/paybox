@@ -148,8 +148,9 @@ created ──▶ pending ──▶ processing ──▶ successful ──▶ re
 ```
 
 One resource for money leaving a balance, whether to a bank (Paystack
-transfer, Stripe payout, Kora disbursement, WeWire payout, Wise transfer) or
-to another balance (a Stripe Transfer to a connected account).
+transfer, Stripe payout, Kora disbursement, Quid payout, Tingg payout, WeWire
+payout, Wise transfer) or to another balance (a Stripe Transfer to a connected
+account).
 
 - **Reservation happens at creation**: amount plus fee is debited from the
   ledger when the transfer is queued, and a transfer the balance cannot cover
@@ -161,8 +162,9 @@ to another balance (a Stripe Transfer to a connected account).
 - `cancelled` is only reachable before `processing`, which is exactly the
   race a cancel button has to handle. Paystack has no cancel.
 - Settling: `POST /api/transfers/:id/settle {status}` from the control plane;
-  WeWire and Wise settle themselves on a `transfer.settle` job or via Wise's
-  simulation endpoint; Paystack transfers wait for you.
+  Tingg, WeWire and Wise settle themselves on a `transfer.settle` job or via
+  Wise's simulation endpoint; a Quid test payout is paid on creation; Paystack
+  transfers wait for you.
 - Reversals may be partial and are refused once the destination has spent the
   money (Stripe).
 
@@ -287,5 +289,7 @@ same events, same `charge.success`.
 | Stripe | [stripe.md → Status mapping](stripe.md#status-mapping) and Billing |
 | Flutterwave | [flutterwave.md](flutterwave.md) (`charge.completed` for success *and* failure) |
 | Kora | [kora.md](kora.md) (`charge.success` / `charge.failed` are separate) |
+| Quid Payments | [quiddpay.md → What is faithful](quiddpay.md#what-is-faithful-and-deliberately-so) (`open` vs `pending` on a session, attempts beside it) |
+| Tingg | [tingg.md → Webhooks](tingg.md#webhooks-the-part-worth-reading) (numeric `status_code`; the acknowledgement is a code in *your* response body) |
 | WeWire | [wewire.md → Webhooks](wewire.md#webhooks) |
 | Wise | [wise.md → Webhooks](wise.md#webhooks) (`current_state` on one trigger) |

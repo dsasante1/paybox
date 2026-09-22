@@ -21,10 +21,10 @@ real API would answer.
 ## 2. Three surfaces
 
 ```
-your application ──▶ /paystack, /stripe, /flutterwave, /flutterwave/v4,
-                     /kora, /wewire, /wise            provider-compatible APIs
-you / your tests ──▶ /api (CLI · dashboard · curl)    the control plane
-the payer        ──▶ hosted pages                    checkout, 3-DS, onboarding
+your application ──▶ /paystack, /stripe, /flutterwave, /flutterwave/v4, /kora,
+                     /quiddpay, /tingg, /wewire, /wise    provider-compatible APIs
+you / your tests ──▶ /api (CLI · dashboard · curl)        the control plane
+the payer        ──▶ hosted pages                         checkout, 3-DS, onboarding
 ```
 
 - **Provider APIs** mirror the upstream contract. Your integration talks to

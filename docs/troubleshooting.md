@@ -39,8 +39,10 @@ if it is real, then use the local one from `paybox status`.
 **401 "Expected a test secret key beginning with sk_test_".** The key is not
 shaped like a test key for that provider. Formats: Paystack, Kora, WeWire
 `sk_test_…`; Stripe `sk_test_…` or `rk_test_…`; Flutterwave v3
-`FLWSECK_TEST-…`; Wise `wise_test_local_…`. `PAYBOX_ALLOW_ANY_KEY=1` relaxes
-the shape check for key-rotation tests; live keys stay refused.
+`FLWSECK_TEST-…`; Quid Payments `ak_test_…`; Wise `wise_test_local_…`. Tingg
+publishes no test-key prefix, so paybox matches the exact key it generated.
+`PAYBOX_ALLOW_ANY_KEY=1` relaxes the shape check for key-rotation tests; live
+keys stay refused.
 
 **401 from WeWire with a Bearer header.** WeWire's key goes in `ww-api-key`,
 verbatim, with no prefix. paybox reproduces that rather than accepting both.

@@ -39,6 +39,8 @@ providers:                # omit a provider to leave it enabled
   stripe:      { enabled: true }
   flutterwave: { enabled: true }   # covers both /flutterwave and /flutterwave/v4
   kora:        { enabled: true }
+  quiddpay:    { enabled: true }
+  tingg:       { enabled: true }
   wewire:      { enabled: true }
   wise:        { enabled: true }
 
