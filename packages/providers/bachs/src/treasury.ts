@@ -569,9 +569,10 @@ export class BachsTreasury {
   }): Promise<Transfer> {
     return withLock(TREASURY_LOCK, async () => {
       await this.#sweep();
-      // connect/payouts: an account withdraws only while its `payouts` capability is active.
+      // connect/payouts: an account withdraws only while its `payouts`
+      // capability is active, and is refused with 403 FORBIDDEN otherwise.
       if (!hasCapability(input.owner.account, 'payouts')) {
-        throw fail('validation_failed', 'PAYOUTS_NOT_ENABLED', 'Payouts are not enabled for this account.');
+        throw fail('authentication_failed', 'FORBIDDEN', "This account's payouts capability is not active.");
       }
       // "Any currency is negative ... blocks every payout."
       if (await this.inDebt(input.owner.pot)) {

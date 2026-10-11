@@ -610,7 +610,8 @@ describe('review findings', () => {
     ).json();
     await api.post(`/v1/accounts/${account.id}/capabilities/payouts`, { status: 'restricted' });
     const payout = await as(account.id).post('/v1/payouts', { destination: destination.id, amount: '1.00' });
-    expect(payout.json().error_code).toBe('PAYOUTS_NOT_ENABLED');
+    expect(payout.statusCode).toBe(403);
+    expect(payout.json().error_code).toBe('FORBIDDEN');
 
     const { paid } = await payAsAccount(account.id, { pricing: { currency: 'USD', amount: '10.00' } }, {
       corridor: 'USD_CARD',

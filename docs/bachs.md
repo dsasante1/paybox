@@ -824,7 +824,7 @@ withdrawn (`capability_unrequest_unsupported`). paybox's capability control
 restricts one (`status_details` `platform_disabled`) or enables it again.
 
 Capabilities gate what an account does, "on `active` only":
-- **Payouts** need `payouts` (`PAYOUTS_NOT_ENABLED`).
+- **Payouts** need `payouts` (`403 FORBIDDEN`).
 - **Payment methods.** A direct charge needs the capability for the method the
   payer picks (`PAYMENT_METHOD_NOT_ENABLED` on the hosted page): card,
   NGN card, bank transfer, mobile money or crypto. So does an off-session card
