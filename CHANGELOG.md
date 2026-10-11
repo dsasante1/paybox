@@ -7,6 +7,11 @@ out with the next tag — see [docs/releasing.md](docs/releasing.md).
 
 ## Unreleased
 
+- **A manual webhook retry records the attempt it grants.** `paybox webhook
+  retry`, the dashboard's Retry button and `POST /api/webhooks/deliveries/:id/retry`
+  always sent one more attempt, but the delivery row kept its old
+  `maxAttempts`, so the log read "attempt 3 of 2". The row now says what was
+  allowed.
 - **A ninth provider: Bachs** — `/bachs`, the first phase of its API:
   [contract](docs/bachs.md).
   - **Endpoints.** Checkout sessions with paybox's hosted page, payments,

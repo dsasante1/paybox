@@ -1139,6 +1139,9 @@ export function deliveryPatch(patch: Partial<WebhookDelivery>): Partial<WebhookD
   if (patch.status !== undefined) out.status = patch.status;
   if (patch.url !== undefined) out.url = patch.url;
   if (patch.attempt !== undefined) out.attempt = patch.attempt;
+  // retryNow grants an attempt by raising this; dropping it left the log
+  // reading "attempt 3 of 2".
+  if (patch.maxAttempts !== undefined) out.max_attempts = patch.maxAttempts;
   if (patch.responseStatus !== undefined) out.response_status = patch.responseStatus;
   if (patch.responseBody !== undefined) out.response_body = patch.responseBody;
   if (patch.errorMessage !== undefined) out.error_message = patch.errorMessage;
