@@ -15,7 +15,8 @@ import { actorFor, directCharge, owns, ownerField, ownerKey, paymentPot, type Ac
 import { corridorCapability, hasCapability } from './accounts.js';
 import { assertWithinGross, splitAmount, splitParts, type StoredSplit } from './split.js';
 import { convertMinor } from './rates.js';
-import { processingFee, type Corridor } from './fees.js';
+import { processingFeeIn, type Corridor } from './fees.js';
+import { enabledAssets, enabledCorridors, feeOnTop, settingsOf } from './settings.js';
 import type { RouteContext } from './route-context.js';
 import { PRICE_CURRENCIES } from './routes-catalog.js';
 import { createCheckoutSchema } from './schemas.js';
@@ -204,13 +205,18 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
       // A free checkout needs no way to pay; anything else needs at least one.
       const free = priced.priceType === 'free';
       const currencies = [priced.currency, ...Object.keys(priced.currencyOptions)];
-      let corridors = free
-        ? []
-        : mode === 'payment'
-          ? corridorsFor(currencies)
-          : // "Subscriptions are USD card only today", and a card saved
-            // without a charge must be a USD one.
-            (['USD_CARD'] as Corridor[]);
+      // Only what the owner's checkout settings have on (a destination
+      // charge is the platform's sale, so the platform's settings).
+      const enabled = enabledCorridors(await settingsOf(state, actor.account?.id ?? null));
+      let corridors = (
+        free
+          ? []
+          : mode === 'payment'
+            ? corridorsFor(currencies)
+            : // "Subscriptions are USD card only today", and a card saved
+              // without a charge must be a USD one.
+              (['USD_CARD'] as Corridor[])
+      ).filter((corridor) => enabled.includes(corridor));
       if (!free && corridors.length === 0) {
         throw fail(
           'validation_failed',
@@ -694,6 +700,7 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
     amount: number,
     currency: string,
     corridor: Corridor,
+    onTop = 0,
   ) {
     const split = checkout.split;
     const inPayment = (value: number) => convertMinor(value, split!.currency, currency);
@@ -703,7 +710,9 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
       if (platformFee <= 0 || platformFee >= amount) {
         throw fail('validation_failed', 'INVALID_PLATFORM_FEE', "The split must leave something for both parties of this sale.");
       }
-      return { subaccountId: seller.engineId, settlementMode: 'forwarded' as const, platformFee };
+      // A fee the customer paid on top stays with the platform, which pays
+      // it: the seller's share is struck on the sale, not the total.
+      return { subaccountId: seller.engineId, settlementMode: 'forwarded' as const, platformFee: platformFee + onTop };
     }
     const direct = directCharge(owner);
     if (split?.kind === 'direct' && split.platformFee !== null && direct.subaccountId) {
@@ -711,9 +720,11 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
       // The account pays the processing fee out of what is left: a cut that
       // leaves less than the fee would take its balance below zero, which
       // only a lost dispute may do.
-      // Counted even when the platform collects the account's fees: if the
-      // platform cannot cover one, it falls back to the sale.
-      if (platformFee + processingFee(amount, corridor) >= amount) {
+      // Counted even when the platform collects the account's fees (if it
+      // cannot cover one, it falls back to the sale), but not when the
+      // customer pays it on top.
+      const feeFromSale = onTop > 0 ? 0 : processingFeeIn(amount, currency, corridor);
+      if (platformFee + feeFromSale >= amount) {
         throw fail(
           'validation_failed',
           'INVALID_PLATFORM_FEE',
@@ -842,7 +853,18 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
               : null,
       });
     }
-    return renderCheckoutPage({ checkout, payment, basePath: ctx.basePath, error });
+    // What the owner's settings have on now: a method or asset turned off
+    // since the checkout was made is not offered.
+    const settings = await settingsOf(state, checkout.account ?? null);
+    const enabled = enabledCorridors(settings);
+    return renderCheckoutPage({
+      checkout,
+      payment,
+      basePath: ctx.basePath,
+      error,
+      corridors: checkout.corridors.filter((corridor) => enabled.includes(corridor)),
+      assets: enabledAssets(settings),
+    });
   }
 
   fastify.get<{ Params: { token: string } }>('/c/:token', async (request, reply) => {
@@ -1059,7 +1081,9 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
       throw fail('validation_failed', 'CUSTOM_AMOUNT_REQUIRED', 'Choose an amount first.');
     }
     const corridor = form.corridor as Corridor | undefined;
-    if (!corridor || !checkout.corridors.includes(corridor)) {
+    // Offered when the checkout was made, and still on in its owner's settings.
+    const settings = await settingsOf(state, checkout.account ?? null);
+    if (!corridor || !checkout.corridors.includes(corridor) || !enabledCorridors(settings).includes(corridor)) {
       throw fail('validation_failed', 'PAYMENT_METHOD_NOT_ALLOWED', 'Choose one of the payment methods this checkout offers.');
     }
     const info = CORRIDORS[corridor];
@@ -1111,7 +1135,7 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
       details.provider = (form.provider ?? 'MTN').toUpperCase();
     } else if (info.method === 'crypto') {
       const asset = form.asset ?? '';
-      if (!(CRYPTO_ASSETS as readonly string[]).includes(asset)) {
+      if (!enabledAssets(settings).includes(asset)) {
         throw fail('validation_failed', 'VALIDATION_ERROR', 'Choose an asset and network.');
       }
       details.asset = asset;
@@ -1128,12 +1152,18 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
     }
 
     if (!payment) {
+      // The owner passes the fee on: "computed on the base amount and added
+      // on top", and the payment's amount is the total the payer is charged.
+      // A subscription's charges absorb the fee, renewals included: Bachs
+      // documents the rule for one-off checkouts and off-session charges.
+      const onTop = checkout.mode === 'payment' ? feeOnTop(settings, amount, currency, corridor) : 0;
+      if (onTop > 0) details.customer_fee = onTop;
       payment = await engine.createPayment({
         provider: PROVIDER,
         // "Create with the header = a direct charge": the account's money;
         // `transfer_data` makes it the platform's, with a share forwarded.
-        ...(await chargeShape(checkout, owner, amount, currency, corridor)),
-        amount,
+        ...(await chargeShape(checkout, owner, amount, currency, corridor, onTop)),
+        amount: amount + onTop,
         currency,
         reference: checkout.id,
         providerTransactionId: hexId(ids, 'ch'),
@@ -1154,6 +1184,18 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
           `This checkout's charge is in ${payment.currency}; choose a method that charges ${payment.currency}.`,
         );
       }
+      // The charge's total already carries the fee the first method set. A
+      // method with another fee would charge the payer the wrong amount.
+      const charged = payment.paymentMethodDetails.customer_fee;
+      if (typeof charged === 'number' && charged !== feeOnTop(settings, amount, currency, corridor)) {
+        throw fail(
+          'validation_failed',
+          'PAYMENT_METHOD_NOT_ALLOWED',
+          `This checkout's charge includes a fee of ${toDecimal(charged, currency)} for the method chosen first; ` +
+            'choose a method with the same fee.',
+        );
+      }
+      details.customer_fee = charged;
       if (payment.status !== 'failed' && payment.status !== 'created') {
         throw fail(
           'invalid_state_transition',

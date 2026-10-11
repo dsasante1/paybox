@@ -674,7 +674,8 @@ export class BachsWebhookFormatter implements WebhookFormatter {
         settlement_currency: settlement.currency,
         processing_fee: toDecimal(fee, c),
         processing_fee_currency: c,
-        fee_bearer: 'merchant',
+        // "Who bears the fee": the customer, when the owner passed it on.
+        fee_bearer: typeof payment.paymentMethodDetails.customer_fee === 'number' ? 'customer' : 'merchant',
         product_cart: cartOf(checkout),
         customer: await webhookCustomerRef(customer, checkout, state),
         payment_method_details: paymentMethodDetails(payment),

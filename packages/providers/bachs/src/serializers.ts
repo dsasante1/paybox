@@ -1,6 +1,6 @@
 import type { Customer, Invoice, InvoiceItem, Payment, PayboxEvent, Product, Refund, Subscription } from '@paybox/shared';
 import type { WebhookEndpoint } from '@paybox/core';
-import { processingFee, virtualAccountFee, type Corridor } from './fees.js';
+import { processingFeeIn, virtualAccountFee, type Corridor } from './fees.js';
 import { convertMinor } from './rates.js';
 import { splitView } from './split.js';
 import { toDecimal, toDecimalOrNull } from './money.js';
@@ -213,9 +213,11 @@ export function corridorOf(payment: Payment): Corridor | null {
 export function feeOf(payment: Payment): number | null {
   const corridor = corridorOf(payment);
   if (!corridor) return null;
+  // A fee the customer paid on top was struck on the base amount.
+  if (typeof payment.paymentMethodDetails.customer_fee === 'number') return payment.paymentMethodDetails.customer_fee;
   const account = payment.paymentMethodDetails.virtual_account as { type?: string } | undefined;
   if (account?.type === 'permanent') return virtualAccountFee(payment.amount);
-  return processingFee(payment.amount, corridor);
+  return processingFeeIn(payment.amount, payment.currency, corridor);
 }
 
 /**
@@ -364,7 +366,7 @@ export function serializePayment(payment: Payment, context: PaymentContext) {
     currency: c,
     fee_usd: settled && fee !== null && c === 'USD' ? toDecimal(fee, c) : null,
     fees: fee !== null ? { amount: toDecimal(fee, c), currency: c } : null,
-    merchant_bears_cost: true,
+    merchant_bears_cost: typeof payment.paymentMethodDetails.customer_fee !== 'number',
     ...splitView(context.checkout?.split),
     fee_paid_by: context.feePaidBy,
     payment_method: corridorOf(payment),

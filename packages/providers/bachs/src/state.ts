@@ -1,5 +1,6 @@
 import type { Storage } from '@paybox/core';
 import { ownerKey } from './actor.js';
+import type { StoredCheckoutSettings } from './settings.js';
 import type { StoredSplit } from './split.js';
 import type { Corridor } from './fees.js';
 
@@ -803,6 +804,11 @@ export function bachsState(storage: Storage, now: () => string) {
         await storage.providerState.delete(PROVIDER, `upload:${id}`);
         await storage.providerState.delete(PROVIDER, `upload-bytes:${id}`);
       },
+    },
+    checkoutSettings: {
+      get: (account: string | null) => read<StoredCheckoutSettings>(ownerKey(account, 'checkout-settings')),
+      put: (settings: StoredCheckoutSettings) =>
+        write(ownerKey(settings.account ?? null, 'checkout-settings'), settings),
     },
     accounts: {
       get: (id: string) => read<StoredAccount>(`account:${id}`),

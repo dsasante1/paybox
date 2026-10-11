@@ -20,7 +20,7 @@ so paybox follows one rule throughout:
 Base path: `/bachs`. Bachs' own paths begin `/v1/`, so set your client's base
 URL to `http://localhost:8080/bachs` and every path works unchanged.
 
-Four of Bachs' phases are here, and most of a fifth.
+Five of Bachs' phases are here.
 
 - **Collection**: checkout sessions, the hosted page, payments, products,
   customers, refunds, balances and the webhook-endpoint API.
@@ -33,7 +33,9 @@ Four of Bachs' phases are here, and most of a fifth.
 - **Connect**: connected accounts, persons, documents, capabilities,
   requirements, onboarding links, and `X-Account-Id`, which runs any request
   as a connected account and keeps everything it creates its own. Also split
-  payments (direct and destination charges), platform fees and transfers.
+  payments (direct and destination charges), platform fees, transfers, and
+  checkout settings: which methods a checkout offers, and whether the customer
+  pays the processing fee.
 
 [Not implemented](#not-implemented) lists what comes later.
 
@@ -48,7 +50,7 @@ Four of Bachs' phases are here, and most of a fifth.
 | `GET /v1/payments` | **Compatible** | `status_filter`; default page 50 (the spec's; the pagination guide says 20). |
 | `GET /v1/payments/{payment_id}` | **Compatible** | `PaymentResponse`. |
 | `GET /v1/payments/charges/{charge_id}` | **Compatible** | `ChargeStatusResponse`: same id, a different shape, as published. |
-| `POST /v1/charges` | **Partially compatible** | A saved card, off-session: `201` with `processing`, settled a second later, or already `failed`. The processing fee is always absorbed; the customer-pays account setting is not modelled yet. |
+| `POST /v1/charges` | **Compatible** | A saved card, off-session: `201` with `processing`, settled a second later, or already `failed`. When the owner passes the fee on, the card is charged the amount plus the fee. |
 
 ### Subscriptions, product groups and the portal
 
@@ -164,8 +166,15 @@ are listed with Connect below.
 | `GET /v1/platform_fees` | **Compatible** | `{ items, pagination }`, newest first; `charge`. |
 | `GET /v1/platform_fees/{fee_id}` | **Compatible** | Either party may read it. |
 
-Checkout settings and the payment-method listings come with the last part of
-Connect.
+### Checkout settings and listings
+
+| Endpoint | Status | Notes |
+| --- | --- | --- |
+| `GET /v1/accounts/checkout/settings` | **Compatible** | The owner's: the platform's, or an account's with `X-Account-Id`. |
+| `PUT /v1/accounts/checkout/settings` | **Compatible** | `enabled_payment_methods` replaces the map wholesale; `fee_preference`. |
+| `GET /v1/payment-methods` | **Compatible** | Card, bank transfer, mobile money, crypto. |
+| `GET /v1/payment-methods/rails` | **Partially compatible** | The one published rail, `bank_transfer_ng`. |
+| `GET /v1/currencies/supported` | **Compatible** | The documented collection currencies. |
 
 ### Webhook endpoints and events
 
@@ -985,6 +994,31 @@ Refusals:
 USD and NGN only: a transfer "never converts". Every transfer sends
 `transfer.created` on the account involved.
 
+### Checkout settings
+
+Each owner has its own: the platform, and each account under `X-Account-Id`.
+A direct charge follows the account's settings, and a destination charge (the
+platform's sale) follows the platform's.
+- **`enabled_payment_methods`** decides what a checkout offers. An update
+  replaces the whole map, so a corridor left out is off. `CRYPTO` with every
+  asset off offers nothing. A checkout with nothing left is
+  `CHECKOUT_HAS_NO_PAYMENT_METHOD`. By default everything is on, as in the
+  sandbox.
+- **`fee_preference: "customer_pays"`** adds the fee on top. It is "computed on
+  the base amount and added on top": a `29.00` charge on a USD card is
+  `30.85`, with `fees` `1.85`, and the merchant settles `29.00`.
+  - **The fee's currency.** It is worked out in the currency its rule is
+    written in, so a USD card's $0.40 stays 40 cents on a naira charge.
+  - **The hosted page.** A payment's amount is the total, worked out when the
+    payer first picks a method. A later attempt by a method with a different
+    fee is refused, because it would charge the wrong total.
+  - **Splits.** A destination split is struck on the sale, not the total.
+  - **Subscriptions** absorb the fee, renewals included.
+  - **Reporting.** The account object reports the setting as `fee_handling`.
+- **Changes apply at once.** The hosted page offers only what the owner's
+  settings have on now, even if a method or asset was turned off after the
+  checkout was made.
+
 ## Webhooks
 
 Every delivery carries the three documented headers:
@@ -1126,9 +1160,12 @@ impossible, not to save work.
 - **Webhook endpoints may be local.** Bachs requires a public HTTPS URL and
   forwards to `localhost` through its CLI. Delivering to your local app is
   what paybox is for, so any `http` or `https` URL is accepted.
-- **Off-session charges always absorb the fee.** Whether the customer pays
-  the processing fee is an account setting (`29.00` becomes `30.85`). Until
-  checkout settings are emulated, the card is charged what you ask.
+- **Who pays the fee is set per owner only.** The guides also describe a
+  per-checkout `customer_bears_fee` and a `fee_preference` on the account
+  update. The pinned spec has neither, so neither is served.
+- **Subscriptions absorb the fee.** Bachs documents the customer-pays rule for
+  checkouts and `POST /v1/charges`. A subscription's first charge and its
+  renewals are charged its price.
 - **A plan change is refused while a payment is owed.** See
   [Changing a subscription](#changing-a-subscription).
 - **Failed renewals do not invoice the periods that pass while unpaid.** Bachs
@@ -1198,12 +1235,13 @@ cause. Where a choice was needed, the rule at the top of this file decided it.
 | Platform fee parties | Platform-fees page swaps `collected_from` and `earned_by` | Every other example | `collected_from` the account, `earned_by` the platform |
 | `INVALID_PLATFORM_FEE`, `CONTRADICTORY_CHARGE_TYPE` | Split-payments pages | Missing from the error reference | Returned, with no `doc_url` |
 | `VALIDATION_ERROR` on accounts | Accounts pages: `422` | Error reference: `400` | `422` for `configuration: {}`, a person's email and the persons page size; `400` elsewhere |
+| Where `fee_preference` is set | Spec: `PUT /v1/accounts/checkout/settings` | Processing-fees guide: also `POST /v1/accounts/{id}`, and `customer_bears_fee` per checkout | Spec |
+| Bank transfer currencies | `listPaymentMethods` example: NGN and USD | "Bank transfer collects in NGN only" | NGN |
+| Supported collection currencies | `listSupportedCurrencies` example adds ZAR and BTC | Supported-currencies page's lists | The page's lists |
 
 ## Not implemented
 
 These are later phases of Bachs. They are not shortcuts.
 
-- Checkout settings (who bears the processing fee), and the payment-method,
-  rail and currency listings, which come next.
 - Offering a product group at checkout (`SELECTION` sessions): the request has
   no field for it.
