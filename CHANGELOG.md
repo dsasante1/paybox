@@ -7,6 +7,25 @@ out with the next tag — see [docs/releasing.md](docs/releasing.md).
 
 ## Unreleased
 
+- **Bachs: disputes**, the fourth phase of its API
+  ([contract](docs/bachs.md#how-disputes-behave)).
+  - **Disputes:** list, get, save evidence (`409 DISPUTE_NOT_EDITABLE`,
+    `410 DEADLINE_PASSED`) and submit.
+  - **Money:** the $15 fee is taken when a dispute opens, and the disputed amount
+    is set aside until the ruling. A loss keeps it and can take the balance
+    negative, which blocks payouts. A refund before the ruling prevents the
+    dispute.
+  - **Early dispute warnings:** a $29 fee, once per payment.
+  - **Uploads:** dispute documents and general uploads (`multipart/form-data`),
+    and product `media`, which `PATCH /v1/products` now honours.
+  - **Test controls:** paybox's own, to open a dispute and to give the
+    network's ruling, since Bachs' sandbox has no trigger for either.
+  - **New webhooks:** `dispute.created`, `dispute.updated`.
+  - **Generic tooling:** a dispute opened with `paybox dispute` or the control
+    API on a Bachs payment is a Bachs dispute.
+- **Fix:** storage silently dropped a change to a dispute's `dueAt` or
+  `category`.
+
 - **Bachs: money out**, the third phase of its API
   ([contract](docs/bachs.md#how-money-out-behaves)).
   - **Payouts:** payout destinations (bank, mobile money, crypto wallet),

@@ -176,6 +176,8 @@ them.
 |---|---|
 | Everything under `/api/*` | the provider's dashboard buttons and your own test harness |
 | `POST /paystack/dispute` | the payer's bank raising a chargeback |
+| `POST /bachs/v1/disputes`, `POST /bachs/v1/disputes/:id/network` | the payer's bank raising a chargeback, and the card network ruling on it |
+| `POST /bachs/v1/virtual-accounts/:id/deposits` | a bank transfer into a Bachs virtual account |
 | `POST /api/dedicated-accounts/:id/credit` | a customer paying into a virtual account |
 | `POST /api/balance/credit` | money arriving in your Paystack balance |
 | `POST /wewire/paybox/wallets/credit` | a deposit into a WeWire wallet |

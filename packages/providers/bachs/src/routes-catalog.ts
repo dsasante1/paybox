@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { Customer, Product } from '@paybox/shared';
 import { fail } from './errors.js';
+import { mediaOf, replaceMedia } from './uploads.js';
 import { assertMetadata, everyRow, newestFirst, notFound, readPage } from './http.js';
 import { emailLock, withLock } from './locks.js';
 import { hexId } from './ids.js';
@@ -178,6 +179,7 @@ export function registerCatalogRoutes(fastify: FastifyInstance, ctx: RouteContex
     return serializeProduct(product, stored, {
       organizationId: ctx.organizationId,
       ...(await productTotals(stored.id)),
+      media: await mediaOf(state, stored, `${ctx.baseUrl}${ctx.basePath}`),
     });
   }
 
@@ -248,6 +250,9 @@ export function registerCatalogRoutes(fastify: FastifyInstance, ctx: RouteContex
     }
 
     const price = body.price ? updatePrice(stored.price, body.price) : stored.price;
+    // Media is checked, and attached, before anything about the product is written.
+    const media =
+      body.media !== undefined ? await replaceMedia(state, stored, body.media, ctx.clock.nowISO()) : stored.media;
     const updated = await storage.products.update(product.id, {
       ...(body.name !== undefined ? { name: body.name } : {}),
       ...(body.description !== undefined ? { description: body.description } : {}),
@@ -255,7 +260,7 @@ export function registerCatalogRoutes(fastify: FastifyInstance, ctx: RouteContex
       ...(body.metadata !== undefined ? { metadata: body.metadata ?? {} } : {}),
       updatedAt: ctx.clock.nowISO(),
     });
-    const next: StoredProduct = { ...stored, price, billingCycle, trialPeriod };
+    const next: StoredProduct = { ...stored, price, billingCycle, trialPeriod, ...(media ? { media } : {}) };
     await state.products.put(next);
     return reply.send(await renderProduct(updated, next));
   });

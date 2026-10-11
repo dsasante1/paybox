@@ -274,3 +274,47 @@ export function invoiceStatusOf(status: InvoiceStatus): 'draft' | 'open' | 'paid
   if (status === 'draft' || status === 'void' || status === 'uncollectible') return status;
   return 'open';
 }
+
+/**
+ * Bachs' dispute statuses (guides/disputes/overview). The spec's enum stops at
+ * `closed`; the guide adds `prevented`, which paybox serves (docs/bachs.md).
+ */
+export const BACHS_DISPUTE_STATUSES = [
+  'needs_response',
+  'under_review',
+  'won',
+  'lost',
+  'closed',
+  'prevented',
+] as const;
+export type BachsDisputeStatus = (typeof BACHS_DISPUTE_STATUSES)[number];
+
+/**
+ * A dispute's Bachs status. The adapter stores its own word in
+ * `providerStatus`; a dispute moved by paybox's generic tooling carries the
+ * canonical spelling instead, and is read through the canonical status: a
+ * declined claim is `won`, a merchant-accepted one `lost`.
+ */
+export function bachsDisputeStatus(dispute: {
+  status: string;
+  providerStatus: string;
+  resolution: string | null;
+}): BachsDisputeStatus {
+  if ((BACHS_DISPUTE_STATUSES as readonly string[]).includes(dispute.providerStatus)) {
+    return dispute.providerStatus as BachsDisputeStatus;
+  }
+  switch (dispute.status) {
+    case 'awaiting_merchant_feedback':
+      return 'needs_response';
+    case 'awaiting_bank_feedback':
+    case 'pending':
+      return 'under_review';
+    default:
+      return dispute.resolution === 'declined' ? 'won' : dispute.resolution === 'merchant-accepted' ? 'lost' : 'closed';
+  }
+}
+
+/** Still before a ruling: evidence or review outstanding. */
+export function isOpenDispute(status: BachsDisputeStatus): boolean {
+  return status === 'needs_response' || status === 'under_review';
+}

@@ -114,3 +114,14 @@ export function signingSecret(ids: IdFactory): string {
 export function generateBachsWebhookSecret(token: string): string {
   return `whsec_${hexFrom(token, 64)}`;
 }
+
+/**
+ * A dispute's Bachs id. One the adapter opened carries its own `dsp_` id; one
+ * opened by paybox's generic tooling has a bare token, and is given an id of
+ * Bachs' shape derived from its core id, which every reader can recompute.
+ */
+export function disputeIdOf(dispute: { id: string; providerDisputeId: string }): string {
+  return dispute.providerDisputeId.startsWith('dsp_')
+    ? dispute.providerDisputeId
+    : derivedId('dsp', `dispute:${dispute.id}`, 12);
+}

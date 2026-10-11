@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyPluginAsync, FastifyRequest } from 'fastify';
+import multipart from '@fastify/multipart';
 import type { Clock, IdFactory, Payment } from '@paybox/shared';
 import type { PaymentEngine, Storage } from '@paybox/core';
 import type { PaymentSimulator } from '@paybox/simulator';
@@ -9,6 +10,9 @@ import { registerIdempotency, registerResponseHeaders } from './http.js';
 import { uuidFrom } from './ids.js';
 import type { RouteContext } from './route-context.js';
 import { registerCatalogRoutes } from './routes-catalog.js';
+import { BachsDisputes } from './disputes.js';
+import { registerDisputeRoutes } from './routes-disputes.js';
+import { UPLOAD_MAX_BYTES } from './uploads.js';
 import { registerCheckoutRoutes } from './routes-checkout.js';
 import { registerPaymentRoutes } from './routes-payments.js';
 import { registerWebhookRoutes } from './routes-webhooks.js';
@@ -84,6 +88,9 @@ export const bachsPlugin: FastifyPluginAsync<BachsPluginOptions> = async (fastif
     requestId: () => uuidFrom(`request:${options.organizationId}:${(requests += 1)}`),
   });
   registerIdempotency(fastify, { state, clock });
+  // File uploads are multipart; registered here so the parser exists only in
+  // Bachs' scope. Each route checks its own, smaller, limit.
+  await fastify.register(multipart, { limits: { fileSize: UPLOAD_MAX_BYTES, files: 1, fields: 10 } });
 
   const authenticate = (request: FastifyRequest): string =>
     assertBachsCredentials(request.headers.authorization, { allowAnyKey: options.allowAnyKey ?? false });
@@ -139,6 +146,7 @@ export const bachsPlugin: FastifyPluginAsync<BachsPluginOptions> = async (fastif
     };
   }
 
+  const treasury = new BachsTreasury({ engine, storage, clock, ids });
   const ctx: RouteContext = {
     engine,
     simulator: options.simulator,
@@ -153,7 +161,8 @@ export const bachsPlugin: FastifyPluginAsync<BachsPluginOptions> = async (fastif
     authenticate,
     paymentContext,
     billing,
-    treasury: new BachsTreasury({ engine, storage, clock, ids }),
+    treasury,
+    disputes: new BachsDisputes({ engine, storage, clock, ids, treasury }),
     productTotals: () => Promise.reject(new Error('catalog routes not registered')),
     // Replaced by the catalog routes, which own customer creation.
     customers: {
@@ -167,6 +176,7 @@ export const bachsPlugin: FastifyPluginAsync<BachsPluginOptions> = async (fastif
   registerPaymentRoutes(fastify, ctx);
   registerBillingRoutes(fastify, ctx);
   registerMoneyOutRoutes(fastify, ctx);
+  registerDisputeRoutes(fastify, ctx);
   registerPortalRoutes(fastify, ctx);
   registerWebhookRoutes(fastify, ctx);
 };

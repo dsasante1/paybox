@@ -5,12 +5,13 @@ import type { CoverageManifest } from '@paybox/shared';
  *
  * Kept in step with the router by `tests/coverage-drift.test.ts`, which fails
  * if this list and the routes disagree in either direction, so the table in
- * `docs/bachs.md` is a contract rather than a promise. Three of Bachs'
+ * `docs/bachs.md` is a contract rather than a promise. Four of Bachs'
  * phases are here -- collection (checkout, payments, catalog, refunds,
  * webhooks, balances), billing (subscriptions, saved cards, off-session
- * charges, product groups, the customer portal) and money out (payouts,
- * destinations, schedules, conversions, the virtual account) -- and
- * everything outside them is listed in docs/bachs.md as not implemented.
+ * charges, product groups, the customer portal), money out (payouts,
+ * destinations, schedules, conversions, the virtual account) and disputes
+ * (evidence, submission, uploads) -- and everything outside them is listed in
+ * docs/bachs.md as not implemented.
  */
 export const BACHS_COVERAGE: CoverageManifest = {
   id: 'bachs',
@@ -65,6 +66,14 @@ export const BACHS_COVERAGE: CoverageManifest = {
     { method: 'POST', path: '/v1/conversions', status: 'compatible' },
     { method: 'GET', path: '/v1/conversions', status: 'compatible' },
     { method: 'GET', path: '/v1/conversions/:conversion_id', status: 'compatible' },
+    { method: 'GET', path: '/v1/disputes', status: 'compatible' },
+    { method: 'GET', path: '/v1/disputes/:dispute_id', status: 'compatible' },
+    { method: 'PATCH', path: '/v1/disputes/:dispute_id/evidence', status: 'compatible' },
+    { method: 'POST', path: '/v1/disputes/:dispute_id/submit', status: 'compatible' },
+    { method: 'POST', path: '/v1/disputes/uploads', status: 'compatible' },
+    { method: 'POST', path: '/v1/utilities/uploads', status: 'compatible' },
+    { method: 'GET', path: '/v1/utilities/uploads/:upload_id', status: 'compatible' },
+    { method: 'DELETE', path: '/v1/utilities/uploads/:upload_id', status: 'compatible' },
     { method: 'POST', path: '/v1/virtual-accounts', status: 'compatible' },
     { method: 'GET', path: '/v1/virtual-accounts', status: 'compatible' },
     { method: 'GET', path: '/v1/currencies/payout-supported', status: 'compatible' },
@@ -81,10 +90,10 @@ export const BACHS_COVERAGE: CoverageManifest = {
     { method: 'GET', path: '/v1/product-groups/:group_id', status: 'compatible' },
     { method: 'PATCH', path: '/v1/product-groups/:group_id', status: 'compatible' },
     { method: 'DELETE', path: '/v1/product-groups/:group_id', status: 'compatible' },
-    { method: 'POST', path: '/v1/products', status: 'partial', note: 'No media uploads.' },
+    { method: 'POST', path: '/v1/products', status: 'compatible' },
     { method: 'GET', path: '/v1/products', status: 'compatible' },
     { method: 'GET', path: '/v1/products/:product_id', status: 'compatible' },
-    { method: 'PATCH', path: '/v1/products/:product_id', status: 'partial', note: 'media is accepted and ignored.' },
+    { method: 'PATCH', path: '/v1/products/:product_id', status: 'compatible' },
     { method: 'POST', path: '/v1/products/:product_id/archive', status: 'compatible' },
     { method: 'POST', path: '/v1/products/:product_id/unarchive', status: 'compatible' },
     { method: 'POST', path: '/v1/customers', status: 'compatible' },
@@ -135,6 +144,14 @@ export const BACHS_COVERAGE: CoverageManifest = {
     // A deposit into the virtual account: "there is no way to simulate a
     // deposit into it today" at Bachs, so this test control is paybox's.
     { method: 'POST', path: '/v1/virtual-accounts/:virtual_account_id/deposits', status: 'emulator-only' },
+    // A chargeback is filed by the payer's bank and ruled on by the card
+    // network, and Bachs' sandbox has no trigger for either, so these test
+    // controls are paybox's.
+    { method: 'POST', path: '/v1/disputes', status: 'emulator-only' },
+    { method: 'POST', path: '/v1/disputes/:dispute_id/network', status: 'emulator-only' },
+    // A public upload's bytes, at the `url` the uploads API returns. Bachs
+    // serves its own from cdn.bachs.io.
+    { method: 'GET', path: '/files/:upload_id/:file_name', status: 'emulator-only' },
     // The customer portal. Bachs serves its own at portal.bachs.io.
     { method: 'GET', path: '/portal/s/:token', status: 'emulator-only' },
     { method: 'POST', path: '/portal/s/:token/subscriptions/:subscription_id/cancel', status: 'emulator-only' },

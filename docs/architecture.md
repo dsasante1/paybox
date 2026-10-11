@@ -620,6 +620,26 @@ Bachs sends `customer.updated`. Every other provider here does not, and an
 extra event would shift every later sequence number in their logs, so the
 event is opt-in per call.
 
+### `PaymentEngine.exchangeBalance` — two currencies, one movement
+
+Bachs holds USD and NGN only, and the engine credits every payment in its own
+currency. The adapter sweeps a GHS or KES net into USD at its fixed rate.
+`exchangeBalance` writes the debit and the credit as one transaction, at
+amounts the adapter quoted, so a crash cannot leave money in neither currency
+or in both. The engine still converts nothing: it records what it was told.
+
+### Dispute `providerStatus` and `resolution` options
+
+Bachs has six dispute statuses where the canonical vocabulary has four, and
+`won`, `lost`, `closed` and `prevented` are all `resolved`. Its loss is also not
+a refund: the amount set aside at the start simply stays gone.
+`createDispute` and `transitionDispute` therefore take an optional
+`providerStatus` (and `transitionDispute` a `resolution`), so the adapter
+stores its own word without `resolveDispute` raising a refund. Dispute events
+carry `provider_status` in their data, so a webhook built later still knows
+which of the four a `resolved` was. Callers that pass nothing get exactly the
+old behaviour.
+
 ### What the adapter keeps for itself
 
 - **Billing.** As described under

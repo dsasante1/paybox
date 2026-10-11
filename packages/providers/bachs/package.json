@@ -7,10 +7,11 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@paybox/shared": "0.1.0",
+    "@fastify/multipart": "^10.1.2",
     "@paybox/core": "0.1.0",
-    "@paybox/webhooks": "0.1.0",
+    "@paybox/shared": "0.1.0",
     "@paybox/simulator": "0.1.0",
+    "@paybox/webhooks": "0.1.0",
     "fastify": "^5.12.1",
     "zod": "^4.4.3"
   }

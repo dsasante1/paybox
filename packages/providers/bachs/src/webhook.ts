@@ -11,7 +11,6 @@ import type {
   WebhookFormatter,
 } from '@paybox/webhooks';
 import { createHash } from 'node:crypto';
-import { eventId } from './ids.js';
 import { invoiceIdOf } from './billing.js';
 import { decimalCurrency } from './rates.js';
 import { payoutFacts, payoutIdOf } from './treasury.js';
@@ -35,7 +34,15 @@ import {
 } from './serializers.js';
 import { bachsSignatureHeaders } from './signature.js';
 import { bachsState, type StoredCheckout, type StoredPaymentMeta } from './state.js';
-import { paymentStatusOf, subscriptionStatusOf, toBachsRefundEventStatus, webhookStatus } from './status.js';
+import { disputeWebhookData } from './disputes.js';
+import { disputeIdOf, eventId } from './ids.js';
+import {
+  bachsDisputeStatus,
+  paymentStatusOf,
+  subscriptionStatusOf,
+  toBachsRefundEventStatus,
+  webhookStatus,
+} from './status.js';
 
 const PROVIDER = 'bachs' as const;
 
@@ -78,7 +85,8 @@ export interface StoredBachsEvent {
     | 'invoice'
     | 'payment_method'
     | 'payout'
-    | 'conversion';
+    | 'conversion'
+    | 'dispute';
   entityId: string;
   payload: Record<string, unknown>;
   createdAt: string;
@@ -234,6 +242,8 @@ export class BachsWebhookFormatter implements WebhookFormatter {
         return this.#payoutEvents(event, storage);
       case 'conversion':
         return this.#conversionEvents(event, state);
+      case 'dispute':
+        return this.#disputeEvents(event, storage);
       default:
         return [];
     }
@@ -280,6 +290,46 @@ export class BachsWebhookFormatter implements WebhookFormatter {
           withdrawal_fee: toDecimal(facts.fee, source),
           net_from_amount: toDecimal(facts.totalDebited - facts.fee, source),
         },
+      },
+    ];
+  }
+
+  /**
+   * `dispute.created` when a dispute opens, and `dispute.updated` "whenever
+   * its status actually changes" on the network side (connect/disputes):
+   * "Saving or submitting evidence does not send dispute.updated", and
+   * neither does a deadline moving. The status is read from the event, not
+   * the row, so a dispute already ruled on by the time this runs still
+   * reports the status the event recorded.
+   */
+  async #disputeEvents(event: PayboxEvent, storage: Storage): Promise<Draft[]> {
+    if (event.type === 'dispute.submitted') return [];
+    const dispute = await storage.disputes.byId(event.resourceId);
+    if (!dispute) return [];
+    const status = bachsDisputeStatus({
+      status: String(event.data.status ?? dispute.status),
+      providerStatus: String(event.data.provider_status ?? dispute.providerStatus),
+      resolution: (event.data.resolution as string | null | undefined) ?? null,
+    });
+    let type = 'dispute.created';
+    if (event.type !== 'dispute.created') {
+      // An event that moved no status (a deadline moved, a warning escalated).
+      if (!event.previousStatus) return [];
+      // The canonical status a dispute left. `resolved` is terminal, so the
+      // status it left is always an open one, whose Bachs name follows from it.
+      const previous = event.previousStatus
+        ? bachsDisputeStatus({ status: event.previousStatus, providerStatus: '', resolution: null })
+        : null;
+      if (previous === status) return [];
+      type = 'dispute.updated';
+    }
+    const payment = await storage.payments.byId(dispute.paymentId);
+    return [
+      {
+        type,
+        entityType: 'dispute',
+        entityId: disputeIdOf(dispute),
+        data: disputeWebhookData(dispute, payment, status),
       },
     ];
   }

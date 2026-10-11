@@ -120,7 +120,12 @@ function serializePrices(price: StoredPrice) {
 export function serializeProduct(
   product: Product,
   stored: StoredProduct,
-  context: { organizationId: string; totalPayments: number; totalAmount: number },
+  context: {
+    organizationId: string;
+    totalPayments: number;
+    totalAmount: number;
+    media?: Array<Record<string, unknown>>;
+  },
 ) {
   return {
     id: stored.id,
@@ -133,7 +138,7 @@ export function serializeProduct(
     trial_period: stored.trialPeriod,
     status: stored.archivedAt ? 'archived' : 'active',
     metadata: product.metadata,
-    media: [],
+    media: context.media ?? [],
     // "Identifier of the user or key that created the product." The only
     // actor in a local emulator is the sandbox key.
     actor_id: 'key_sandbox_local',
