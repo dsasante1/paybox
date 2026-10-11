@@ -117,6 +117,9 @@ const CODES = {
   invalid_include: [400, null],
   CONNECTED_ACCOUNT_REQUIREMENTS_NOT_FOUND: [400, null],
   CONNECTED_ACCOUNT_NOT_ELIGIBLE_FOR_LINK: [400, null],
+  // connect/split-payments; neither is in the error reference.
+  INVALID_PLATFORM_FEE: [400, null],
+  CONTRADICTORY_CHARGE_TYPE: [400, null],
 } as const satisfies Record<string, readonly [number, string | null]>;
 
 export type BachsErrorCode = keyof typeof CODES;

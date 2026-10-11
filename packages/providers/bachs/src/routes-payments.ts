@@ -102,6 +102,7 @@ export function registerPaymentRoutes(fastify: FastifyInstance, ctx: RouteContex
         checkout: context.checkout,
         meta: context.meta,
         history: context.history,
+        feePaidBy: context.feePaidBy,
       }),
     );
   });

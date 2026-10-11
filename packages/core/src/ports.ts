@@ -419,6 +419,8 @@ export interface LedgerRepository {
       currency?: string;
       /** Undefined means every owner; null means the platform only. */
       subaccountId?: string | null;
+      /** The entries one resource (a payment, a refund, a dispute) caused. */
+      resourceId?: string;
     },
   ): Promise<Page<LedgerEntry>>;
   /** Distinct currencies that have seen movement, for one owner's pot. */

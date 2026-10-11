@@ -476,6 +476,10 @@ export class PaymentEngine {
                 destinationSubaccountId: updated.subaccountId,
                 sourcePaymentId: updated.id,
                 transferGroup: updated.transferGroup,
+                // Paid out of the gross credited a few lines up, in this same
+                // transaction: a platform already in debt still settles its
+                // sale, and the share still reaches the seller.
+                checkFunds: false,
               });
               emitted.push(...forwarded.events);
             }
@@ -731,6 +735,14 @@ export class PaymentEngine {
      * it fails, or the balance would be credited money it never gave up.
      */
     reserve?: boolean;
+    /**
+     * An internal move into the platform's own pot. A null
+     * `destinationSubaccountId` otherwise means the money left for a bank,
+     * with nothing credited. Bachs needs the other direction for an account
+     * sending money back to its platform. Only for a transfer created already
+     * settled: the failure and reversal paths do not know about it.
+     */
+    destinationPlatform?: boolean;
   }): Promise<Transfer> {
     const { result, events } = await this.#storage.transaction((tx) =>
       this.#createTransferIn(tx, input),
@@ -768,6 +780,9 @@ export class PaymentEngine {
       sourcePaymentId?: string | null;
       transferGroup?: string | null;
       reserve?: boolean;
+      destinationPlatform?: boolean;
+      /** Skip the available-balance check, for a share paid out of money credited in the same transaction. */
+      checkFunds?: boolean;
     },
   ): Promise<{ result: Transfer; events: PayboxEvent[] }> {
     validateAmount(input.amount);
@@ -834,7 +849,7 @@ export class PaymentEngine {
     const required = transfer.amount + fee;
     const source = transfer.sourceSubaccountId;
 
-    if (this.#enforceBalance && input.reserve !== false) {
+    if (this.#enforceBalance && input.reserve !== false && input.checkFunds !== false) {
       // The *source* pot, which for a marketplace is not always the platform's.
       const net = await tx.ledger.net(transfer.provider, transfer.currency, source);
       const available = (source === null ? this.#openingBalance : 0) + net;
@@ -879,7 +894,7 @@ export class PaymentEngine {
       // An internal move credits the other side now too, so the pair is
       // written together and the books cannot balance halfway. A payout to a
       // bank has no other side: the money has left.
-      if (created.destinationSubaccountId) {
+      if (created.destinationSubaccountId || input.destinationPlatform) {
         await this.#ledgerIn(tx, 'credit', {
           provider: created.provider,
           currency: created.currency,

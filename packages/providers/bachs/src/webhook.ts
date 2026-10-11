@@ -36,6 +36,8 @@ import { bachsSignatureHeaders } from './signature.js';
 import { bachsState, type StoredCheckout, type StoredPaymentMeta } from './state.js';
 import { disputeWebhookData } from './disputes.js';
 import { paymentPot } from './actor.js';
+import { feePaidByOf } from './split.js';
+import { isConnectTransfer, transferView } from './transfers.js';
 import { disputeIdOf, eventId } from './ids.js';
 import {
   bachsDisputeStatus,
@@ -88,7 +90,8 @@ export interface StoredBachsEvent {
     | 'payout'
     | 'conversion'
     | 'dispute'
-    | 'account';
+    | 'account'
+    | 'transfer';
   entityId: string;
   /**
    * The account the event happened on, its origin (guides/webhooks/overview,
@@ -290,7 +293,7 @@ export class BachsWebhookFormatter implements WebhookFormatter {
       case 'authorization':
         return this.#paymentMethodEvents(event, storage, state);
       case 'transfer':
-        return this.#payoutEvents(event, storage);
+        return (await this.#transferCreated(event, storage, state)) ?? this.#payoutEvents(event, storage);
       case 'conversion':
         return this.#conversionEvents(event, state);
       case 'dispute':
@@ -383,6 +386,44 @@ export class BachsWebhookFormatter implements WebhookFormatter {
         entityType: 'dispute',
         entityId: disputeIdOf(dispute),
         data: disputeWebhookData(dispute, payment, status),
+      },
+    ];
+  }
+
+  /**
+   * `transfer.created`, "once at creation for every transfer (manual and
+   * settlement `payout`); no later events". Its origin "is the account in
+   * both directions". The payload is the event page's: `transfer_id`, not
+   * `id`, and no `status` or `transfer_group`. Null for a payout to a bank.
+   */
+  async #transferCreated(
+    event: PayboxEvent,
+    storage: Storage,
+    state: ReturnType<typeof bachsState>,
+  ): Promise<Draft[] | null> {
+    const transfer = await storage.transfers.byId(event.resourceId);
+    if (!transfer || !isConnectTransfer(transfer)) return null;
+    if (event.previousStatus !== null) return [];
+    const view = await transferView(transfer, storage, state, this.#organizationId);
+    const account = view.source === this.#organizationId ? view.destination : view.source;
+    return [
+      {
+        type: 'transfer.created',
+        entityType: 'transfer',
+        entityId: view.id,
+        origin: account,
+        data: {
+          transfer_id: view.id,
+          source: view.source,
+          destination: view.destination,
+          amount: view.amount,
+          currency: view.currency,
+          description: view.description,
+          metadata: view.metadata,
+          kind: view.kind,
+          source_charge_id: view.source_charge_id,
+          created_at: envelopeTime(view.created_at),
+        },
       },
     ];
   }
@@ -481,7 +522,7 @@ export class BachsWebhookFormatter implements WebhookFormatter {
         email: customer.email,
         name: customerName(customer, await state.customers.get(customer.providerCustomerId)),
       },
-      charge: payment ? await this.#chargeObject(payment, customer.providerCustomerId, {}, state) : null,
+      charge: payment ? await this.#chargeObject(payment, customer.providerCustomerId, {}, state, storage) : null,
       metadata: {},
     });
     return [{ type, entityType: 'invoice', entityId: invoiceIdOf(invoice.id), data }];
@@ -534,8 +575,10 @@ export class BachsWebhookFormatter implements WebhookFormatter {
     customerId: string | null,
     metadata: Record<string, unknown>,
     state: ReturnType<typeof bachsState>,
+    storage: Storage,
   ) {
     const fee = feeOf(payment) ?? 0;
+    const settlement = settlementOf(payment, await feePaidByOf(storage, payment));
     // A direct charge belongs to its account.
     const pot = paymentPot(payment);
     const owner = pot ? (await state.accounts.all()).find((account) => account.engineId === pot)?.id : undefined;
@@ -545,8 +588,8 @@ export class BachsWebhookFormatter implements WebhookFormatter {
       customer_id: customerId,
       amount: toDecimal(payment.amount, payment.currency),
       currency: payment.currency,
-      settlement_currency: settlementOf(payment).currency,
-      settlement_amount: toDecimal(settlementOf(payment).amount, settlementOf(payment).currency),
+      settlement_currency: settlement.currency,
+      settlement_amount: toDecimal(settlement.amount, settlement.currency),
       status: paymentStatusOf(payment),
       metadata,
       created_at: dataTime(payment.createdAt),
@@ -569,9 +612,9 @@ export class BachsWebhookFormatter implements WebhookFormatter {
 
     switch (event.type) {
       case 'payment.successful': {
-        const collection = this.#collectionSucceeded(payment, checkout, meta, customer, state);
+        const collection = this.#collectionSucceeded(payment, checkout, meta, customer, state, storage);
         const completed = checkout
-          ? this.#checkoutCompleted(checkout, payment, customer, state)
+          ? this.#checkoutCompleted(checkout, payment, customer, state, storage)
           : null;
         return [await collection, ...(completed ? [await completed] : [])];
       }
@@ -608,12 +651,14 @@ export class BachsWebhookFormatter implements WebhookFormatter {
     meta: StoredPaymentMeta | null,
     customer: Customer | null,
     state: ReturnType<typeof bachsState>,
+    storage: Storage,
   ): Promise<Draft> {
     const c = payment.currency;
     const status = paymentStatusOf(payment);
     const fee = feeOf(payment) ?? 0;
     const paid = amountPaidOf(payment);
     const overpaid = status === 'overpaid';
+    const settlement = settlementOf(payment, await feePaidByOf(storage, payment));
     return {
       type: 'collection.succeeded',
       entityType: 'charge',
@@ -625,8 +670,8 @@ export class BachsWebhookFormatter implements WebhookFormatter {
         status: webhookStatus(status),
         amount: toDecimal(payment.amount, c),
         currency: c,
-        settlement_amount: toDecimal(settlementOf(payment).amount, settlementOf(payment).currency),
-        settlement_currency: settlementOf(payment).currency,
+        settlement_amount: toDecimal(settlement.amount, settlement.currency),
+        settlement_currency: settlement.currency,
         processing_fee: toDecimal(fee, c),
         processing_fee_currency: c,
         fee_bearer: 'merchant',
@@ -711,6 +756,7 @@ export class BachsWebhookFormatter implements WebhookFormatter {
     payment: Payment | null,
     customer: Customer | null,
     state: ReturnType<typeof bachsState>,
+    storage: Storage,
   ): Promise<Draft> {
     const completedAt = payment?.paidAt ?? checkout.completedAt ?? checkout.updatedAt;
     const fulfilment = await state.fulfilments.get(checkout.id);
@@ -729,7 +775,7 @@ export class BachsWebhookFormatter implements WebhookFormatter {
         reference: checkout.reference,
         customer: await webhookCustomer(customer, state),
         customer_details: checkout.customerDetails,
-        charge: payment ? await this.#chargeObject(payment, customer?.providerCustomerId ?? null, checkout.metadata, state) : null,
+        charge: payment ? await this.#chargeObject(payment, customer?.providerCustomerId ?? null, checkout.metadata, state, storage) : null,
         // "`{ subscription_id }` for a subscription-mode checkout."
         subscription: fulfilment?.subscriptionId ? { subscription_id: fulfilment.subscriptionId } : null,
         success_url: checkout.successUrl,
@@ -783,7 +829,7 @@ export class BachsWebhookFormatter implements WebhookFormatter {
     if (!checkout) return [];
     const customer = checkout.customerId ? await storage.customers.byId(checkout.customerId) : null;
     if (event.type === 'checkout.completed') {
-      return [await this.#checkoutCompleted(checkout, null, customer, state)];
+      return [await this.#checkoutCompleted(checkout, null, customer, state, storage)];
     }
     if (event.type === 'checkout.expired') {
       return [await this.#checkoutExpired(checkout, customer, state)];

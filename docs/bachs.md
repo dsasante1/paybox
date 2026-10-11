@@ -20,7 +20,7 @@ so paybox follows one rule throughout:
 Base path: `/bachs`. Bachs' own paths begin `/v1/`, so set your client's base
 URL to `http://localhost:8080/bachs` and every path works unchanged.
 
-Four of Bachs' phases are here, and the first part of a fifth.
+Four of Bachs' phases are here, and most of a fifth.
 
 - **Collection**: checkout sessions, the hosted page, payments, products,
   customers, refunds, balances and the webhook-endpoint API.
@@ -30,10 +30,10 @@ Four of Bachs' phases are here, and the first part of a fifth.
   conversions, the virtual account, and balances held in USD and NGN.
 - **Disputes**: disputes, evidence and submission, file uploads and product
   media.
-- **Connect, part one**: connected accounts, persons, documents,
-  capabilities, requirements, onboarding links, and `X-Account-Id`, which
-  runs any request as a connected account and keeps everything it creates its
-  own.
+- **Connect**: connected accounts, persons, documents, capabilities,
+  requirements, onboarding links, and `X-Account-Id`, which runs any request
+  as a connected account and keeps everything it creates its own. Also split
+  payments (direct and destination charges), platform fees and transfers.
 
 [Not implemented](#not-implemented) lists what comes later.
 
@@ -43,7 +43,7 @@ Four of Bachs' phases are here, and the first part of a fifth.
 
 | Endpoint | Status | Notes |
 | --- | --- | --- |
-| `POST /v1/checkout-sessions` | **Partially compatible** | Cart or raw `pricing`; fixed, free and pay-what-you-want; a recurring product starts a subscription; `save_payment_method` with or without a price. No Connect splits (`501`). Corridors that would need live FX are not offered. |
+| `POST /v1/checkout-sessions` | **Partially compatible** | Cart or raw `pricing`; fixed, free and pay-what-you-want; a recurring product starts a subscription; `save_payment_method` with or without a price. Connect splits: `platform_fee` and `transfer_data`. Corridors that would need live FX are not offered. |
 | `GET /v1/checkout-sessions/{checkout_id}` | **Compatible** | `charge` is `null` until the payer starts paying. |
 | `GET /v1/payments` | **Compatible** | `status_filter`; default page 50 (the spec's; the pagination guide says 20). |
 | `GET /v1/payments/{payment_id}` | **Compatible** | `PaymentResponse`. |
@@ -117,8 +117,8 @@ Four of Bachs' phases are here, and the first part of a fifth.
 | `GET /v1/reference/momo` | **Partially compatible** | Not in the pinned spec; same shape as the payouts guide's list. |
 | `POST /v1/misc/bank-accounts/resolve` | **Partially compatible** | Names are synthetic; a failed lookup is `200` with `resolved: false`. |
 
-Transfers are not here. They move money only between a platform and its
-connected accounts, so they arrive with Connect.
+Transfers move money only between a platform and its connected accounts; they
+are listed with Connect below.
 
 ### Disputes and uploads
 
@@ -154,8 +154,18 @@ connected accounts, so they arrive with Connect.
 | `GET /v1/reference/business-structures` | **Partially compatible** | Nigeria's three, the only ones published. |
 | `GET /v1/reference/product-categories` | **Partially compatible** | The two published categories. |
 
-Split payments, platform fees and transfers come with the next part of
-Connect; checkout settings and the payment-method listings after that.
+### Connect: money
+
+| Endpoint | Status | Notes |
+| --- | --- | --- |
+| `POST /v1/transfers` | **Compatible** | `201`, `paid` at once; `destination: "self"` sends an account's money back. |
+| `GET /v1/transfers` | **Compatible** | `{ items, pagination }`, newest first; `connected_account_id`, `kind`. |
+| `GET /v1/transfers/{transfer_id}` | **Compatible** | Either party may read it. |
+| `GET /v1/platform_fees` | **Compatible** | `{ items, pagination }`, newest first; `charge`. |
+| `GET /v1/platform_fees/{fee_id}` | **Compatible** | Either party may read it. |
+
+Checkout settings and the payment-method listings come with the last part of
+Connect.
 
 ### Webhook endpoints and events
 
@@ -846,9 +856,10 @@ same-currency payout's fee is "on top", and a run "stops at the first
 collection it cannot cover". So with nothing else in its balance, the newest
 collection waits for the next one to cover its fee.
 
-`settlement_amount` on a charge always reports the amount net of the fee. When
-the platform pays an account's fee, the account in fact settles gross;
-`fee_paid_by`, which says who paid, comes with the next part of Connect.
+`fee_paid_by` on a charge says who paid its processing fee, read from the
+ledger: `merchant` when it came out of the charge, `platform` when the
+platform's balance paid an account's direct charge, `null` until it is
+posted. `settlement_amount` follows it: gross when the platform paid.
 Its balance, payouts and schedules work exactly as the platform's do, on its
 own money. Any negative balance blocks its payouts with `ORGANIZATION_IN_DEBT`.
 
@@ -892,6 +903,88 @@ goes through the same path as `fields`, then redirects to `return_url`. A used,
 superseded or expired link redirects to `refresh_url`, where your handler mints
 a new one. Documents are attached through the API: the page has no upload.
 
+### Split payments
+
+A checkout's shape follows from what is sent (connect/split-payments):
+
+| Shape | How | Whose sale | Where the money lands |
+| --- | --- | --- | --- |
+| Direct | `X-Account-Id` | The account's | The account, less `platform_fee`, which goes to the platform. |
+| Destination, fee-first | `transfer_data: { destination }` and `platform_fee` | The platform's | The platform; the rest is sent to the seller when the sale settles. |
+| Destination, share-first | `transfer_data: { destination, amount }` | The platform's | The platform; exactly `amount` is sent to the seller. |
+
+- **Amounts.** Both are in the sale's base currency, rounded half-up to its
+  minor unit. A payer who pays in another of the checkout's currencies pays a
+  cut converted at the fixed rate.
+- **Refusals:**
+  - `INVALID_PLATFORM_FEE` when a term is zero after rounding, not below the
+    gross, or a destination charge has neither term;
+  - `VALIDATION_ERROR` for both terms together, or an unknown key in
+    `transfer_data`;
+  - `CONTRADICTORY_CHARGE_TYPE` for `X-Account-Id` with `transfer_data`;
+  - `404` for a destination that is not the platform's own account.
+- **Bounds.** A term must be below the sale in every currency the checkout
+  can be paid in. A pay-what-you-want checkout with a split needs a
+  `minimum_amount` above it.
+- **The processing fee.** On a direct charge the account pays it out of what
+  is left, so a cut that leaves less than the fee is refused when the payer
+  picks the method. A lost dispute is the only thing that takes a balance below
+  zero.
+- **A plain checkout's `platform_fee`** "has no effect", though it is checked.
+- **Echoes.** The checkout and its payment echo `platform_fee` and
+  `destination_amount`, each `null` unless it was the term sent.
+- **The seller's share** is a `kind: payout` transfer, `transfer.created` on
+  the seller's account. On a fee-first split its `amount` is the sale's gross,
+  as published, though the seller receives the gross less the fee.
+- **Refunds and disputes** debit whoever owns the sale. On a destination
+  charge that is the platform, and the seller keeps its share.
+- **Processing fee on a destination charge.** It comes out of the platform's
+  cut first, then the platform's other balance, all or nothing. Only the
+  remainder after that comes from the seller's share. `fee_paid_by` still reads
+  `merchant` there.
+- **Paying more or less.** A payer can pay more or less than asked (crypto,
+  with paybox's test controls). One side of a split is fixed: the platform's
+  cut when fee-first, the seller's share when share-first ("let the platform
+  absorb any variance in the total"). The other side holds the rest and takes
+  the difference, down to zero; past that the fixed side is short too.
+- **Debt.** A destination charge settles and forwards its share even while the
+  platform's balance is negative: the debt "heals" from its sales.
+- **Other currencies.** The seller's share is sent in the sale's currency. A
+  share in a currency an account cannot hold is swept into its USD balance like
+  any other collection, at the fixed rate.
+- **Payout schedules** pay each collection for what it left the owner: a
+  destination charge leaves the platform its cut, a direct one leaves the
+  account the sale less the cut.
+- **Subscriptions.** A split on a subscription checkout applies to that
+  checkout's own charge; renewals carry none.
+
+### Platform fees
+
+One is struck for each settled fee-first split, direct or destination, and
+none for share-first. It names the charge, the account it was collected from
+and the platform that earned it, in the sale's base currency. A refund does not
+reverse it (`amount_refunded` is always `"0.00"`). Either party can read it. It
+has no event of its own.
+
+### Transfers
+
+`POST /v1/transfers` moves money between the platform and one of its own
+accounts, `paid` at once. There is no `source`: whoever is authenticated is
+debited.
+- **The platform** sends to an account by its id.
+- **An account** (with `X-Account-Id`) can only send back to the platform, with
+  `destination: "self"`. Account to account is two transfers.
+
+Refusals:
+- `INSUFFICIENT_BALANCE` when the sender's available balance is short;
+- `ORGANIZATION_IN_DEBT` when any of its balances is negative;
+- `403 FORBIDDEN` when the account's `transfers` capability is not active;
+- `404` for an account that is not the platform's;
+- `400 BAD_REQUEST` for a forbidden pair.
+
+USD and NGN only: a transfer "never converts". Every transfer sends
+`transfer.created` on the account involved.
+
 ## Webhooks
 
 Every delivery carries the three documented headers:
@@ -928,7 +1021,7 @@ Events emitted:
 - **Payouts:** `payout.created`, `payout.paid`, `payout.failed`.
 - **Conversions:** `conversion.completed`.
 - **Disputes:** `dispute.created`, `dispute.updated`.
-- **Connect:** `account.updated`, `capability.updated`.
+- **Connect:** `account.updated`, `capability.updated`, `transfer.created`.
 
 `payment_method.saved` is not in the subscribable `event_types` enum (see
 [contradictions](#contradictions-in-bachs-documentation)). An endpoint created
@@ -1100,14 +1193,17 @@ cause. Where a choice was needed, the rule at the top of this file decided it.
 | `balance_currencies` | Examples: `["NGN"]` on an account, `["NGN","USD"]` on `/me` | Guide: USD "does not appear"; a new account `[]` | USD left out; `[]` until NGN is added |
 | Capability names | `listCapabilities` enum: `payouts`, `transfers`, `conversions`, `connect` | Examples list merchant capabilities too | Every applicable capability |
 | Connect events | Endpoint `event_types` enum: none of them | Guides subscribe endpoints to `account.updated`, `capability.updated` | Accepted |
+| Transfers list envelope | Schema: `{ items, pagination }` | Spec example: `{ items, total, limit, offset }` | Schema |
+| A transfer into an unheld currency | Spec: "Both balances must already hold this currency" | Accounts page: the recipient "holds it from that point" | USD and NGN, the currencies an account can hold |
+| Platform fee parties | Platform-fees page swaps `collected_from` and `earned_by` | Every other example | `collected_from` the account, `earned_by` the platform |
+| `INVALID_PLATFORM_FEE`, `CONTRADICTORY_CHARGE_TYPE` | Split-payments pages | Missing from the error reference | Returned, with no `doc_url` |
 | `VALIDATION_ERROR` on accounts | Accounts pages: `422` | Error reference: `400` | `422` for `configuration: {}`, a person's email and the persons page size; `400` elsewhere |
 
 ## Not implemented
 
 These are later phases of Bachs. They are not shortcuts.
 
-- **The rest of Connect**: split payments (`platform_fee`, `transfer_data`),
-  platform fees and transfers, which come next.
-- Checkout settings, and the payment-method, rail and currency listings.
+- Checkout settings (who bears the processing fee), and the payment-method,
+  rail and currency listings, which come next.
 - Offering a product group at checkout (`SELECTION` sessions): the request has
   no field for it.

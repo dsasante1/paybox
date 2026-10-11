@@ -5,6 +5,7 @@ import type { PaymentEngine, Storage } from '@paybox/core';
 import type { PaymentSimulator } from '@paybox/simulator';
 import type { WebhookDispatcher } from '@paybox/webhooks';
 import { resolveActor } from './actor.js';
+import { feePaidByOf } from './split.js';
 import { assertBachsCredentials } from './auth.js';
 import { bachsErrorBody, toBachsError } from './errors.js';
 import { registerIdempotency, registerResponseHeaders } from './http.js';
@@ -14,6 +15,7 @@ import { registerCatalogRoutes } from './routes-catalog.js';
 import { BachsDisputes } from './disputes.js';
 import { registerDisputeRoutes } from './routes-disputes.js';
 import { registerAccountRoutes } from './routes-accounts.js';
+import { registerConnectMoneyRoutes } from './routes-connect-money.js';
 import { UPLOAD_MAX_BYTES } from './uploads.js';
 import { registerCheckoutRoutes } from './routes-checkout.js';
 import { registerPaymentRoutes } from './routes-payments.js';
@@ -145,6 +147,7 @@ export const bachsPlugin: FastifyPluginAsync<BachsPluginOptions> = async (fastif
       refunds,
       history: await storage.events.listByResource(payment.id),
       hasLiveRefund,
+      feePaidBy: await feePaidByOf(storage, payment),
     };
   }
 
@@ -184,6 +187,7 @@ export const bachsPlugin: FastifyPluginAsync<BachsPluginOptions> = async (fastif
   registerMoneyOutRoutes(fastify, ctx);
   registerDisputeRoutes(fastify, ctx);
   registerAccountRoutes(fastify, ctx);
+  registerConnectMoneyRoutes(fastify, ctx);
   registerPortalRoutes(fastify, ctx);
   registerWebhookRoutes(fastify, ctx);
 };

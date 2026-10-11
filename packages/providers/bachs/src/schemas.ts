@@ -167,8 +167,10 @@ export const createCheckoutSchema = z.object({
   expires_in_minutes: z.number().int().min(1).max(1440).optional(),
   save_payment_method: z.boolean().optional(),
   platform_fee: z.string().nullable().optional(),
+  // `additionalProperties` refused: a platform_fee put inside transfer_data is an error, not ignored.
   transfer_data: z
     .object({ destination: z.string(), amount: z.string().nullable().optional() })
+    .strict()
     .nullable()
     .optional(),
 });
