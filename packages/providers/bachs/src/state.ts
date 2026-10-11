@@ -1,4 +1,5 @@
 import type { Storage } from '@paybox/core';
+import { ownerKey } from './actor.js';
 import type { Corridor } from './fees.js';
 
 /**
@@ -51,6 +52,8 @@ export interface Cadence {
 }
 
 export interface StoredProduct {
+  /** The connected account that owns it; absent for the platform (actor.ts). */
+  account?: string;
   /** Creation order; see `counters`. Absent on records written by paybox's own tooling. */
   seq?: number;
   /** `prod_…`, the id Bachs returns. The core product's own id is `engineId`. */
@@ -65,6 +68,8 @@ export interface StoredProduct {
 }
 
 export interface StoredCustomer {
+  /** The connected account that owns it; absent for the platform (actor.ts). */
+  account?: string;
   /** Creation order; see `counters`. Absent on records written by paybox's own tooling. */
   seq?: number;
   /** `cust_…`. */
@@ -105,6 +110,8 @@ export interface StoredRecurring {
 }
 
 export interface StoredCheckout {
+  /** The connected account that owns it; absent for the platform (actor.ts). */
+  account?: string;
   /** `chk_…`. */
   id: string;
   /** Absent on checkouts stored before subscriptions existed: `payment`. */
@@ -166,6 +173,8 @@ export interface StoredRefund {
 }
 
 export interface StoredEndpoint {
+  /** The connected account that owns it; absent for the platform (actor.ts). */
+  account?: string;
   /** Creation order; see `counters`. Absent on records written by paybox's own tooling. */
   seq?: number;
   /** `whe_…`, also the core endpoint id. */
@@ -301,6 +310,8 @@ export interface CreditEntry {
 }
 
 export interface StoredProductGroup {
+  /** The connected account that owns it; absent for the platform (actor.ts). */
+  account?: string;
   seq?: number;
   /** `pgrp_…`. */
   id: string;
@@ -322,6 +333,8 @@ export interface StoredPortalSession {
 
 /** A payout destination (`pd_…`). Bachs-owned: the engine has no saved-destination model that fits. */
 export interface StoredDestination {
+  /** The connected account that owns it; absent for the platform (actor.ts). */
+  account?: string;
   seq?: number;
   id: string;
   name: string | null;
@@ -341,6 +354,8 @@ export interface StoredDestination {
 
 /** A payout quote (`pqt_…`) or a conversion quote (`cqt_…`): single-use, 30 s. */
 export interface StoredQuote {
+  /** The connected account that owns it; absent for the platform (actor.ts). */
+  account?: string;
   kind: 'payout' | 'conversion';
   id: string;
   fromCurrency: string;
@@ -361,6 +376,8 @@ export interface StoredQuote {
 
 /** A conversion (`cvt_…`). */
 export interface StoredConversion {
+  /** The connected account that owns it; absent for the platform (actor.ts). */
+  account?: string;
   seq?: number;
   id: string;
   quoteId: string;
@@ -376,6 +393,8 @@ export interface StoredConversion {
 
 /** One balance currency's payout schedule (`/v1/balance_settings`). */
 export interface StoredSchedule {
+  /** The connected account that owns it; absent for the platform (actor.ts). */
+  account?: string;
   currency: string;
   payoutCurrency: string;
   interval: 'manual' | 'instant' | 'daily' | 'weekly' | 'monthly';
@@ -396,6 +415,8 @@ export interface StoredSchedule {
 
 /** The account's virtual account in one currency (`va_…`). */
 export interface StoredVirtualAccount {
+  /** The connected account that owns it; absent for the platform (actor.ts). */
+  account?: string;
   id: string;
   currency: string;
   accountNumber: string;
@@ -435,6 +456,8 @@ export interface StoredSubmission {
 
 /** A stored file (`upl_…`). Its bytes are kept under their own key so a listing never loads them. */
 export interface StoredUpload {
+  /** The connected account that owns it; absent for the platform (actor.ts). */
+  account?: string;
   seq: number;
   id: string;
   fileName: string;
@@ -447,6 +470,107 @@ export interface StoredUpload {
   linkedResourceId: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/* --------------------------------- Connect --------------------------------- */
+
+export type Persona = 'merchant' | 'recipient';
+
+/** One capability as stored: absent means `unrequested`. */
+export interface StoredCapability {
+  status: 'active' | 'restricted' | 'pending';
+  requested: boolean;
+  /** Set when paybox's review control restricted it: `platform_disabled`. */
+  disabled: boolean;
+}
+
+/** A value submitted against a requirement, and what review made of it. */
+export interface StoredRequirementValue {
+  value: unknown;
+  status: 'accepted' | 'pending_verification' | 'rejected';
+  code: string | null;
+  reason: string | null;
+}
+
+/**
+ * A connected account (`acct_…`). Its money lives in a core Subaccount's
+ * ledger pot (`engineId`); everything Bachs says about it lives here.
+ */
+export interface StoredAccount {
+  seq: number;
+  id: string;
+  engineId: string;
+  parent: string;
+  ownerUserId: string;
+  contactEmail: string;
+  displayName: string | null;
+  firstName: string | null;
+  lastName: string | null;
+  country: string;
+  entityType: 'company' | 'individual' | null;
+  phoneNumber: string | null;
+  companyName: string | null;
+  personas: Persona[];
+  capabilities: Record<string, StoredCapability>;
+  collector: 'bachs' | 'platform';
+  /** Held currencies besides USD, which is always held. */
+  balanceCurrencies: string[];
+  values: Record<string, StoredRequirementValue>;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StoredPerson {
+  seq: number;
+  id: string;
+  account: string;
+  firstName: string | null;
+  lastName: string | null;
+  dob: string | null;
+  address: Record<string, unknown> | null;
+  phone: string | null;
+  email: string | null;
+  idNumberProvided: boolean;
+  relationship: {
+    representative: boolean;
+    owner: boolean;
+    director: boolean;
+    executive: boolean;
+    percent_ownership: number | null;
+    title: string | null;
+  };
+  verification: { status: 'unverified' | 'pending' | 'verified' | 'failed'; failureReason: string | null };
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** An attached document (`doc_…`), a person's or the company's. */
+export interface StoredAccountDocument {
+  seq: number;
+  id: string;
+  account: string;
+  person: string | null;
+  documentType: string;
+  side: string | null;
+  uploadId: string;
+  fileName: string;
+  uploadedAt: string;
+}
+
+/** A hosted onboarding link (`alnk_…`), addressed by its single-use token. */
+export interface StoredAccountLink {
+  id: string;
+  token: string;
+  account: string;
+  type: 'onboarding' | 'update';
+  refreshUrl: string;
+  returnUrl: string;
+  collectionOptions: Record<string, unknown> | null;
+  created: string;
+  expiresAt: string;
+  usedAt: string | null;
+  supersededAt: string | null;
 }
 
 export interface StoredIdempotency {
@@ -506,9 +630,14 @@ export function bachsState(storage: Storage, now: () => string) {
        * Whether a merchant reference has ever been used. Bachs: "Unique per
        * organization for good, including checkouts that expired."
        */
-      referenceTaken: async (reference: string) =>
-        (await read(`checkout-ref:${reference}`)) !== null,
-      indexReference: (reference: string, id: string) => write(`checkout-ref:${reference}`, { id }),
+      referenceTaken: async (reference: string, account?: string | null) =>
+        (await read(`checkout-ref:${ownerKey(account, reference)}`)) !== null,
+      indexReference: (reference: string, id: string, account?: string | null) =>
+        write(`checkout-ref:${ownerKey(account, reference)}`, { id }),
+      async byReference(reference: string, account?: string | null): Promise<StoredCheckout | null> {
+        const index = await read<{ id: string }>(`checkout-ref:${ownerKey(account, reference)}`);
+        return index ? read<StoredCheckout>(`checkout:${index.id}`) : null;
+      },
       all: () => all<StoredCheckout>('checkout:'),
     },
     products: {
@@ -528,9 +657,10 @@ export function bachsState(storage: Storage, now: () => string) {
         return index ? read<StoredRefund>(`refund:${index.id}`) : null;
       },
       indexEngine: (engineId: string, id: string) => write(`refund-engine:${engineId}`, { id }),
-      referenceTaken: async (reference: string) =>
-        (await read(`refund-ref:${reference}`)) !== null,
-      indexReference: (reference: string, id: string) => write(`refund-ref:${reference}`, { id }),
+      referenceTaken: async (reference: string, account?: string | null) =>
+        (await read(`refund-ref:${ownerKey(account, reference)}`)) !== null,
+      indexReference: (reference: string, id: string, account?: string | null) =>
+        write(`refund-ref:${ownerKey(account, reference)}`, { id }),
       all: () => all<StoredRefund>('refund:'),
       delete: (id: string) => storage.providerState.delete(PROVIDER, `refund:${id}`),
     },
@@ -603,12 +733,14 @@ export function bachsState(storage: Storage, now: () => string) {
       put: (destination: StoredDestination) => write(`destination:${destination.id}`, destination),
       all: () => all<StoredDestination>('destination:'),
       /** "The first destination an account registers for a currency becomes that currency's default". */
-      async defaultFor(currency: string): Promise<StoredDestination | null> {
-        const index = await read<{ id: string }>(`destination-default:${currency}`);
+      async defaultFor(currency: string, account?: string | null): Promise<StoredDestination | null> {
+        const index = await read<{ id: string }>(ownerKey(account, `destination-default:${currency}`));
         return index ? read<StoredDestination>(`destination:${index.id}`) : null;
       },
-      setDefault: (currency: string, id: string) => write(`destination-default:${currency}`, { id }),
-      clearDefault: (currency: string) => storage.providerState.delete(PROVIDER, `destination-default:${currency}`),
+      setDefault: (currency: string, id: string, account?: string | null) =>
+        write(ownerKey(account, `destination-default:${currency}`), { id }),
+      clearDefault: (currency: string, account?: string | null) =>
+        storage.providerState.delete(PROVIDER, ownerKey(account, `destination-default:${currency}`)),
     },
     quotes: {
       get: (id: string) => read<StoredQuote>(`quote:${id}`),
@@ -626,12 +758,14 @@ export function bachsState(storage: Storage, now: () => string) {
         return (await read<{ engineId: string }>(`payout-id:${id}`))?.engineId ?? null;
       },
       index: (id: string, engineId: string) => write(`payout-id:${id}`, { engineId }),
-      referenceTaken: async (reference: string) => (await read(`payout-ref:${reference}`)) !== null,
-      indexReference: (reference: string, id: string) => write(`payout-ref:${reference}`, { id }),
+      referenceTaken: async (reference: string, account?: string | null) =>
+        (await read(`payout-ref:${ownerKey(account, reference)}`)) !== null,
+      indexReference: (reference: string, id: string, account?: string | null) =>
+        write(`payout-ref:${ownerKey(account, reference)}`, { id }),
     },
     schedules: {
-      get: (currency: string) => read<StoredSchedule>(`schedule:${currency}`),
-      put: (schedule: StoredSchedule) => write(`schedule:${schedule.currency}`, schedule),
+      get: (currency: string, account?: string | null) => read<StoredSchedule>(`schedule:${ownerKey(account, currency)}`),
+      put: (schedule: StoredSchedule) => write(`schedule:${ownerKey(schedule.account, schedule.currency)}`, schedule),
       all: () => all<StoredSchedule>('schedule:'),
       /** Which scheduled payout a collection went out in, so a run takes each collection once. */
       claimOf: (paymentId: string) => read<{ transferId: string }>(`schedule-claim:${paymentId}`),
@@ -640,13 +774,14 @@ export function bachsState(storage: Storage, now: () => string) {
       claims: () => storage.providerState.listByPrefix(PROVIDER, 'schedule-claim:'),
     },
     virtualAccounts: {
-      get: (currency: string) => read<StoredVirtualAccount>(`va:${currency}`),
-      put: (account: StoredVirtualAccount) => write(`va:${account.currency}`, account),
+      get: (currency: string, owner?: string | null) => read<StoredVirtualAccount>(`va:${ownerKey(owner, currency)}`),
+      put: (account: StoredVirtualAccount) => write(`va:${ownerKey(account.account, account.currency)}`, account),
       async byId(id: string): Promise<StoredVirtualAccount | null> {
-        const index = await read<{ currency: string }>(`va-id:${id}`);
-        return index ? read<StoredVirtualAccount>(`va:${index.currency}`) : null;
+        const index = await read<{ currency: string; account?: string }>(`va-id:${id}`);
+        return index ? read<StoredVirtualAccount>(`va:${ownerKey(index.account, index.currency)}`) : null;
       },
-      indexId: (id: string, currency: string) => write(`va-id:${id}`, { currency }),
+      indexId: (id: string, currency: string, owner?: string | null) =>
+        write(`va-id:${id}`, { currency, ...(owner ? { account: owner } : {}) }),
     },
     disputes: {
       get: (id: string) => read<StoredDispute>(`dispute:${id}`),
@@ -664,6 +799,38 @@ export function bachsState(storage: Storage, now: () => string) {
       async delete(id: string): Promise<void> {
         await storage.providerState.delete(PROVIDER, `upload:${id}`);
         await storage.providerState.delete(PROVIDER, `upload-bytes:${id}`);
+      },
+    },
+    accounts: {
+      get: (id: string) => read<StoredAccount>(`account:${id}`),
+      put: (account: StoredAccount) => write(`account:${account.id}`, account),
+      all: () => all<StoredAccount>('account:'),
+    },
+    persons: {
+      get: (id: string) => read<StoredPerson>(`person:${id}`),
+      put: (person: StoredPerson) => write(`person:${person.id}`, person),
+      delete: (id: string) => storage.providerState.delete(PROVIDER, `person:${id}`),
+      async of(account: string): Promise<StoredPerson[]> {
+        return (await all<StoredPerson>('person:')).filter((person) => person.account === account);
+      },
+    },
+    accountDocuments: {
+      put: (document: StoredAccountDocument) => write(`account-doc:${document.id}`, document),
+      async of(account: string): Promise<StoredAccountDocument[]> {
+        return (await all<StoredAccountDocument>('account-doc:')).filter((document) => document.account === account);
+      },
+    },
+    accountLinks: {
+      put: async (link: StoredAccountLink) => {
+        await write(`account-link:${link.id}`, link);
+        await write(`account-link-token:${link.token}`, { id: link.id });
+      },
+      async byToken(token: string): Promise<StoredAccountLink | null> {
+        const index = await read<{ id: string }>(`account-link-token:${token}`);
+        return index ? read<StoredAccountLink>(`account-link:${index.id}`) : null;
+      },
+      async of(account: string): Promise<StoredAccountLink[]> {
+        return (await all<StoredAccountLink>('account-link:')).filter((link) => link.account === account);
       },
     },
     idempotency: {

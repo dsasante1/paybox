@@ -105,6 +105,18 @@ const CODES = {
   // error reference, like IDEMPOTENCY_CONFLICT; recorded in docs/bachs.md.
   DISPUTE_NOT_EDITABLE: [409, null],
   DEADLINE_PASSED: [410, null],
+  INVALID_REQUIREMENT_FIELD: [400, 'general'],
+  // Connect's codes, from connect/* and the account operations' descriptions;
+  // none is in the error reference, so none has a doc_url. Bachs spells some
+  // in lowercase, and they are kept as spelled.
+  invalid_configuration: [400, null],
+  capability_configuration_mismatch: [400, null],
+  unknown_capability: [400, null],
+  capability_unrequest_unsupported: [400, null],
+  representative_cannot_be_removed: [400, null],
+  invalid_include: [400, null],
+  CONNECTED_ACCOUNT_REQUIREMENTS_NOT_FOUND: [400, null],
+  CONNECTED_ACCOUNT_NOT_ELIGIBLE_FOR_LINK: [400, null],
 } as const satisfies Record<string, readonly [number, string | null]>;
 
 export type BachsErrorCode = keyof typeof CODES;
@@ -113,7 +125,7 @@ export interface BachsErrorBody {
   detail: string;
   error_code: BachsErrorCode;
   doc_url?: string;
-  errors?: Array<{ field: string; message: string; type: string }>;
+  errors?: Array<{ field: string; message: string; type?: string; code?: string }>;
   details?: Record<string, unknown>;
 }
 
@@ -232,7 +244,14 @@ export function toBachsError(error: unknown): BachsErrorResponse {
     if (error.details.limit && typeof error.details.limit === 'object') {
       extra.details = error.details.limit as Record<string, unknown>;
     }
-    return { status: CODES[code][0], body: bachsErrorBody(code, error.message, extra) };
+    if (Array.isArray(error.details.errors)) {
+      extra.errors = error.details.errors as NonNullable<BachsErrorBody['errors']>;
+    }
+    // A few operations answer one code with another status than the error
+    // reference gives it (an account's `"configuration": {}` is a 422
+    // VALIDATION_ERROR); the route names it.
+    const status = typeof error.details.httpStatus === 'number' ? error.details.httpStatus : CODES[code][0];
+    return { status, body: bachsErrorBody(code, error.message, extra) };
   }
 
   // Fastify's own failures: a malformed JSON body, an unsupported media type.

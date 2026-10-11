@@ -444,12 +444,15 @@ class SqliteStorage implements Storage {
         .executeTakeFirst();
       return row ? map.toCustomer(row) : null;
     },
-    byEmail: async (provider, email) => {
+    byEmail: async (provider, email, subaccountId = null) => {
       const row = await this.#db
         .selectFrom('customers')
         .selectAll()
         .where('provider', '=', provider)
         .where('email', '=', email)
+        .where((eb) =>
+          subaccountId === null ? eb('subaccount_id', 'is', null) : eb('subaccount_id', '=', subaccountId),
+        )
         .executeTakeFirst();
       return row ? map.toCustomer(row) : null;
     },

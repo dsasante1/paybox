@@ -13,6 +13,7 @@ import {
 import { addInterval, type InvoiceItemDraft, type Job, type PaymentEngine, type Storage } from '@paybox/core';
 import { PAYMENT_SIMULATE_JOB } from '@paybox/simulator';
 import { factsFromDetails, resolveCard, saveCard, SAVED_CARD_DECLINE, type CardFacts } from './cards.js';
+import { hasCapability } from './accounts.js';
 import { fail } from './errors.js';
 import { derivedId, hexId } from './ids.js';
 import { creditLock, fulfilLock, subscriptionLock, withLock } from './locks.js';
@@ -179,6 +180,10 @@ export class BachsBilling {
     const chargeId = hexId(this.#ids, 'ch');
     let payment = await this.#engine.createPayment({
       provider: PROVIDER,
+      // A connected account's customer is charged as that account: its money.
+      ...(input.customer.subaccountId
+        ? { subaccountId: input.customer.subaccountId, settlementMode: 'direct' as const }
+        : {}),
       amount: input.amount,
       currency: input.currency,
       // The engine's reference is unique; Bachs' `reference` is the merchant's
@@ -202,6 +207,19 @@ export class BachsBilling {
     await this.state.paymentMeta.put(payment.id, { ...input.meta, seq: await this.state.nextSeq(), conversion });
 
     payment = await this.#engine.transitionPayment(payment.id, 'processing');
+    // A connected account charges only with its card capability active: a
+    // renewal or retry for an account whose platform restricted it fails, and
+    // recovery takes over, as for any refused card.
+    if (input.customer.subaccountId) {
+      const account = (await this.state.accounts.all()).find((entry) => entry.engineId === input.customer.subaccountId);
+      const capability = method.currency === 'NGN' ? 'ngn_card_collection' : 'card_collection';
+      if (account && !hasCapability(account, capability)) {
+        return this.#engine.transitionPayment(payment.id, 'failed', {
+          failureCode: 'payment_method_not_enabled',
+          failureMessage: `This account's ${capability} capability is not active.`,
+        });
+      }
+    }
     if (method.behaviour === 'declines') {
       return this.#engine.transitionPayment(payment.id, 'failed', {
         failureCode: SAVED_CARD_DECLINE.failureCode,

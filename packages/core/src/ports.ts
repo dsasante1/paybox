@@ -235,7 +235,8 @@ export interface CustomerRepository {
   insert(customer: Customer): Promise<Customer>;
   byId(id: string): Promise<Customer | null>;
   byProviderCustomerId(provider: ProviderId, id: string): Promise<Customer | null>;
-  byEmail(provider: ProviderId, email: string): Promise<Customer | null>;
+  /** By email within one owner: the platform's (null, the default) or a connected account's. */
+  byEmail(provider: ProviderId, email: string, subaccountId?: string | null): Promise<Customer | null>;
   update(id: string, patch: Partial<Customer>): Promise<Customer>;
   list(filter?: CustomerFilter): Promise<Page<Customer>>;
   /** Batch fetch, so listing N payments does not cost N customer queries. */

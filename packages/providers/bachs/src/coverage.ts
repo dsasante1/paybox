@@ -74,6 +74,37 @@ export const BACHS_COVERAGE: CoverageManifest = {
     { method: 'POST', path: '/v1/utilities/uploads', status: 'compatible' },
     { method: 'GET', path: '/v1/utilities/uploads/:upload_id', status: 'compatible' },
     { method: 'DELETE', path: '/v1/utilities/uploads/:upload_id', status: 'compatible' },
+    { method: 'POST', path: '/v1/accounts', status: 'compatible' },
+    { method: 'GET', path: '/v1/accounts', status: 'compatible' },
+    { method: 'GET', path: '/v1/accounts/me', status: 'compatible' },
+    { method: 'GET', path: '/v1/accounts/:account_id', status: 'compatible' },
+    {
+      method: 'POST',
+      path: '/v1/accounts/:account_id',
+      status: 'partial',
+      note: "Requirements follow paybox's own catalogue; Bachs publishes none.",
+    },
+    { method: 'GET', path: '/v1/accounts/:account_id/capabilities', status: 'compatible' },
+    { method: 'POST', path: '/v1/accounts/:account_id/account-links', status: 'compatible' },
+    { method: 'POST', path: '/v1/accounts/:account_id/documents', status: 'compatible' },
+    { method: 'GET', path: '/v1/accounts/:account_id/persons', status: 'compatible' },
+    { method: 'POST', path: '/v1/accounts/:account_id/persons', status: 'compatible' },
+    { method: 'GET', path: '/v1/accounts/:account_id/persons/:person_id', status: 'compatible' },
+    { method: 'POST', path: '/v1/accounts/:account_id/persons/:person_id', status: 'compatible' },
+    { method: 'DELETE', path: '/v1/accounts/:account_id/persons/:person_id', status: 'compatible' },
+    { method: 'POST', path: '/v1/accounts/:account_id/persons/:person_id/documents', status: 'compatible' },
+    {
+      method: 'GET',
+      path: '/v1/reference/business-structures',
+      status: 'partial',
+      note: "Nigeria's three structures only, the only ones Bachs publishes.",
+    },
+    {
+      method: 'GET',
+      path: '/v1/reference/product-categories',
+      status: 'partial',
+      note: 'The two published categories only.',
+    },
     { method: 'POST', path: '/v1/virtual-accounts', status: 'compatible' },
     { method: 'GET', path: '/v1/virtual-accounts', status: 'compatible' },
     { method: 'GET', path: '/v1/currencies/payout-supported', status: 'compatible' },
@@ -152,6 +183,13 @@ export const BACHS_COVERAGE: CoverageManifest = {
     // A public upload's bytes, at the `url` the uploads API returns. Bachs
     // serves its own from cdn.bachs.io.
     { method: 'GET', path: '/files/:upload_id/:file_name', status: 'emulator-only' },
+    // Connect onboarding: Bachs hosts its own page at connect.bachs.io and
+    // never describes it, and its sandbox reviews nothing, so the page and
+    // the reviewer's controls are paybox's.
+    { method: 'GET', path: '/connect/setup/c/:account_id/:token', status: 'emulator-only' },
+    { method: 'POST', path: '/connect/setup/c/:account_id/:token', status: 'emulator-only' },
+    { method: 'POST', path: '/v1/accounts/:account_id/requirements/review', status: 'emulator-only' },
+    { method: 'POST', path: '/v1/accounts/:account_id/capabilities/:capability', status: 'emulator-only' },
     // The customer portal. Bachs serves its own at portal.bachs.io.
     { method: 'GET', path: '/portal/s/:token', status: 'emulator-only' },
     { method: 'POST', path: '/portal/s/:token/subscriptions/:subscription_id/cancel', status: 'emulator-only' },

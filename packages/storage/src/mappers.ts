@@ -287,6 +287,8 @@ export const toCustomer = (row: CustomerRow): Customer => ({
   lastName: row.last_name,
   phone: row.phone,
   metadata: readJson(row.metadata),
+  // Only where set, so every provider without connected accounts reads as before.
+  ...(row.subaccount_id ? { subaccountId: row.subaccount_id } : {}),
   createdAt: row.created_at,
   updatedAt: row.updated_at,
 });
@@ -300,6 +302,7 @@ export const fromCustomer = (customer: Customer): CustomerRow => ({
   last_name: customer.lastName,
   phone: customer.phone,
   metadata: writeJson(customer.metadata),
+  subaccount_id: customer.subaccountId ?? null,
   created_at: customer.createdAt,
   updated_at: customer.updatedAt,
 });

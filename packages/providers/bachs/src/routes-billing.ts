@@ -7,6 +7,8 @@ import { assertMetadata, newestFirst, notFound, readPage } from './http.js';
 import { hexId } from './ids.js';
 import { toMinor } from './money.js';
 import { canConvert } from './rates.js';
+import { hasCapability } from './accounts.js';
+import { owns, ownerField, type Actor } from './actor.js';
 import type { RouteContext } from './route-context.js';
 import {
   cancelSubscriptionSchema,
@@ -41,7 +43,15 @@ const PROVIDER = 'bachs' as const;
  * subscriptions directly" -- a checkout with a recurring product does.
  */
 export function registerBillingRoutes(fastify: FastifyInstance, ctx: RouteContext): void {
-  const { storage, state, clock, authenticate, billing } = ctx;
+  const { storage, state, clock, billing } = ctx;
+
+  /** A subscription is its customer's owner's ("customer.subscription.*" originate on the account). */
+  async function ownedSubscription(actor: Actor, id: string): Promise<StoredSubscription> {
+    const stored = await state.subscriptions.get(id);
+    const customer = stored ? await storage.customers.byId(stored.customerId) : null;
+    if (!stored || !customer || (customer.subaccountId ?? null) !== actor.pot) throw notFound('Subscription');
+    return stored;
+  }
 
   /** Everything a subscription's serialisers need. */
   async function view(stored: StoredSubscription, core?: Subscription | null): Promise<SubscriptionView | null> {
@@ -70,7 +80,7 @@ export function registerBillingRoutes(fastify: FastifyInstance, ctx: RouteContex
   /* ------------------------------ subscriptions ----------------------------- */
 
   fastify.get('/v1/subscriptions', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const query = listSubscriptionsQuery.parse(request.query);
     const { limit, offset } = readPage(query, 50);
     let customerId: string | null = null;
@@ -84,7 +94,7 @@ export function registerBillingRoutes(fastify: FastifyInstance, ctx: RouteContex
       if (!stored.engineId) continue;
       if (customerId !== null && stored.customerId !== customerId) continue;
       const built = await view(stored);
-      if (!built) continue;
+      if (!built || (built.customer.subaccountId ?? null) !== actor.pot) continue;
       if (query.status && built.status !== query.status) continue;
       views.push(built);
     }
@@ -98,17 +108,18 @@ export function registerBillingRoutes(fastify: FastifyInstance, ctx: RouteContex
   });
 
   fastify.get<{ Params: { subscription_id: string } }>('/v1/subscriptions/:subscription_id', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
+    await ownedSubscription(actor, request.params.subscription_id);
     return reply.send(await render(request.params.subscription_id));
   });
 
   fastify.patch<{ Params: { subscription_id: string } }>(
     '/v1/subscriptions/:subscription_id',
     async (request, reply) => {
-      authenticate(request);
+      const actor = await ctx.actor(request);
       const body = updateSubscriptionSchema.parse(request.body ?? {});
       const id = request.params.subscription_id;
-      if (!(await state.subscriptions.get(id))) throw notFound('Subscription');
+      await ownedSubscription(actor, id);
 
       // "Send exactly one intent per request ... Combining intents returns 400."
       const intents = (['product_id', 'trial_end', 'payment_method_id', 'metadata'] as const).filter(
@@ -137,7 +148,7 @@ export function registerBillingRoutes(fastify: FastifyInstance, ctx: RouteContex
           );
         }
         const stored = (await state.subscriptions.get(id))!;
-        const target = await targetPlan(body.product_id, stored);
+        const target = await targetPlan(body.product_id, stored, actor);
         await billing.changePlan(id, { ...target, behaviour });
       } else if (body.trial_end !== undefined) {
         const at = Date.parse(body.trial_end);
@@ -159,9 +170,9 @@ export function registerBillingRoutes(fastify: FastifyInstance, ctx: RouteContex
    * The product a plan change moves to. "The price is resolved from the
    * product for the subscription's currency."
    */
-  async function targetPlan(productId: string, stored: StoredSubscription) {
+  async function targetPlan(productId: string, stored: StoredSubscription, actor: Actor) {
     const record = await state.products.get(productId);
-    const product = record ? await storage.products.byId(record.engineId) : null;
+    const product = record && owns(actor, record.account) ? await storage.products.byId(record.engineId) : null;
     if (!record || !product || record.archivedAt) {
       throw fail('validation_failed', 'PRODUCT_NOT_FOUND', `Product ${productId} does not exist or is archived.`);
     }
@@ -210,10 +221,10 @@ export function registerBillingRoutes(fastify: FastifyInstance, ctx: RouteContex
   fastify.delete<{ Params: { subscription_id: string } }>(
     '/v1/subscriptions/:subscription_id',
     async (request, reply) => {
-      authenticate(request);
+      const actor = await ctx.actor(request);
       const body = cancelSubscriptionSchema.parse(request.body ?? {});
       const id = request.params.subscription_id;
-      if (!(await state.subscriptions.get(id))) throw notFound('Subscription');
+      await ownedSubscription(actor, id);
       await billing.cancel(id, {
         atPeriodEnd: body.cancel_at_period_end ?? false,
         reason: body.reason ?? null,
@@ -225,6 +236,7 @@ export function registerBillingRoutes(fastify: FastifyInstance, ctx: RouteContex
   /* ------------------------------ product groups ---------------------------- */
 
   async function productViews(group: StoredProductGroup, includeArchived: boolean) {
+    const organizationId = group.account ?? ctx.organizationId;
     const views = [];
     for (const productId of group.productIds) {
       const record = await state.products.get(productId);
@@ -233,7 +245,7 @@ export function registerBillingRoutes(fastify: FastifyInstance, ctx: RouteContex
       if (record.archivedAt && !includeArchived) continue;
       views.push(
         serializeProduct(product, record, {
-          organizationId: ctx.organizationId,
+          organizationId,
           ...(await ctx.productTotals(productId)),
           media: await mediaOf(state, record, `${ctx.baseUrl}${ctx.basePath}`),
         }),
@@ -243,9 +255,10 @@ export function registerBillingRoutes(fastify: FastifyInstance, ctx: RouteContex
   }
 
   /** "Every ID must be a product on your own account". */
-  async function assertProducts(productIds: string[]): Promise<void> {
+  async function assertProducts(actor: Actor, productIds: string[]): Promise<void> {
     for (const productId of productIds) {
-      if (!(await state.products.get(productId))) {
+      const record = await state.products.get(productId);
+      if (!record || !owns(actor, record.account)) {
         throw fail(
           'validation_failed',
           'INVALID_PRODUCT_REFERENCE',
@@ -255,18 +268,19 @@ export function registerBillingRoutes(fastify: FastifyInstance, ctx: RouteContex
     }
   }
 
-  async function loadGroup(id: string): Promise<StoredProductGroup> {
+  async function loadGroup(actor: Actor, id: string): Promise<StoredProductGroup> {
     const group = await state.groups.get(id);
-    if (!group) throw notFound('Product group');
+    if (!group || !owns(actor, group.account)) throw notFound('Product group');
     return group;
   }
 
   fastify.post('/v1/product-groups', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const body = createProductGroupSchema.parse(request.body);
-    await assertProducts(body.product_ids);
+    await assertProducts(actor, body.product_ids);
     const now = clock.nowISO();
     const group: StoredProductGroup = {
+      ...ownerField(actor),
       seq: await state.nextSeq(),
       id: hexId(ctx.ids, 'pgrp', 20),
       name: body.name,
@@ -275,36 +289,36 @@ export function registerBillingRoutes(fastify: FastifyInstance, ctx: RouteContex
       updatedAt: now,
     };
     await state.groups.put(group);
-    return reply.status(201).send(serializeProductGroup(group, ctx.organizationId, await productViews(group, false)));
+    return reply.status(201).send(serializeProductGroup(group, actor.id, await productViews(group, false)));
   });
 
   fastify.get('/v1/product-groups', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const query = listProductGroupsQuery.parse(request.query);
     const { limit, offset } = readPage(query, 20);
-    const groups = (await state.groups.all()).sort(newestFirst);
+    const groups = (await state.groups.all()).filter((group) => owns(actor, group.account)).sort(newestFirst);
     const page = groups.slice(offset, offset + limit);
     const items = [];
     for (const group of page) {
-      items.push(serializeProductGroup(group, ctx.organizationId, await productViews(group, false)));
+      items.push(serializeProductGroup(group, actor.id, await productViews(group, false)));
     }
     return reply.send({ pagination: pagination(groups.length, limit, offset, items.length), items });
   });
 
   fastify.get<{ Params: { group_id: string } }>('/v1/product-groups/:group_id', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const query = getProductGroupQuery.parse(request.query);
-    const group = await loadGroup(request.params.group_id);
+    const group = await loadGroup(actor, request.params.group_id);
     return reply.send(
-      serializeProductGroup(group, ctx.organizationId, await productViews(group, query.include_archived === 'true')),
+      serializeProductGroup(group, actor.id, await productViews(group, query.include_archived === 'true')),
     );
   });
 
   fastify.patch<{ Params: { group_id: string } }>('/v1/product-groups/:group_id', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const body = updateProductGroupSchema.parse(request.body ?? {});
-    const group = await loadGroup(request.params.group_id);
-    if (body.product_ids) await assertProducts(body.product_ids);
+    const group = await loadGroup(actor, request.params.group_id);
+    if (body.product_ids) await assertProducts(actor, body.product_ids);
     const next: StoredProductGroup = {
       ...group,
       ...(body.name !== undefined ? { name: body.name } : {}),
@@ -313,12 +327,12 @@ export function registerBillingRoutes(fastify: FastifyInstance, ctx: RouteContex
       updatedAt: clock.nowISO(),
     };
     await state.groups.put(next);
-    return reply.send(serializeProductGroup(next, ctx.organizationId, await productViews(next, false)));
+    return reply.send(serializeProductGroup(next, actor.id, await productViews(next, false)));
   });
 
   fastify.delete<{ Params: { group_id: string } }>('/v1/product-groups/:group_id', async (request, reply) => {
-    authenticate(request);
-    await loadGroup(request.params.group_id);
+    const actor = await ctx.actor(request);
+    await loadGroup(actor, request.params.group_id);
     // "Member products are not affected."
     await state.groups.delete(request.params.group_id);
     return reply.status(204).send();
@@ -332,11 +346,11 @@ export function registerBillingRoutes(fastify: FastifyInstance, ctx: RouteContex
    * second later by `collection.succeeded`, or already `failed`.
    */
   fastify.post('/v1/charges', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const body = createChargeSchema.parse(request.body);
     assertMetadata(body.metadata);
     const customer = await storage.customers.byProviderCustomerId(PROVIDER, body.customer);
-    if (!customer) throw notFound('Customer');
+    if (!customer || (customer.subaccountId ?? null) !== actor.pot) throw notFound('Customer');
     const currency = body.currency.toUpperCase();
     // "Cards collect in USD and NGN only"; another currency converts into the
     // card's own, and only those two are on the rate table.
@@ -353,6 +367,11 @@ export function registerBillingRoutes(fastify: FastifyInstance, ctx: RouteContex
       customer,
       body.payment_method ?? null,
     );
+    // An account's card charge needs its card capability for the card's currency.
+    const capability = method.currency === 'NGN' ? 'ngn_card_collection' : 'card_collection';
+    if (!hasCapability(actor.account, capability)) {
+      throw fail('validation_failed', 'PAYMENT_METHOD_NOT_ENABLED', `This account's ${capability} capability is not active.`);
+    }
     const payment = await billing.chargeCard({
       customer,
       method,

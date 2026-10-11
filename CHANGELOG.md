@@ -7,6 +7,24 @@ out with the next tag — see [docs/releasing.md](docs/releasing.md).
 
 ## Unreleased
 
+- **Bachs: Connect, part one**
+  ([contract](docs/bachs.md#how-connect-behaves)).
+  - **Accounts:** connected accounts, persons, company and person documents,
+    capabilities, requirements, and onboarding links with paybox's onboarding
+    page. paybox's review controls stand in for Bachs' reviewers.
+  - **`X-Account-Id`:** runs any request as a connected account. Everything an
+    owner creates (products, customers, checkouts, payments, refunds,
+    disputes, payouts, destinations, schedules, conversions, the virtual
+    account, uploads, webhook endpoints) is its own, and its balance is too.
+  - **Direct charges:** a checkout created as an account is a direct charge,
+    paid into the account's balance.
+  - **Webhooks:** `account.updated` and `capability.updated` are new. An
+    account's events carry it as `organization_id` and `account`, and reach
+    the platform's `event_source: connect` endpoints.
+  - Split payments, platform fees and transfers come next.
+- **Customers are unique per owner, not per provider** (migration 0024). This
+  changes nothing for providers without connected accounts.
+
 - **Bachs: disputes**, the fourth phase of its API
   ([contract](docs/bachs.md#how-disputes-behave)).
   - **Disputes:** list, get, save evidence (`409 DISPUTE_NOT_EDITABLE`,

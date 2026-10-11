@@ -106,9 +106,12 @@ export async function requireUpload(
   state: BachsState,
   id: string,
   field: string,
-  target: { type: string; id: string },
+  target: { type: string; id: string; account: string | null },
 ): Promise<StoredUpload> {
-  const upload = await state.uploads.get(id);
+  const found = await state.uploads.get(id);
+  // "An upload ID is invalid or belongs to another merchant": another
+  // owner's upload is as unknown as no upload.
+  const upload = found && (found.account ?? null) === target.account ? found : null;
   if (!upload) {
     throw fail('validation_failed', 'INVALID_UPLOAD_REFERENCE', `${field}: upload \`${id}\` was not found.`, {
       field,
@@ -216,7 +219,7 @@ export async function replaceMedia(
     );
   }
   const uploads = [];
-  const target = { type: 'product', id: product.id };
+  const target = { type: 'product', id: product.id, account: product.account ?? null };
   for (const [index, id] of media.entries()) uploads.push(await requireUpload(state, id, `media.${index}`, target));
   for (const id of product.media ?? []) {
     if (media.includes(id)) continue;

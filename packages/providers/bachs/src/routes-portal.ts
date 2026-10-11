@@ -34,13 +34,14 @@ const PORTAL_SESSION_MS = 3_600_000;
  *   off  switching plans, adding or removing cards, editing name and phone
  */
 export function registerPortalRoutes(fastify: FastifyInstance, ctx: RouteContext): void {
-  const { storage, state, clock, ids, authenticate, billing } = ctx;
+  const { storage, state, clock, ids, billing } = ctx;
 
   fastify.post<{ Params: { customer_id: string } }>(
     '/v1/customers/:customer_id/portal-sessions',
     async (request, reply) => {
-      authenticate(request);
-      const customer = await storage.customers.byProviderCustomerId(PROVIDER, request.params.customer_id);
+      const actor = await ctx.actor(request);
+      const found = await storage.customers.byProviderCustomerId(PROVIDER, request.params.customer_id);
+      const customer = found && (found.subaccountId ?? null) === actor.pot ? found : null;
       if (!customer) throw notFound('Customer');
       const now = clock.nowISO();
       const session: StoredPortalSession = {

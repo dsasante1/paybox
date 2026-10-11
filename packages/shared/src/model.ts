@@ -144,6 +144,13 @@ export interface Customer {
   lastName: string | null;
   phone: string | null;
   metadata: Metadata;
+  /**
+   * The connected account whose customer this is, for a provider where each
+   * account keeps its own customers (Bachs' `X-Account-Id`). Absent for the
+   * platform, which is every other provider's only owner. Emails are unique
+   * per owner, not per provider.
+   */
+  subaccountId?: string | null;
   createdAt: string;
   updatedAt: string;
 }
