@@ -513,6 +513,13 @@ Cards follow Bachs' sandbox numbers (`4000000000000002` declined, and so on)
 and settle **one second** after payment, so run `paybox time advance 1s`. Bank
 transfer, mobile money and crypto wait for a paybox test control on the page.
 
+**Subscriptions.** Put a product with a `billing_cycle` in the cart and name a
+`customer`, and the checkout starts a subscription. Renewals happen on
+paybox's clock, so `paybox time advance 365d` bills a monthly plan twelve
+times. Subscribe with `4000000000000341` to watch a renewal fail and recovery
+retry it on days 1, 4 and 9. `save_payment_method` keeps a card for
+`POST /v1/charges`.
+
 **Webhook.** Register an endpoint through Bachs' own API. The response
 carries a `whsec_` signing secret, once:
 

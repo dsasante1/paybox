@@ -51,6 +51,9 @@ import {
 } from '@paybox/flutterwave';
 import {
   BACHS_CHECKOUT_EXPIRE_JOB,
+  BACHS_SUBSCRIPTION_RENEW_JOB,
+  BACHS_SUBSCRIPTION_RETRY_JOB,
+  BachsBilling,
   BachsWebhookFormatter,
   createBachsExpiryHandler,
   generateBachsKeys,
@@ -434,10 +437,28 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
   // up per event, so the order of registration does not matter.
   dispatcher.register(new BachsWebhookFormatter({ organizationId: bachsKeys.organizationId }));
   // Bachs owns its checkout's expiry: one job closes the session whatever it
-  // holds -- no payment, an attempt in flight, or a last attempt that failed.
+  // holds -- no payment, an attempt in flight, or a last attempt that failed
+  // -- and backstops a paid checkout's completion work. Bachs owns its
+  // billing too: renewals and recovery retries are its own
+  // jobs, never the shared SubscriptionRunner's (providers/bachs/src/
+  // billing.ts says why). A checkout's completion work -- saving the card,
+  // starting the subscription -- follows the payment's success event, so it
+  // happens however the payment was settled. `payment.successful` handlers
+  // run before the dispatcher's catch-all, so `checkout.completed` is built
+  // after the subscription it names exists.
+  const bachsBilling = new BachsBilling({
+    engine,
+    storage,
+    clock,
+    ids,
+    recovery: config.bachs.subscriptionRecovery,
+  });
+  scheduler.register(BACHS_SUBSCRIPTION_RENEW_JOB, bachsBilling.handleRenewJob);
+  scheduler.register(BACHS_SUBSCRIPTION_RETRY_JOB, bachsBilling.handleRetryJob);
+  bus.on('payment.successful', bachsBilling.onPaymentSuccessful);
   scheduler.register(
     BACHS_CHECKOUT_EXPIRE_JOB,
-    createBachsExpiryHandler({ engine, simulator, storage, clock, ids }),
+    createBachsExpiryHandler({ engine, simulator, storage, clock, ids, billing: bachsBilling }),
   );
 
   return {

@@ -1,4 +1,4 @@
-import type { Customer, Payment, PayboxEvent, Product, Refund } from '@paybox/shared';
+import type { Customer, Invoice, InvoiceItem, Payment, PayboxEvent, Product, Refund, Subscription } from '@paybox/shared';
 import type { WebhookEndpoint } from '@paybox/core';
 import { processingFee, type Corridor } from './fees.js';
 import { toDecimal, toDecimalOrNull } from './money.js';
@@ -6,18 +6,24 @@ import type {
   StoredCheckout,
   StoredCustomer,
   StoredEndpoint,
+  StoredInvoice,
   StoredLine,
+  StoredPaymentMeta,
   StoredPrice,
   StoredProduct,
+  StoredProductGroup,
   StoredRefund,
+  StoredSubscription,
 } from './state.js';
 import {
   checkoutPaymentStatusFor,
   checkoutStatusFor,
+  invoiceStatusOf,
   paymentMessage,
   paymentStatusOf,
   toBachsPaymentStatus,
   toBachsRefundStatus,
+  type BachsSubscriptionStatus,
   type CheckoutStatus,
 } from './status.js';
 
@@ -231,8 +237,21 @@ export function isRefundable(payment: Payment, hasLiveRefund: boolean): boolean 
   return ['succeeded', 'accepted'].includes(paymentStatusOf(payment));
 }
 
+/** `PaymentInvoiceInfo`: the invoice a subscription payment collected. */
+export interface PaymentInvoiceInfo {
+  invoice_id: string;
+  number: string | null;
+  subscription_id: string | null;
+  period_start: string;
+  period_end: string;
+  kind: 'cycle' | 'proration';
+}
+
 export interface PaymentContext {
   checkout: StoredCheckout | null;
+  /** Why a payment no checkout made exists; also set on a subscription's first checkout payment. */
+  meta: StoredPaymentMeta | null;
+  invoice: PaymentInvoiceInfo | null;
   customer: { email: string; name: string | null } | null;
   refunds: StoredRefund[];
   history: PayboxEvent[];
@@ -306,9 +325,9 @@ export function serializePayment(payment: Payment, context: PaymentContext) {
   const settled = ['succeeded', 'accepted', 'overpaid', 'refunded', 'partially_refunded'].includes(status);
   const paid = amountPaidOf(payment);
   return {
-    reference: context.checkout?.reference ?? null,
+    reference: referenceOf(context),
     payment_id: payment.providerTransactionId,
-    billing_reason: 'purchase',
+    billing_reason: context.meta?.billingReason ?? 'purchase',
     checkout_id: context.checkout?.id ?? null,
     status,
     is_refundable: isRefundable(payment, context.hasLiveRefund),
@@ -323,14 +342,14 @@ export function serializePayment(payment: Payment, context: PaymentContext) {
     destination_amount: null,
     fee_paid_by: settled ? 'merchant' : null,
     payment_method: corridorOf(payment),
-    channel: 'checkout',
-    narration: null,
-    meta: context.checkout?.metadata ?? {},
+    channel: context.meta?.channel ?? 'checkout',
+    narration: context.meta?.description ?? null,
+    meta: metadataOf(context),
     message: paymentMessage(status),
     customer: context.customer,
     line_items: context.checkout ? lineItems(context.checkout.lines) : null,
-    subscription_id: null,
-    invoice: null,
+    subscription_id: context.meta?.subscriptionId ?? null,
+    invoice: context.invoice,
     refunds: context.refunds.length > 0 ? context.refunds.map((refund) => refund.id) : null,
     status_history: statusHistory(payment, context.history),
     payment_method_details: paymentMethodDetails(payment),
@@ -340,6 +359,16 @@ export function serializePayment(payment: Payment, context: PaymentContext) {
   };
 }
 
+/** The merchant's reference: the checkout's, or the one sent with an off-session charge. */
+export function referenceOf(context: { checkout: StoredCheckout | null; meta: StoredPaymentMeta | null }): string | null {
+  return context.checkout?.reference ?? context.meta?.reference ?? null;
+}
+
+/** The metadata a payment echoes: its checkout's, or its own. */
+export function metadataOf(context: { checkout: StoredCheckout | null; meta: StoredPaymentMeta | null }): Record<string, unknown> {
+  return context.checkout?.metadata ?? context.meta?.metadata ?? {};
+}
+
 /**
  * `ChargeStatusResponse` (getChargeStatus) -- a different shape for the same
  * id, as published: `charge_id` rather than `payment_id`, a settlement figure,
@@ -347,7 +376,13 @@ export function serializePayment(payment: Payment, context: PaymentContext) {
  */
 export function serializeChargeStatus(
   payment: Payment,
-  context: { organizationId: string; customerId: string | null; checkout: StoredCheckout | null; history: PayboxEvent[] },
+  context: {
+    organizationId: string;
+    customerId: string | null;
+    checkout: StoredCheckout | null;
+    meta: StoredPaymentMeta | null;
+    history: PayboxEvent[];
+  },
 ) {
   const c = payment.currency;
   const fee = feeOf(payment) ?? 0;
@@ -360,7 +395,7 @@ export function serializeChargeStatus(
     settlement_currency: c,
     settlement_amount: toDecimal(Math.max(0, payment.amount - fee), c),
     status: paymentStatusOf(payment),
-    metadata: context.checkout?.metadata ?? {},
+    metadata: metadataOf(context),
     status_history: statusHistory(payment, context.history),
     created_at: payment.createdAt,
     updated_at: payment.updatedAt,
@@ -370,7 +405,12 @@ export function serializeChargeStatus(
 /** `PaymentListItemResponse`: a third shape, with `id` and a lowercased method object. */
 export function serializePaymentListItem(
   payment: Payment,
-  context: { checkout: StoredCheckout | null; customer: { email: string; name: string | null } | null; hasLiveRefund: boolean },
+  context: {
+    checkout: StoredCheckout | null;
+    meta: StoredPaymentMeta | null;
+    customer: { email: string; name: string | null } | null;
+    hasLiveRefund: boolean;
+  },
 ) {
   const c = payment.currency;
   const status = paymentStatusOf(payment);
@@ -381,7 +421,7 @@ export function serializePaymentListItem(
   const details = payment.paymentMethodDetails;
   return {
     id: payment.providerTransactionId,
-    reference: context.checkout?.reference ?? null,
+    reference: referenceOf(context),
     status,
     is_refundable: isRefundable(payment, context.hasLiveRefund),
     amount: toDecimal(payment.amount, c),
@@ -394,7 +434,7 @@ export function serializePaymentListItem(
     fee: settled && fee !== null ? toDecimal(fee, c) : null,
     vat: null,
     currency: c,
-    meta: context.checkout?.metadata ?? {},
+    meta: metadataOf(context),
     transaction_date: payment.createdAt,
     completed_at: completedAtOf(payment),
     platform_fee: null,
@@ -406,12 +446,12 @@ export function serializePaymentListItem(
           last4: typeof details.last4 === 'string' ? details.last4 : null,
         }
       : null,
-    source: {
-      type: 'CHECKOUT_SESSION',
-      checkout_id: context.checkout?.id ?? null,
-      reference: context.checkout?.reference ?? null,
-    },
-    description: null,
+    // The spec's only example is a checkout; what an off-session charge or a
+    // renewal reports here is not published (docs/bachs.md).
+    source: context.checkout
+      ? { type: 'CHECKOUT_SESSION', checkout_id: context.checkout.id, reference: context.checkout.reference }
+      : { type: context.meta?.channel === 'api' ? 'API' : 'SUBSCRIPTION', checkout_id: null, reference: referenceOf(context) },
+    description: context.meta?.description ?? null,
     fee_paid_by: settled ? 'merchant' : null,
   };
 }
@@ -470,7 +510,10 @@ export function serializeCheckout(
   return {
     checkout_id: checkout.id,
     status: sessionStatus(checkout, payment),
-    recurring: null,
+    // `CheckoutRecurring`: the response alone spells it `interval_count`.
+    recurring: checkout.recurring
+      ? { interval: checkout.recurring.cycle.interval, interval_count: checkout.recurring.cycle.frequency }
+      : null,
     payment_status: payment
       ? checkoutPaymentStatusFor(payment.status)
       : checkout.status === 'open'
@@ -555,4 +598,209 @@ export function publicEventTypes(stored: string[]): string[] {
   return stored.map((type) =>
     type.startsWith(CONNECT_ONLY_PREFIX) ? type.slice(CONNECT_ONLY_PREFIX.length) : type,
   );
+}
+
+/* ------------------------------ subscriptions ------------------------------ */
+
+export interface SubscriptionView {
+  core: Subscription;
+  stored: StoredSubscription;
+  status: BachsSubscriptionStatus;
+  customer: Customer;
+  customerRecord: StoredCustomer | null;
+  product: Product | null;
+  productRecord: StoredProduct | null;
+}
+
+/**
+ * Set to end at the period's close: through the API or the portal, or by
+ * paybox's own tooling moving the core row to `non_renewing`.
+ */
+function endsAtPeriodEnd(view: SubscriptionView): boolean {
+  return view.stored.cancelAtPeriodEnd || view.core.status === 'non_renewing';
+}
+
+/** "Next scheduled charge date": none once canceled or set to cancel. */
+function nextBilledAt(view: SubscriptionView): string | null {
+  if (view.status === 'canceled' || endsAtPeriodEnd(view)) return null;
+  return view.stored.nextRenewalAt;
+}
+
+function canceledAt(view: SubscriptionView): string | null {
+  return view.stored.canceledAt ?? view.core.cancelledAt ?? null;
+}
+
+/** `SubscriptionCatalogProduct`. */
+function catalogProduct(view: SubscriptionView, withDescription: boolean) {
+  if (!view.product || !view.productRecord) return null;
+  return {
+    id: view.productRecord.id,
+    name: view.product.name,
+    ...(withDescription ? { description: view.product.description } : {}),
+    status: view.productRecord.archivedAt ? 'archived' : 'active',
+    billing_cycle: view.productRecord.billingCycle,
+    trial_period: view.productRecord.trialPeriod,
+    created_at: view.product.createdAt,
+    updated_at: view.product.updatedAt,
+  };
+}
+
+/** `SubscriptionResponse`. */
+export function serializeSubscription(view: SubscriptionView) {
+  const { stored } = view;
+  const c = stored.currency;
+  const next = nextBilledAt(view);
+  return {
+    id: stored.id,
+    payment_method_id: stored.paymentMethodId,
+    status: view.status,
+    collection_method: 'charge_automatically',
+    currency: c,
+    amount: toDecimal(stored.unitAmount * stored.quantity, c),
+    billing_cycle: stored.cycle,
+    quantity: stored.quantity,
+    current_period_start: stored.periodStart,
+    current_period_end: stored.periodEnd,
+    previously_billed_at: stored.previouslyBilledAt,
+    next_billed_at: next,
+    trial_end: stored.trialEnd,
+    cancel_at_period_end: endsAtPeriodEnd(view),
+    canceled_at: canceledAt(view),
+    created_at: stored.createdAt,
+    product: catalogProduct(view, true),
+    items: [
+      {
+        id: stored.itemId,
+        // "Follows the parent subscription's status."
+        status: view.status,
+        quantity: stored.quantity,
+        recurring: true,
+        price_type: 'fixed',
+        unit_amount: toDecimal(stored.unitAmount, c),
+        currency: c,
+        previously_billed_at: stored.previouslyBilledAt,
+        next_billed_at: next,
+        price: {
+          id: stored.priceId,
+          product_id: stored.productId,
+          price_type: 'fixed',
+          currency: c,
+          unit_amount: toDecimal(stored.unitAmount, c),
+          billing_cycle: stored.cycle,
+          trial_period: view.productRecord?.trialPeriod ?? null,
+          seat_tiers: null,
+          // An ad hoc price is "an archived, one-off price ... kept out of
+          // your catalog price list".
+          is_archived: stored.overridePrice,
+          created_at: stored.priceCreatedAt,
+          updated_at: stored.priceCreatedAt,
+        },
+        product: catalogProduct(view, false),
+        created_at: stored.createdAt,
+        updated_at: stored.updatedAt,
+      },
+    ],
+    metadata: stored.metadata,
+    customer: serializeCustomer(view.customer, view.customerRecord),
+  };
+}
+
+/**
+ * The `data` of `customer.subscription.*`. A different shape from the REST
+ * object, as the event pages publish it: `subscription_id` and `product_id`
+ * rather than `id` and `product`, no `payment_method_id` or
+ * `previously_billed_at`, the customer in full, and `items: []` in every
+ * example.
+ */
+export function serializeWebhookSubscription(view: SubscriptionView) {
+  const { stored } = view;
+  const c = stored.currency;
+  const next = nextBilledAt(view);
+  const canceled = canceledAt(view);
+  return {
+    subscription_id: stored.id,
+    customer: serializeWebhookCustomer(view.customer, view.customerRecord),
+    product_id: stored.productId,
+    status: view.status,
+    collection_method: 'charge_automatically',
+    currency: c,
+    amount: toDecimal(stored.unitAmount * stored.quantity, c),
+    billing_cycle: stored.cycle,
+    quantity: stored.quantity,
+    current_period_start: dataTime(stored.periodStart),
+    current_period_end: dataTime(stored.periodEnd),
+    next_billed_at: next ? dataTime(next) : null,
+    trial_end: stored.trialEnd ? dataTime(stored.trialEnd) : null,
+    cancel_at_period_end: endsAtPeriodEnd(view),
+    canceled_at: canceled ? dataTime(canceled) : null,
+    created_at: dataTime(stored.createdAt),
+    items: [],
+    metadata: stored.metadata,
+  };
+}
+
+/* -------------------------------- invoices -------------------------------- */
+
+/**
+ * The `data` of `invoice.*` (identical across the three events). There is no
+ * invoice REST object; this payload is the whole of what Bachs publishes.
+ * `charge` is "the payment that collected the invoice, once collection is
+ * attempted" with no published shape, so it is the charge object
+ * `checkout.completed` carries.
+ */
+export function serializeInvoiceData(input: {
+  invoice: Invoice;
+  record: StoredInvoice | null;
+  items: InvoiceItem[];
+  bachsId: string;
+  subscriptionId: string | null;
+  customer: { customer_id: string; email: string; name: string | null };
+  charge: Record<string, unknown> | null;
+  metadata: Record<string, unknown>;
+}) {
+  const { invoice } = input;
+  const c = invoice.currency;
+  const subtotal = input.items
+    .filter((item) => item.metadata.bachs_credit !== true)
+    .reduce((sum, item) => sum + item.amount, 0);
+  const status = invoiceStatusOf(invoice.status);
+  const paid = status === 'paid' ? invoice.amount : 0;
+  const next = input.record ? input.record.nextPaymentAttempt : status === 'open' ? invoice.dueAt : null;
+  return {
+    invoice_id: input.bachsId,
+    subscription: input.subscriptionId ? { subscription_id: input.subscriptionId } : null,
+    customer: input.customer,
+    charge: input.charge,
+    status,
+    collection_method: 'charge_automatically',
+    currency: c,
+    subtotal: toDecimal(subtotal, c),
+    total: toDecimal(invoice.amount, c),
+    amount_paid: toDecimal(paid, c),
+    amount_remaining: toDecimal(invoice.amount - paid, c),
+    period_start: dataTime(invoice.periodStart),
+    period_end: dataTime(invoice.periodEnd),
+    attempt_count: invoice.attemptCount,
+    next_payment_attempt: status === 'open' && next ? dataTime(next) : null,
+    created_at: dataTime(invoice.createdAt),
+    metadata: input.metadata,
+  };
+}
+
+/* ------------------------------ product groups ------------------------------ */
+
+/** `ProductGroupResponse`: members expanded in full, in display order. */
+export function serializeProductGroup(
+  group: StoredProductGroup,
+  organizationId: string,
+  products: Array<ReturnType<typeof serializeProduct>>,
+) {
+  return {
+    id: group.id,
+    organization_id: organizationId,
+    name: group.name,
+    products,
+    created_at: group.createdAt,
+    updated_at: group.updatedAt,
+  };
 }

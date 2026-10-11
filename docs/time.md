@@ -86,6 +86,9 @@ frozen clock or not. Only *future* jobs wait for you.
 | `subscription.charge` | every renewal (each one enqueues the next) | `nextPaymentDate` |
 | `subscription.invoice` | the same renewal | the lead time before it — 3 days at Paystack, 1 hour at Stripe |
 | `subscription.trial_ending` | a Stripe trial | 3 days before `trial_end` |
+| `bachs.subscription.renew` | every Bachs period, and each enqueues the next; a trial | the period's end, or the trial's |
+| `bachs.subscription.retry` | a failed Bachs renewal or proration | 1, 4 and 9 days after the first failure |
+| `bachs.checkout.expire` | every Bachs checkout | its `expires_at`, plus a minute's grace for money in flight |
 | `dispute.remind` | opening a dispute | a day before the seven-day deadline |
 
 `paybox jobs` shows the queue with each job's `runAt`; `GET /api/jobs?status=ready`

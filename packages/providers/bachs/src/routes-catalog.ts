@@ -172,6 +172,8 @@ export function registerCatalogRoutes(fastify: FastifyInstance, ctx: RouteContex
     return { totalPayments, totalAmount };
   }
 
+  ctx.productTotals = productTotals;
+
   async function renderProduct(product: Product, stored: StoredProduct) {
     return serializeProduct(product, stored, {
       organizationId: ctx.organizationId,

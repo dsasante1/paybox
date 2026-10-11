@@ -28,4 +28,24 @@ export async function withLock<T>(key: string, fn: () => Promise<T>): Promise<T>
 
 export const checkoutLock = (checkoutId: string) => `checkout:${checkoutId}`;
 export const chargeLock = (paymentId: string) => `charge:${paymentId}`;
+/**
+ * Subscription-side keys, added with billing. Whenever several are held, they
+ * are taken in this order and never the reverse:
+ *
+ *   checkout -> fulfil -> customer -> subscription -> credit -> charge
+ *
+ * `fulfil` exists because a checkout's completion work (saving the card,
+ * starting the subscription) runs from the payment's success event, which can
+ * be published by a caller that already holds the checkout lock. Taking the
+ * checkout lock again there would wait on itself.
+ */
+export const fulfilLock = (checkoutId: string) => `fulfil:${checkoutId}`;
+export const customerLock = (customerId: string) => `customer:${customerId}`;
+export const subscriptionLock = (subscriptionId: string) => `subscription:${subscriptionId}`;
+/**
+ * A customer's credit balance in one currency. Two subscriptions of one
+ * customer each hold only their own lock, and both may spend the same credit,
+ * so the read, the invoice it discounts and the ledger entry run under this.
+ */
+export const creditLock = (customerId: string, currency: string) => `credit:${customerId}:${currency}`;
 export const emailLock = (email: string) => `customer-email:${email.toLowerCase()}`;

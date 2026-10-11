@@ -373,10 +373,16 @@ describe('checkout session validation', () => {
     await expectError({ pricing: { currency: 'NGN', amount: '50.00' } }, 400, 'VALIDATION_ERROR');
   });
 
-  it('answers 501 NOT_IMPLEMENTED for a recurring product and for save_payment_method', async () => {
+  it('requires a customer on a recurring product, and a card on a checkout that saves one', async () => {
+    // Both were 501 before subscriptions and saved cards existed.
     const { id } = await product({ currency: 'USD', amount: '29.00' }, { billing_cycle: { interval: 'month', frequency: 1 } });
-    await expectError({ product_cart: [{ product_id: id }] }, 501, 'NOT_IMPLEMENTED');
-    await expectError({ pricing: { currency: 'USD', amount: '29.00' }, save_payment_method: true }, 501, 'NOT_IMPLEMENTED');
+    await expectError({ product_cart: [{ product_id: id }] }, 400, 'VALIDATION_ERROR');
+    await expectError(
+      { pricing: { currency: 'USD', amount: '29.00' }, save_payment_method: true, payment_method_types: ['NGN_BANK_TRANSFER'] },
+      400,
+      'CHECKOUT_CANNOT_SAVE_PAYMENT_METHOD',
+      'https://docs.bachs.io/api-reference/error-reference#payments',
+    );
   });
 
   it('refuses payment_method_types that leave nothing to pay with', async () => {

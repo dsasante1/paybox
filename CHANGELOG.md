@@ -5,6 +5,31 @@ What each published version of `paybox-emulator` (npm) and `dsasante1/paybox`
 merging to `main` publishes nothing, and everything under **Unreleased** goes
 out with the next tag — see [docs/releasing.md](docs/releasing.md).
 
+## Unreleased
+
+- **Bachs: subscriptions and saved cards**, the second phase of its API
+  ([contract](docs/bachs.md#how-billing-behaves)).
+  - **Subscriptions.** A recurring product in a checkout starts a subscription
+    (it used to answer `501`), with trials. There are
+    `GET`/`PATCH`/`DELETE /v1/subscriptions`: plan changes prorated to the
+    cent, trial moves, card changes, metadata, and cancelling now or at the
+    period's end.
+  - **Renewals on paybox's clock.** Bachs' sandbox cannot advance time, so
+    paybox is where renewals and recovery are testable. A failed renewal goes
+    `past_due` and is retried on days 1, 4 and 9, then cancelled. With
+    `bachs.subscriptionRecovery: unpaid` it is left `unpaid` instead.
+    Downgrades become customer credit, applied to the next invoice.
+  - **Saved cards.** `save_payment_method`, with or without a charge.
+    `POST /v1/charges` charges a saved card off-session, at a fixed
+    1 USD = 1,500 NGN when the currencies differ. Bachs' test card
+    `4000000000000341` saves and then declines.
+  - **Also:** product groups, and the customer portal (`portal-sessions` and
+    paybox's portal page).
+  - **New webhooks:** `customer.subscription.*`, `invoice.*` and
+    `payment_method.saved`.
+  - No other provider's billing changed: Bachs runs its own renewal jobs
+    rather than the shared runner.
+
 ## 0.4.0 — 2026-10-11
 
 - **Behaviour change: virtual time survives a restart.** With a database

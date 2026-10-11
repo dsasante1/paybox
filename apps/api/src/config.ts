@@ -57,6 +57,15 @@ export interface PayboxConfig {
      */
     transferFee: Record<string, number>;
   };
+  /** Bachs account settings that Bachs keeps on its dashboard, with no API. */
+  bachs: {
+    /**
+     * When subscription recovery runs out: `cancel` (Bachs' default, reason
+     * `payment_failed`) or `unpaid` ("your account is set to keep unpaid
+     * subscriptions").
+     */
+    subscriptionRecovery: 'cancel' | 'unpaid';
+  };
   logLevel: string;
 }
 
@@ -94,6 +103,7 @@ const DEFAULTS: PayboxConfig = {
     // Empty: the provider's published schedule applies unless overridden.
     transferFee: {},
   },
+  bachs: { subscriptionRecovery: 'cancel' },
   logLevel: 'info',
 };
 
@@ -179,10 +189,21 @@ export function loadConfig(options: { configPath?: string; cwd?: string } = {}):
       ),
       transferFee: { ...(fromFile.balance?.transferFee ?? {}) },
     },
+    bachs: {
+      subscriptionRecovery: recoveryFrom(
+        env.PAYBOX_BACHS_SUBSCRIPTION_RECOVERY ?? fromFile.bachs?.subscriptionRecovery,
+      ),
+    },
     logLevel: env.PAYBOX_LOG_LEVEL ?? fromFile.logLevel ?? DEFAULTS.logLevel,
   };
 
   return { config, warnings: safetyWarnings(config), sourcePath };
+}
+
+function recoveryFrom(value: string | undefined): 'cancel' | 'unpaid' {
+  if (value === undefined || value === '') return DEFAULTS.bachs.subscriptionRecovery;
+  if (value === 'cancel' || value === 'unpaid') return value;
+  throw new Error(`bachs.subscriptionRecovery must be "cancel" or "unpaid", got ${JSON.stringify(value)}.`);
 }
 
 /** True when we are almost certainly inside a container (spec §26 vs §43). */

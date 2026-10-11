@@ -12,8 +12,11 @@ import { registerCatalogRoutes } from './routes-catalog.js';
 import { registerCheckoutRoutes } from './routes-checkout.js';
 import { registerPaymentRoutes } from './routes-payments.js';
 import { registerWebhookRoutes } from './routes-webhooks.js';
+import { BachsBilling, invoiceIdOf, type RecoveryMode } from './billing.js';
 import { refundRecord } from './refunds.js';
-import { customerName, type PaymentContext } from './serializers.js';
+import { registerBillingRoutes } from './routes-billing.js';
+import { registerPortalRoutes } from './routes-portal.js';
+import { customerName, type PaymentContext, type PaymentInvoiceInfo } from './serializers.js';
 import { bachsState, type StoredRefund } from './state.js';
 
 export interface BachsPluginOptions {
@@ -27,6 +30,8 @@ export interface BachsPluginOptions {
   baseUrl: string;
   basePath: string;
   allowAnyKey?: boolean;
+  /** What happens when subscription recovery runs out; a dashboard-only setting at Bachs. */
+  subscriptionRecovery?: RecoveryMode;
 }
 
 /**
@@ -46,10 +51,11 @@ export interface BachsPluginOptions {
  * Two audiences, as at Bachs:
  *
  *   merchant  `/v1/**`, Bearer `sk_sandbox_…`.
- *   payer     `/c/:token/**`, the hosted checkout. Unauthenticated -- a
- *             payer's browser holds no key -- and addressed by an unguessable
- *             token that the merchant API never exposes except inside
- *             `checkout_url`.
+ *   payer     `/c/:token/**`, the hosted checkout, and `/portal/s/:token/**`,
+ *             the customer portal. Unauthenticated -- a payer's browser holds
+ *             no key -- and addressed by an unguessable token that the
+ *             merchant API never exposes except inside `checkout_url` or a
+ *             portal session's `url`.
  */
 export const bachsPlugin: FastifyPluginAsync<BachsPluginOptions> = async (fastify, options) => {
   const { engine, storage, clock, ids } = options;
@@ -80,8 +86,32 @@ export const bachsPlugin: FastifyPluginAsync<BachsPluginOptions> = async (fastif
   const authenticate = (request: FastifyRequest): string =>
     assertBachsCredentials(request.headers.authorization, { allowAnyKey: options.allowAnyKey ?? false });
 
+  const billing = new BachsBilling({
+    engine,
+    storage,
+    clock,
+    ids,
+    recovery: options.subscriptionRecovery ?? 'cancel',
+  });
+
+  async function invoiceInfo(engineId: string | null): Promise<PaymentInvoiceInfo | null> {
+    if (!engineId) return null;
+    const invoice = await storage.invoices.byId(engineId);
+    if (!invoice) return null;
+    const record = await state.invoices.get(engineId);
+    return {
+      invoice_id: invoiceIdOf(invoice.id),
+      number: invoice.number,
+      subscription_id: record?.subscriptionId ?? null,
+      period_start: invoice.periodStart,
+      period_end: invoice.periodEnd,
+      kind: record?.kind ?? (invoice.billingReason === 'subscription_update' ? 'proration' : 'cycle'),
+    };
+  }
+
   async function paymentContext(payment: Payment): Promise<PaymentContext> {
     const checkout = await state.checkouts.byPayment(payment.id);
+    const meta = await state.paymentMeta.get(payment.id);
     const customer = payment.customerId ? await storage.customers.byId(payment.customerId) : null;
     const refunds: StoredRefund[] = [];
     let hasLiveRefund = false;
@@ -91,6 +121,8 @@ export const bachsPlugin: FastifyPluginAsync<BachsPluginOptions> = async (fastif
     }
     return {
       checkout,
+      meta,
+      invoice: await invoiceInfo(meta?.invoiceEngineId ?? null),
       customer: customer
         ? {
             email: customer.email,
@@ -118,6 +150,8 @@ export const bachsPlugin: FastifyPluginAsync<BachsPluginOptions> = async (fastif
     basePath: options.basePath,
     authenticate,
     paymentContext,
+    billing,
+    productTotals: () => Promise.reject(new Error('catalog routes not registered')),
     // Replaced by the catalog routes, which own customer creation.
     customers: {
       create: () => Promise.reject(new Error('customer routes not registered')),
@@ -128,6 +162,8 @@ export const bachsPlugin: FastifyPluginAsync<BachsPluginOptions> = async (fastif
   registerCatalogRoutes(fastify, ctx);
   registerCheckoutRoutes(fastify, ctx);
   registerPaymentRoutes(fastify, ctx);
+  registerBillingRoutes(fastify, ctx);
+  registerPortalRoutes(fastify, ctx);
   registerWebhookRoutes(fastify, ctx);
 };
 

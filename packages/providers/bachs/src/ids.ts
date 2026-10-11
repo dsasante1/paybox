@@ -25,6 +25,23 @@ export function hexId(ids: IdFactory, prefix: string, length = 32): string {
 }
 
 /**
+ * An id derived from something already unique rather than drawn: a Bachs id
+ * for a core row (an invoice's `inv_` from its core id) that every reader can
+ * recompute, so nothing has to be indexed before the row's own events fire.
+ */
+export function derivedId(prefix: string, seed: string, length = 32): string {
+  return `${prefix}_${hexFrom(seed, length)}`;
+}
+
+/** The portal URL's credential: 22 mixed-case alphanumerics, like Bachs' example. */
+export function portalToken(ids: IdFactory): string {
+  const digest = createHash('sha256').update(`portal:${ids.token(26)}`).digest();
+  let out = '';
+  for (let i = 0; i < 22; i++) out += BASE62[digest[i]! % 62];
+  return out;
+}
+
+/**
  * A refund id.
  *
  * The spec's own `RefundResponse` example is a UUID
