@@ -907,4 +907,25 @@ export const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    id: '0023_id_state',
+    sql: `
+      -- How many times this database has been booted. Every id comes from a
+      -- stream seeded by PAYBOX_SEED, and each boot used to start that stream
+      -- from the beginning: the first ids minted after a restart were the ids
+      -- minted first last time, already stored, and the write failed. A boot
+      -- after the first now mints from a stream of its own, chosen by this
+      -- count, so ids stay reproducible (same seed, same boots, same ids)
+      -- without ever repeating.
+      --
+      -- One row. Not emptied by \`paybox reset\`, like clock_state: carrying
+      -- on counting is harmless, and starting again would replay ids a
+      -- database restored from a backup might still hold.
+      CREATE TABLE id_state (
+        id         INTEGER PRIMARY KEY CHECK (id = 1),
+        boots      INTEGER NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `,
+  },
 ];

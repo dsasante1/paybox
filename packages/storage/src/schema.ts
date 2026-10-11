@@ -169,6 +169,12 @@ export interface ClockStateRow {
   updated_at: string;
 }
 
+export interface IdStateRow {
+  id: number;
+  boots: number;
+  updated_at: string;
+}
+
 /**
  * Adapter scratch space (migration 0019).
  *
@@ -479,6 +485,7 @@ export interface Database {
   idempotency_keys: IdempotencyRow;
   provider_state: ProviderStateRow;
   clock_state: ClockStateRow;
+  id_state: IdStateRow;
   authorizations: AuthorizationRow;
   dedicated_accounts: DedicatedAccountRow;
   instrument_setups: InstrumentSetupRow;

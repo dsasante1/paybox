@@ -151,7 +151,9 @@ later payment receives.
 What stays fixed is the *sequence of operations*: the tenth payment created
 in a run always gets the same id, but if your test creates nine payments
 instead of ten before it, the id changes. Reproducibility is per run, not per
-resource.
+resource. On a database file, a restart counts as part of that sequence: each
+start after the first mints ids from a stream of its own, so ids never repeat
+ones already stored, and the same restarts reproduce the same ids.
 
 ## Emulator-only controls
 

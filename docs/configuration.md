@@ -67,7 +67,7 @@ logLevel: info            # debug | info | warn | error
 | `host` | `PAYBOX_HOST` | `127.0.0.1` | Binding anything but `127.0.0.1`, `localhost` or `::1` prints a security warning. Inside a container (`PAYBOX_IN_CONTAINER=1`, `/.dockerenv`) the warning is softened. |
 | `port` | `PAYBOX_PORT` | `8080` | |
 | `database.path` | `PAYBOX_DATABASE` | `./data/paybox.db` | Relative to the working directory; the directory is created if missing. `:memory:` keeps nothing between starts. |
-| `seed` | `PAYBOX_SEED` | `paybox` | Any string. Seeds every id, generated reference, local credential, and webhook retry jitter. |
+| `seed` | `PAYBOX_SEED` | `paybox` | Any string. Seeds every id, generated reference, local credential, and webhook retry jitter. Local credentials are the same on every start. Ids continue across a restart on a database file rather than repeat: each start after the first mints from a stream of its own ([time.md](time.md#two-modes)). |
 | `freezeClock` | `PAYBOX_FREEZE_CLOCK` | `false` | Start frozen. `paybox time unfreeze` resumes at runtime. |
 | `startAt` | `PAYBOX_START_AT` | wall-clock now | ISO-8601 instant. Works frozen or flowing; flowing time simply starts from here. Used on a fresh database, or when it differs from the last start; otherwise a restart resumes the recorded clock ([time.md](time.md)). |
 | `webhooks.retry.enabled` | `PAYBOX_WEBHOOK_RETRY` | `true` | `false` means one attempt per delivery, then `exhausted`. |

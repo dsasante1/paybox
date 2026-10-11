@@ -540,6 +540,24 @@ export interface ClockRepository {
 }
 
 /**
+ * How many times this database has been booted (migration 0023).
+ *
+ * The id stream is seeded, so without this a restart would mint the same ids
+ * as the boot before it -- ids already stored. See `apps/api/src/context.ts`.
+ */
+export interface IdStateRepository {
+  /**
+   * Record a boot and return how many came before it: 0 on a database never
+   * booted. A database with no count but rows in any table was written by a
+   * paybox from before the count existed: it has been booted at least once,
+   * and is not treated as new. `clockRecorded` says a clock row existed
+   * before this boot wrote its own (every boot since 0.4.0 records one); the
+   * clock table itself is not counted, because this boot has written to it.
+   */
+  recordBoot(input: { now: string; clockRecorded: boolean }): Promise<number>;
+}
+
+/**
  * The storage port. `transaction` hands back a Storage bound to the open
  * transaction, so the engine can append an event and update the payment
  * projection atomically -- the invariant the whole event-log design rests on.
@@ -570,6 +588,8 @@ export interface Storage {
   readonly providerState: ProviderStateRepository;
   /** The virtual clock as last recorded; see `ClockRepository`. */
   readonly clock: ClockRepository;
+  /** Boots of this database; see `IdStateRepository`. */
+  readonly idState: IdStateRepository;
   transaction<T>(fn: (tx: Storage) => Promise<T>): Promise<T>;
   /** Drop all rows but keep the schema (spec §27 `paybox reset`). */
   reset(): Promise<void>;

@@ -74,6 +74,7 @@ export interface PayboxContext {
   config: PayboxConfig;
   storage: Storage;
   clock: VirtualClock;
+  /** Seeded, and fresh on each start of a database; see `ids`. */
   random: Random;
   ids: IdFactory;
   bus: EventBus;
@@ -193,7 +194,32 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
     });
   });
   const random = createRandom(config.seed);
-  const ids = createIdFactory(random);
+  // Ids continue across a restart rather than replay. Every id is drawn from
+  // a stream seeded by PAYBOX_SEED, and each boot used to start it from the
+  // beginning -- minting, first, the ids the previous boot minted first, which
+  // the database already holds ("UNIQUE constraint failed"). So the database
+  // counts its boots (migration 0023), and a boot after the first mints from a
+  // stream of its own. A fresh database, and :memory:, mint exactly what they
+  // always have; the same seed and the same restarts mint the same ids.
+  //
+  // Local credentials stay on the seed's own stream on every boot: Tingg's
+  // and Flutterwave v4's are matched exactly, and stored webhook secrets were
+  // derived from them, so a restart must never change them.
+  const keyIds = createIdFactory(random);
+  //
+  // A start is counted when the context is built, before the server binds:
+  // a start that then fails (the port taken) still counts. Same seed, same
+  // starts, same ids -- failed ones included.
+  const priorBoots = await storage.idState.recordBoot({
+    now: clock.nowISO(),
+    // Read before this boot recorded its own clock.
+    clockRecorded: recorded !== null,
+  });
+  // The per-start stream. Anything that mints a stored value -- an id, a
+  // generated reference -- draws from it or from `ids`; streams that only
+  // decide delays and chances keep using `random`.
+  const bootRandom = priorBoots === 0 ? random : random.fork(`boot-${priorBoots}`);
+  const ids = priorBoots === 0 ? keyIds : createIdFactory(bootRandom);
   const bus = new EventBus();
   const logger = new PayboxLogger({
     clock,
@@ -417,17 +443,17 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
     await simulator.expire(paymentId);
   });
 
-  const keys = generateLocalKeys(ids.token(20));
-  const stripeKeys = generateStripeKeys(ids.token(20));
-  const flutterwaveKeys = generateFlutterwaveKeys(ids.token(20));
-  const koraKeys = generateKoraKeys(ids.token(20));
-  const quiddpayKeys = generateQuiddpayKeys(ids.token(20));
-  const tinggKeys = generateTinggKeys(ids.token(20));
-  const wewireKeys = generateWewireKeys(ids.token(20));
-  const wiseKeys = generateWiseKeys(ids.token(20));
-  const flutterwaveV4 = generateV4Credentials(ids.token(20));
-  // From a stream of its own: drawing from `ids` here would shift every id
-  // minted after startup, and with it every literal id the suite asserts.
+  const keys = generateLocalKeys(keyIds.token(20));
+  const stripeKeys = generateStripeKeys(keyIds.token(20));
+  const flutterwaveKeys = generateFlutterwaveKeys(keyIds.token(20));
+  const koraKeys = generateKoraKeys(keyIds.token(20));
+  const quiddpayKeys = generateQuiddpayKeys(keyIds.token(20));
+  const tinggKeys = generateTinggKeys(keyIds.token(20));
+  const wewireKeys = generateWewireKeys(keyIds.token(20));
+  const wiseKeys = generateWiseKeys(keyIds.token(20));
+  const flutterwaveV4 = generateV4Credentials(keyIds.token(20));
+  // From a stream of its own: drawing from the seed's id stream here would
+  // shift every id minted after startup on a database's first boot.
   const bachsKeys = generateBachsKeys(createIdFactory(random.fork('bachs-keys')).token(20));
   // Registered here rather than with the others because its envelope carries
   // the organization id derived just above. The dispatcher looks formatters
@@ -444,7 +470,9 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
     config,
     storage,
     clock,
-    random,
+    // The per-start stream: a provider that generates stored values from it
+    // (WeWire's fallback references) must not repeat them after a restart.
+    random: bootRandom,
     ids,
     bus,
     engine,

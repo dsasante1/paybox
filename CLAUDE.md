@@ -161,6 +161,8 @@ Nothing outside `core/src/time/`, `core/src/random.ts`, `shared/src/ids.ts`, and
 
 **Virtual time survives a restart** on a database file. The clock is recorded on every change (migration 0022, `storage.clock`), and `buildContext` resumes from it unless `PAYBOX_START_AT` differs from the value recorded at the last start, in which case the new value wins: that is the documented way to move to an earlier date. A fresh database and `:memory:` start as before, and `paybox reset` leaves the clock alone. Resuming happens inside `VirtualClock` (its `resume` option), the one place allowed to read the wall clock.
 
+**Ids continue across a restart, too.** The id stream is seeded, so each start used to replay it and mint ids already stored ("UNIQUE constraint failed"). The database counts its starts (migration 0023, `storage.idState`, kept by reset). A start after the first mints from `random.fork('boot-<n>')`, while local credentials always come from the seed's own `ids` stream (`keyIds` in `buildContext`): Tingg's and Flutterwave v4's are matched exactly. A fresh database and `:memory:` are byte-identical to before. A database that holds rows in any table but no count (written by an older paybox) counts as already started. `context.random` is that per-start stream too (WeWire's fallback references draw from it); only streams that decide delays and chances (`network`, `webhooks`, jitter) stay on the root, because they store nothing.
+
 **`VirtualClock#at` is load-bearing.** The scheduler runs each due job at the instant it was *scheduled for*, not at the time the clock has since reached. Without it, `time advance 2h` would fire a retry due at T+4s but stamp it T+2h and compute the next attempt from there — so a five-attempt ladder would need five separate advances, and event-log timestamps would be wrong.
 
 ### Storage conventions
@@ -187,7 +189,7 @@ The engine only raises `PayboxError` with a code from the `ERROR_CODES` list. Ea
 
 ## Testing
 
-60 suites, 1093 tests. The load-bearing one is in `tests/paystack-subscriptions.test.ts`: a monthly subscription plus a single `advance` must yield twelve invoices one calendar month apart, each payment stamped at its own period start. If that breaks, `VirtualClock#at` has broken.
+63 suites, 1119 tests. The load-bearing one is in `tests/paystack-subscriptions.test.ts`: a monthly subscription plus a single `advance` must yield twelve invoices one calendar month apart, each payment stamped at its own period start. If that breaks, `VirtualClock#at` has broken.
 
 `tests/helpers.ts` exposes `createHarness()` — in-memory SQLite, clock frozen at a fixed instant, fixed seed. Assertions can therefore be exact (literal ids, exact timestamps, gapless sequence numbers) rather than approximate. Prefer it over ad-hoc setup.
 
