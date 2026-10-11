@@ -7,6 +7,12 @@ out with the next tag — see [docs/releasing.md](docs/releasing.md).
 
 ## Unreleased
 
+- **The API reference at `/docs` lists Quid Payments and Tingg.** Their routes
+  were missing from `/openapi.json` since each was added: the document
+  iterated a hand-kept copy of the provider list that nobody updated. Every
+  place that enumerates the served surface — the OpenAPI document, `paybox
+  coverage`, the generated README block — now reads one list
+  (`@paybox/api/coverage`), and a test fails if a provider is missing from it.
 - **A manual webhook retry records the attempt it grants.** `paybox webhook
   retry`, the dashboard's Retry button and `POST /api/webhooks/deliveries/:id/retry`
   always sent one more attempt, but the delivery row kept its old

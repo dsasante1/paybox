@@ -398,6 +398,13 @@ describe('what the manifests report', () => {
     ]);
   });
 
+  it('is exactly the list the OpenAPI document, the CLI and the README read', async () => {
+    const { COVERAGE_MANIFESTS } = await import('@paybox/api/coverage');
+    expect(COVERAGE_MANIFESTS.map((m) => m.id).sort()).toEqual(
+      subjects.map((s) => s.manifest.id).sort(),
+    );
+  });
+
   it('classifies every entry', () => {
     const statuses = new Set<string>();
     for (const { manifest } of subjects) {
