@@ -29,6 +29,18 @@ out with the next tag — see [docs/releasing.md](docs/releasing.md).
     `payment_method.saved`.
   - No other provider's billing changed: Bachs runs its own renewal jobs
     rather than the shared runner.
+- **Fixed: ids repeated after a restart.** On a database file, every start
+  began the seeded id stream again. The first ids after a restart were ones
+  already stored, and the write failed with `UNIQUE constraint failed`. Inside
+  a job, that failure killed the job: a webhook retry, a payment expiry, a
+  renewal.
+  - A database now counts its starts (migration 0023), and each start after
+    the first mints ids, and generated references such as WeWire's, from a
+    stream of its own.
+  - Local credentials are unchanged, and so are a fresh database and
+    `:memory:`.
+  - The same seed with the same restarts still mints the same ids.
+  - A database from an earlier version is recognised as already started.
 
 ## 0.4.0 — 2026-10-11
 

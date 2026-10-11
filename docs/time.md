@@ -52,6 +52,20 @@ start. Releases up to 0.3.0 rewound to `PAYBOX_START_AT` on every restart, which
 put the clock earlier than events and jobs already in the database, so jobs
 that had been due stopped being due.
 
+**Ids continue across a restart too.** Ids come from a stream seeded by
+`PAYBOX_SEED`. Up to 0.4.0 every start began that stream again, so the first
+ids after a restart repeated ids already stored, and the write failed with
+`UNIQUE constraint failed`. A database now counts its starts, and each start
+after the first mints ids from a stream of its own:
+
+- local credentials are the same on every start;
+- a fresh database, and `:memory:`, mint exactly the ids they always have;
+- the same seed with the same number of restarts mints the same ids. A start
+  that fails after opening the database (the port already taken, say) still
+  counts;
+- generated references (WeWire's, when you send none) continue the same way;
+- `paybox reset` keeps the count.
+
 ## What an advance does
 
 `POST /api/time` (and therefore every `paybox time` command):
@@ -170,7 +184,8 @@ With the clock frozen at a known instant and a fixed seed:
 
 - every `createdAt`, `expiresAt`, `nextPaymentDate`, `nextRetryAt` is a value
   you can assert literally;
-- every id and generated reference is stable across runs;
+- every id and generated reference is stable across runs (on a database
+  file, across runs that restart it the same number of times);
 - retry jitter is stable, so `nextRetryAt` is too;
 - the sequence numbers on events are gapless, so ordering is total even when
   every timestamp is identical.

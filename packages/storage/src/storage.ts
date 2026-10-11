@@ -26,6 +26,7 @@ import type {
   ProviderStateRepository,
   ClockRecord,
   ClockRepository,
+  IdStateRepository,
   PaymentFilter,
   PaymentRepository,
   RecipientRepository,
@@ -2021,6 +2022,25 @@ class SqliteStorage implements Storage {
     },
   };
 
+  readonly idState: IdStateRepository = {
+    recordBoot: async ({ now, clockRecorded }) => {
+      // Read and bump in one transaction, so two processes booting one file
+      // cannot both take the same count.
+      const run = async (db: DB) => {
+        const row = await db.selectFrom('id_state').select('boots').where('id', '=', 1).executeTakeFirst();
+        const prior = row ? row.boots : clockRecorded || (await holdsAnyRow(db)) ? 1 : 0;
+        await db
+          .insertInto('id_state')
+          .values({ id: 1, boots: prior + 1, updated_at: now })
+          .onConflict((oc) => oc.column('id').doUpdateSet({ boots: prior + 1, updated_at: now }))
+          .execute();
+        return prior;
+      };
+      if (this.#inTransaction) return run(this.#db);
+      return (this.#db as Kysely<Database>).transaction().execute(run);
+    },
+  };
+
   /**
    * Adapter scratch space (migration 0019).
    *
@@ -2075,6 +2095,24 @@ export interface OpenStorageOptions {
 export interface OpenedStorage {
   storage: Storage;
   db: Kysely<Database>;
+}
+
+/**
+ * Whether any table holds a row, apart from the boot count, the migration log
+ * and the clock (which the booting process has already written). Every table, not a chosen few: plenty are written without
+ * an event (plans, products, recipients, provider state), and a database
+ * that held only those has still minted ids.
+ */
+async function holdsAnyRow(db: DB): Promise<boolean> {
+  const tables = await sql<{ name: string }>`
+    SELECT name FROM sqlite_master
+    WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('id_state', 'schema_migrations', 'clock_state')
+  `.execute(db);
+  for (const { name } of tables.rows) {
+    const found = await sql`SELECT 1 FROM ${sql.ref(name)} LIMIT 1`.execute(db);
+    if (found.rows.length > 0) return true;
+  }
+  return false;
 }
 
 /** Open the database, apply pending migrations, and return the storage port. */
