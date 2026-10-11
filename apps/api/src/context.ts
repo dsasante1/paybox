@@ -54,6 +54,7 @@ import {
   BACHS_SUBSCRIPTION_RENEW_JOB,
   BACHS_SUBSCRIPTION_RETRY_JOB,
   BachsBilling,
+  BachsDisputes,
   BachsTreasury,
   BACHS_PAYOUT_ADVANCE_JOB,
   BACHS_PAYOUT_SCHEDULE_JOB,
@@ -406,8 +407,10 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
   scheduler.register('dispute.remind', async (job) => {
     const disputeId = String(job.payload.disputeId ?? '');
     const dispute = await engine.getDispute(disputeId);
-    // Nothing to remind anyone about once it has been settled.
-    if (!dispute || dispute.status === 'resolved') return;
+    // Nothing to remind anyone about once it has been settled. Bachs reminds
+    // by email only, "on a reminder cadence while it still needs a response"
+    // (connect/disputes): its status does not move, so neither does paybox's.
+    if (!dispute || dispute.status === 'resolved' || dispute.provider === 'bachs') return;
     await engine.transitionDispute(dispute.id, 'awaiting_bank_feedback', {
       eventType: 'dispute.reminder',
     });
@@ -494,6 +497,16 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
   bus.on('refund.successful', bachsTreasury.onMoneyMoved);
   bus.on('refund.failed', bachsTreasury.onMoneyMoved);
   bus.on('transfer.failed', bachsTreasury.onPayoutFailed);
+  // A dispute's fee, the amount it sets aside and that amount's release are
+  // worked out from the dispute rows, so a dispute opened or ruled on by
+  // paybox's generic tooling moves the balance too. A refund that succeeds
+  // while a dispute on its charge is undecided prevents it.
+  bus.on('dispute.created', bachsTreasury.onMoneyMoved);
+  bus.on('dispute.resolved', bachsTreasury.onMoneyMoved);
+  const bachsDisputes = new BachsDisputes({ engine, storage, clock, ids, treasury: bachsTreasury });
+  // After the dispatcher's catch-all, so `refund.paid` is built before the
+  // `dispute.updated` the prevention sends.
+  bus.onAny(bachsDisputes.onRefundSucceeded);
   scheduler.register(BACHS_PAYOUT_ADVANCE_JOB, bachsTreasury.handleAdvanceJob);
   scheduler.register(BACHS_PAYOUT_SCHEDULE_JOB, bachsTreasury.handleScheduleJob);
   scheduler.register(

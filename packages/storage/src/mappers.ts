@@ -1000,6 +1000,8 @@ export function disputePatch(patch: Partial<Dispute>): Partial<DisputeRow> {
   if (patch.resolution !== undefined) out.resolution = patch.resolution;
   if (patch.refundAmount !== undefined) out.refund_amount = patch.refundAmount;
   if (patch.resolvedAt !== undefined) out.resolved_at = patch.resolvedAt;
+  if (patch.dueAt !== undefined) out.due_at = patch.dueAt;
+  if (patch.category !== undefined) out.category = patch.category;
   if (patch.evidence !== undefined) {
     out.evidence = patch.evidence ? writeJson(patch.evidence) : null;
   }

@@ -245,6 +245,11 @@ reads and controls them.
   `merchant-accepted` (default) raises and settles a real refund;
   `declined` closes the dispute with no money moving.
 
+On a Bachs payment these are Bachs disputes too: they appear in
+`GET /bachs/v1/disputes`, the $15 fee and the hold follow Bachs' rules, and the
+reminder job leaves the status alone, since Bachs reminds by email only. See
+[docs/bachs.md](bachs.md#how-disputes-behave).
+
 ## Events
 
 - `GET /api/events?limit=100&type=payment.successful&resourceId=pay_…`

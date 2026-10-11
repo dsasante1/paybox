@@ -172,7 +172,8 @@ export function registerPaymentRoutes(fastify: FastifyInstance, ctx: RouteContex
 
       // What was collected, not what was asked: an accepted underpayment
       // holds only what arrived.
-      const refundable = amountPaidOf(payment) - payment.amountRefunded;
+      // A lost dispute's amount has gone back to the customer already.
+      const refundable = amountPaidOf(payment) - payment.amountRefunded - (await ctx.disputes.lostOn(payment.id));
       const amount = body.amount ? toMinor(body.amount, payment.currency, 'amount') : refundable;
       if (amount > refundable) {
         throw fail(

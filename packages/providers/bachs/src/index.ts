@@ -45,5 +45,6 @@ export {
 } from './billing.js';
 export { NGN_PER_USD, convertMinor } from './rates.js';
 export { BachsTreasury, BACHS_PAYOUT_ADVANCE_JOB, BACHS_PAYOUT_SCHEDULE_JOB } from './treasury.js';
+export { BachsDisputes } from './disputes.js';
 export { bachsPlugin, registerBachs, type BachsPluginOptions } from './routes.js';
 export { BACHS_COVERAGE } from './coverage.js';

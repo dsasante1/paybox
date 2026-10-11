@@ -49,3 +49,11 @@ export const subscriptionLock = (subscriptionId: string) => `subscription:${subs
  */
 export const creditLock = (customerId: string, currency: string) => `credit:${customerId}:${currency}`;
 export const emailLock = (email: string) => `customer-email:${email.toLowerCase()}`;
+/**
+ * One dispute's evidence, submission and ruling. Opening a dispute takes the
+ * charge lock first (one open dispute per charge); balance movements come
+ * after, under the treasury's own key:
+ *
+ *   charge -> dispute -> treasury
+ */
+export const disputeLock = (disputeId: string) => `dispute:${disputeId}`;

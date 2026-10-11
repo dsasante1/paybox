@@ -60,6 +60,8 @@ export interface StoredProduct {
   billingCycle: Cadence | null;
   trialPeriod: Cadence | null;
   archivedAt: string | null;
+  /** Upload ids, in order (`media` on PATCH: "Ordered list of upload IDs. Replaces existing media."). */
+  media?: string[];
 }
 
 export interface StoredCustomer {
@@ -403,6 +405,50 @@ export interface StoredVirtualAccount {
   createdAt: string;
 }
 
+/**
+ * What Bachs knows about a dispute beyond the core row, keyed by its `dsp_`
+ * id (the core row's `providerDisputeId`). Written before the core row, so
+ * the listeners on `dispute.created` already see whether it is a warning. A
+ * dispute opened by paybox's own tooling has none, and reads as an ordinary,
+ * unwarned dispute with nothing submitted.
+ */
+export interface StoredDispute {
+  /** Creation order; see `counters`. */
+  seq: number;
+  id: string;
+  /** Opened as an early dispute warning, which carries its own fee. */
+  warning: boolean;
+  /** When a warned payment went on to become a dispute: the $15 fee and the hold apply from here. */
+  escalatedAt: string | null;
+  evidenceUpdatedAt: string | null;
+  submissions: StoredSubmission[];
+}
+
+export interface StoredSubmission {
+  id: string;
+  status: 'submitted';
+  triggerSource: 'merchant_submit';
+  submittedAt: string;
+  failedAt: string | null;
+  attemptSequence: number;
+}
+
+/** A stored file (`upl_…`). Its bytes are kept under their own key so a listing never loads them. */
+export interface StoredUpload {
+  seq: number;
+  id: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  scope: string;
+  /** A dispute document is served only through the API: no `url`. */
+  private: boolean;
+  linkedResourceType: string | null;
+  linkedResourceId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface StoredIdempotency {
   fingerprint: string;
   state: 'in_progress' | 'done';
@@ -601,6 +647,24 @@ export function bachsState(storage: Storage, now: () => string) {
         return index ? read<StoredVirtualAccount>(`va:${index.currency}`) : null;
       },
       indexId: (id: string, currency: string) => write(`va-id:${id}`, { currency }),
+    },
+    disputes: {
+      get: (id: string) => read<StoredDispute>(`dispute:${id}`),
+      put: (dispute: StoredDispute) => write(`dispute:${dispute.id}`, dispute),
+      delete: (id: string) => storage.providerState.delete(PROVIDER, `dispute:${id}`),
+    },
+    uploads: {
+      get: (id: string) => read<StoredUpload>(`upload:${id}`),
+      put: (upload: StoredUpload) => write(`upload:${upload.id}`, upload),
+      async bytes(id: string): Promise<Buffer | null> {
+        const value = await storage.providerState.get(PROVIDER, `upload-bytes:${id}`);
+        return value === null ? null : Buffer.from(JSON.parse(value) as string, 'base64');
+      },
+      putBytes: (id: string, bytes: Buffer) => write(`upload-bytes:${id}`, bytes.toString('base64')),
+      async delete(id: string): Promise<void> {
+        await storage.providerState.delete(PROVIDER, `upload:${id}`);
+        await storage.providerState.delete(PROVIDER, `upload-bytes:${id}`);
+      },
     },
     idempotency: {
       get: (scope: string) => read<StoredIdempotency>(`idem:${scope}`),

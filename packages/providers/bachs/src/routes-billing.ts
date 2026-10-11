@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import type { Subscription } from '@paybox/shared';
 import { resolveCard } from './cards.js';
 import { fail } from './errors.js';
+import { mediaOf } from './uploads.js';
 import { assertMetadata, newestFirst, notFound, readPage } from './http.js';
 import { hexId } from './ids.js';
 import { toMinor } from './money.js';
@@ -234,6 +235,7 @@ export function registerBillingRoutes(fastify: FastifyInstance, ctx: RouteContex
         serializeProduct(product, record, {
           organizationId: ctx.organizationId,
           ...(await ctx.productTotals(productId)),
+          media: await mediaOf(state, record, `${ctx.baseUrl}${ctx.basePath}`),
         }),
       );
     }

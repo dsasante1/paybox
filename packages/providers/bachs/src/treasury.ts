@@ -2,10 +2,11 @@ import type { Clock, IdFactory, PayboxEvent, Transfer } from '@paybox/shared';
 import type { Job, PaymentEngine, Storage } from '@paybox/core';
 import { fail } from './errors.js';
 import { everyRow } from './http.js';
-import { derivedId, hexId } from './ids.js';
+import { derivedId, disputeIdOf, hexId } from './ids.js';
 import { withLock } from './locks.js';
 import { convertMinor, exchangeRate, isHeld, isStablecoin } from './rates.js';
 import { amountPaidOf, feeOf } from './serializers.js';
+import { bachsDisputeStatus, isOpenDispute } from './status.js';
 import {
   bachsState,
   type BachsState,
@@ -42,6 +43,24 @@ const INSTANT_DELAY_MS = 60_000;
 
 /** A payment that collected money, whatever has been refunded since: it owes its processing fee. */
 const COLLECTED: readonly string[] = ['successful', 'partially_refunded', 'refunded'];
+
+/**
+ * for-you/fees: "Dispute / Chargeback: $15.00 per dispute" and "Early dispute
+ * warning: $29.00 per payment", in US cents. Each is taken in the disputed
+ * charge's settlement currency (an NGN charge pays in naira at the fixed
+ * rate), the currency a lost dispute lands in too (connect/disputes).
+ */
+export const DISPUTE_FEE_USD = 1_500;
+export const WARNING_FEE_USD = 2_900;
+
+/** One ledger movement a dispute owes but the ledger does not yet hold. */
+interface DisputeMovement {
+  direction: 'debit' | 'credit';
+  currency: string;
+  amount: number;
+  reason: 'dispute_fee' | 'dispute_warning_fee' | 'dispute_hold' | 'dispute_hold_release';
+  resourceId: string;
+}
 
 /** Every currency movement serialises on this one key: the sweep, payouts and conversions all read and move balances. */
 const TREASURY_LOCK = 'treasury';
@@ -146,6 +165,7 @@ export class BachsTreasury {
 
   async #sweep(): Promise<void> {
     await this.#chargeFees();
+    await this.#settleDisputes();
     // A hold whose refund has finished comes back here too, not only from the
     // refund's own event: that event lives in memory, and a crash or a failing
     // handler must not leave the hold taken for good.
@@ -228,6 +248,85 @@ export class BachsTreasury {
   }
 
   /**
+   * What disputes owe the ledger, worked out from the dispute rows rather
+   * than from the call that moved each one, so a dispute opened or ruled on
+   * by any path -- the Bachs routes, the control API, `paybox dispute` -- and
+   * a crash between the row and its ledger entry come out the same.
+   *
+   * guides/disputes/overview: the fee is "deducted as soon as the dispute is
+   * created, whether it is later won or lost", and the disputed amount "is
+   * taken out of your available balance and set aside". A win, a closure or
+   * a prevention releases it; a loss keeps it, the amount having "gone back
+   * to the customer", so a loss needs no second debit. An unescalated warning
+   * pays its own fee, once per payment, and sets nothing aside: no chargeback
+   * has been filed yet.
+   */
+  async #disputeMovements(): Promise<DisputeMovement[]> {
+    const ledger = await this.#ledger();
+    const seen = new Set(ledger.map((entry) => `${entry.reason}:${entry.resourceId}`));
+    const holds = new Map(
+      ledger.filter((entry) => entry.reason === 'dispute_hold').map((entry) => [entry.resourceId, entry.amount]),
+    );
+    const owed: DisputeMovement[] = [];
+    const disputes = await everyRow((page) => this.#storage.disputes.list({ provider: PROVIDER, ...page }));
+    for (const dispute of disputes) {
+      const record = await this.state.disputes.get(disputeIdOf(dispute));
+      const currency = settlementCurrency(dispute.currency);
+      const status = bachsDisputeStatus(dispute);
+      const warningOnly = record !== null && record.warning && record.escalatedAt === null;
+      const owe = (movement: DisputeMovement) => {
+        const key = `${movement.reason}:${movement.resourceId}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        owed.push(movement);
+      };
+      if (record?.warning) {
+        owe({
+          direction: 'debit',
+          currency,
+          amount: convertMinor(WARNING_FEE_USD, 'USD', currency),
+          reason: 'dispute_warning_fee',
+          resourceId: `warning:${dispute.paymentId}`,
+        });
+      }
+      if (warningOnly) continue;
+      owe({
+        direction: 'debit',
+        currency,
+        amount: convertMinor(DISPUTE_FEE_USD, 'USD', currency),
+        reason: 'dispute_fee',
+        resourceId: dispute.id,
+      });
+      // Kept while undecided and on a loss. A loss recorded by the generic
+      // tooling raised a real refund, which took the money itself.
+      const keep = isOpenDispute(status) || dispute.providerStatus === 'lost';
+      const amount = holds.get(dispute.id) ?? convertMinor(dispute.refundAmount, dispute.currency, currency);
+      if (!seen.has(`dispute_hold:${dispute.id}`)) {
+        // A dispute ruled on before its hold was written never needs one,
+        // unless it was lost.
+        if (keep) owe({ direction: 'debit', currency, amount, reason: 'dispute_hold', resourceId: dispute.id });
+      } else if (!keep) {
+        owe({ direction: 'credit', currency, amount, reason: 'dispute_hold_release', resourceId: dispute.id });
+      }
+    }
+    return owed;
+  }
+
+  async #settleDisputes(): Promise<void> {
+    for (const movement of await this.#disputeMovements()) {
+      const input = {
+        provider: PROVIDER,
+        currency: movement.currency,
+        amount: movement.amount,
+        reason: movement.reason,
+        resourceId: movement.resourceId,
+      };
+      if (movement.direction === 'debit') await this.#engine.debitBalance(input);
+      else await this.#engine.creditBalance(input);
+    }
+  }
+
+  /**
    * A held balance as Bachs reports it: the engine's, plus anything a
    * non-held currency has netted that no sweep has moved yet. Pure: a read
    * neither writes nor draws an id.
@@ -243,6 +342,10 @@ export class BachsTreasury {
     for (const refundId of await this.#finishedHolds()) {
       const hold = (await this.#ledger()).find((entry) => entry.reason === 'refund_hold' && entry.resourceId === refundId);
       if (hold && hold.currency === currency) balance += hold.amount;
+    }
+    for (const movement of await this.#disputeMovements()) {
+      if (movement.currency !== currency) continue;
+      balance += movement.direction === 'credit' ? movement.amount : -movement.amount;
     }
     balance += pending.get(currency) ?? 0;
     if (currency !== 'USD') return balance;

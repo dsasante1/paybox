@@ -3294,6 +3294,12 @@ export class PaymentEngine {
     dueInMs?: number;
     message?: string | null;
     providerDisputeId?: string;
+    /** The provider's own word for the opening status; defaults to Paystack's spelling. */
+    providerStatus?: string;
+    /** An exact deadline, for a provider that sets one; wins over `dueInMs`. */
+    dueAt?: string;
+    /** Prefilled evidence, for a provider that fills some in from the customer record. */
+    evidence?: Metadata | null;
     metadata?: Metadata;
   }): Promise<Dispute> {
     const { result, events } = await this.#storage.transaction(async (tx) => {
@@ -3328,14 +3334,14 @@ export class PaymentEngine {
         customerId: payment.customerId,
         category: input.category ?? 'chargeback',
         status: 'awaiting_merchant_feedback',
-        providerStatus: 'awaiting-merchant-feedback',
+        providerStatus: input.providerStatus ?? 'awaiting-merchant-feedback',
         resolution: null,
         refundAmount,
         currency: payment.currency,
         // Providers give the merchant a window to respond. Default to a week.
-        dueAt: new Date(this.#clock.now() + (input.dueInMs ?? 7 * 24 * 60 * 60_000)).toISOString(),
+        dueAt: input.dueAt ?? new Date(this.#clock.now() + (input.dueInMs ?? 7 * 24 * 60 * 60_000)).toISOString(),
         resolvedAt: null,
-        evidence: null,
+        evidence: input.evidence ?? null,
         message: input.message ?? null,
         metadata: input.metadata ?? {},
         createdAt: now,
@@ -3359,20 +3365,30 @@ export class PaymentEngine {
     return result;
   }
 
+  /**
+   * Move a dispute without the side effects `resolveDispute` carries.
+   *
+   * `providerStatus` and `resolution` are for a provider whose own vocabulary
+   * is finer than the canonical one (Bachs' `won`, `lost`, `closed` and
+   * `prevented` are all `resolved`), and whose loss is not a refund.
+   */
   async transitionDispute(
     disputeId: string,
     to: DisputeStatus,
-    options: { eventType?: string } = {},
+    options: { eventType?: string; providerStatus?: string; resolution?: DisputeResolution | null } = {},
   ): Promise<Dispute> {
     const { result, events } = await this.#storage.transaction(async (tx) => {
       const dispute = await tx.disputes.byId(disputeId);
       if (!dispute) throw new PayboxError('not_found', `No dispute with id ${disputeId}.`);
       assertDisputeTransition(dispute.status, to);
 
+      const now = this.#clock.nowISO();
       const updated = await tx.disputes.update(disputeId, {
         status: to,
-        providerStatus: to.replace(/_/g, '-'),
-        updatedAt: this.#clock.nowISO(),
+        providerStatus: options.providerStatus ?? to.replace(/_/g, '-'),
+        ...(options.resolution !== undefined ? { resolution: options.resolution } : {}),
+        ...(to === 'resolved' ? { resolvedAt: now } : {}),
+        updatedAt: now,
       });
       const event = await this.#appendEvent(tx, {
         type: options.eventType ?? `dispute.${to}`,
@@ -3696,6 +3712,7 @@ function disputeEventData(dispute: Dispute): Metadata {
     id: dispute.id,
     payment_id: dispute.paymentId,
     status: dispute.status,
+    provider_status: dispute.providerStatus,
     category: dispute.category,
     refund_amount: dispute.refundAmount,
     currency: dispute.currency,

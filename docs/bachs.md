@@ -20,7 +20,7 @@ so paybox follows one rule throughout:
 Base path: `/bachs`. Bachs' own paths begin `/v1/`, so set your client's base
 URL to `http://localhost:8080/bachs` and every path works unchanged.
 
-Three of Bachs' phases are here.
+Four of Bachs' phases are here.
 
 - **Collection**: checkout sessions, the hosted page, payments, products,
   customers, refunds, balances and the webhook-endpoint API.
@@ -28,6 +28,8 @@ Three of Bachs' phases are here.
   and the customer portal.
 - **Money out**: payouts, payout destinations, quotes and schedules,
   conversions, the virtual account, and balances held in USD and NGN.
+- **Disputes**: disputes, evidence and submission, file uploads and product
+  media.
 
 [Not implemented](#not-implemented) lists what comes later.
 
@@ -63,10 +65,10 @@ Three of Bachs' phases are here.
 
 | Endpoint | Status | Notes |
 | --- | --- | --- |
-| `POST /v1/products` | **Partially compatible** | No media. |
+| `POST /v1/products` | **Compatible** | `media` is not on the create request; set it with `PATCH`. |
 | `GET /v1/products` | **Compatible** | Newest first; `include_archived`. |
 | `GET /v1/products/{product_id}` | **Compatible** | |
-| `PATCH /v1/products/{product_id}` | **Partially compatible** | `media` is accepted and ignored. |
+| `PATCH /v1/products/{product_id}` | **Compatible** | `media`: up to five upload ids, in order, replacing the list. |
 | `POST /v1/products/{product_id}/archive` | **Compatible** | Idempotent. |
 | `POST /v1/products/{product_id}/unarchive` | **Compatible** | Idempotent. |
 | `POST /v1/customers` | **Compatible** | An existing email is an upsert that fires `customer.updated`. |
@@ -113,6 +115,19 @@ Three of Bachs' phases are here.
 
 Transfers are not here. They move money only between a platform and its
 connected accounts, so they arrive with Connect.
+
+### Disputes and uploads
+
+| Endpoint | Status | Notes |
+| --- | --- | --- |
+| `GET /v1/disputes` | **Compatible** | `{ total, items }`, newest first; `status`, `from_date`, `to_date`; default page 50. |
+| `GET /v1/disputes/{dispute_id}` | **Compatible** | With the evidence draft and `latest_submission`. |
+| `PATCH /v1/disputes/{dispute_id}/evidence` | **Compatible** | Partial; `null` clears a field. `409 DISPUTE_NOT_EDITABLE`, `410 DEADLINE_PASSED`. |
+| `POST /v1/disputes/{dispute_id}/submit` | **Compatible** | Locks the evidence; `under_review`. |
+| `POST /v1/disputes/uploads` | **Compatible** | `multipart/form-data`; PDF, JPEG, PNG or GIF by content, up to 10 MB. |
+| `POST /v1/utilities/uploads` | **Compatible** | `multipart/form-data` with `file` and `scope`; up to 20 MB; `201`. |
+| `GET /v1/utilities/uploads/{upload_id}` | **Compatible** | `url` is served by paybox; `null` for a dispute document. |
+| `DELETE /v1/utilities/uploads/{upload_id}` | **Compatible** | `409` once the upload is attached to something. |
 
 ### Webhook endpoints and events
 
@@ -165,6 +180,23 @@ API**:
 | Endpoint | Status | Notes |
 | --- | --- | --- |
 | `POST /v1/virtual-accounts/{virtual_account_id}/deposits` | **Emulator-only** | A bank transfer into the account: `{ amount, sender_name?, sender_bank?, sender_account_number?, narration? }`. |
+
+A chargeback is filed by the payer's bank and ruled on by the card network,
+and Bachs documents no sandbox trigger for either (its CLI's `trigger` list
+has no dispute event). These two are paybox's test controls, **not Bachs
+API**:
+
+| Endpoint | Status | Notes |
+| --- | --- | --- |
+| `POST /v1/disputes` | **Emulator-only** | Opens a dispute: `{ charge_id, amount?, reason?, response_deadline_at?, warning? }`. `201`, or `200` when it escalates an open warning. |
+| `POST /v1/disputes/{dispute_id}/network` | **Emulator-only** | The network's side: `{ status?: "won" \| "lost" \| "closed", response_deadline_at? }`. A deadline only moves earlier. |
+
+An upload's `url` points at paybox, which serves the bytes there; Bachs serves
+its own from `cdn.bachs.io`.
+
+| Endpoint | Status | Notes |
+| --- | --- | --- |
+| `GET /files/{upload_id}/{file_name}` | **Emulator-only** | A public upload's bytes. A dispute document is never served. |
 
 ## How a checkout behaves
 
@@ -476,7 +508,7 @@ needs that amount available in the balance it settled into, which is net of
 fees: a full refund of the only collection in an empty balance is refused,
 because the fee did not come back. While
 any balance is negative, for example after a refund made with paybox's own
-tools, every payout is refused with `ORGANIZATION_IN_DEBT`.
+tools or a lost dispute, every payout is refused with `ORGANIZATION_IN_DEBT`.
 
 ### Rates
 
@@ -606,6 +638,112 @@ A deposit, made with paybox's test control, is a collection like any other:
 - the virtual-account fee, 1% capped at NGN 300, so 250,000 settles 249,700;
 - available at once.
 
+## How disputes behave
+
+Sources: the pinned OpenAPI document, guides/disputes/overview,
+connect/disputes, for-you/fees and the dispute-created and dispute-updated
+event pages, read 2026-10-10.
+
+### The lifecycle
+
+A dispute opens as `needs_response`, with a deadline 14 days out at
+23:59:59 UTC, as in Bachs' own example, unless the test control names
+another. `customer_email_address`, `customer_name` and `billing_address`
+arrive filled in from the charge's customer; they are ordinary evidence.
+
+- **Evidence** is saved any number of times while `needs_response`. Each save
+  changes only the fields sent, and `null` clears one. An attachment field must
+  name an upload, which is then attached to the dispute.
+- **Submitting** locks the evidence and moves the dispute to `under_review`.
+- **After the deadline** a save or a submit answers `410 DEADLINE_PASSED`, and
+  a locked dispute answers `409 DISPUTE_NOT_EDITABLE` whatever the time.
+  Nothing happens on its own at the deadline: the ruling is the network's,
+  given with the test control.
+- **A ruling** is `won`, `lost` or `closed`, from `needs_response` or
+  `under_review`. All three are final, and `is_response_editable` is then
+  `false`. While a refund of the same money is still in flight, a loss is
+  refused with `409`: the refund prevents the dispute when it settles.
+- **A refund prevents it.** Suppose a refund of the charge succeeds while a
+  dispute on it is undecided, and the charge's refunds now cover the disputed
+  amount. The dispute moves to `prevented`: "the customer was refunded before
+  any ruling". A smaller refund leaves the dispute standing.
+
+`dispute.created` is sent when a dispute opens. `dispute.updated` is sent when
+the status changes on the network side: a ruling or a prevention. Saving or
+submitting evidence sends nothing, and neither does a deadline moving.
+
+One charge holds one undecided dispute at a time; opening another answers
+`409 CONFLICT`. A dispute covers at most what is left of the charge: its
+amount less what has been refunded and what earlier disputes lost. A lost
+amount has "gone back to the customer", so it cannot be refunded either.
+
+A dispute opened with paybox's own tools has a bare token where a Bachs id
+would be. The Bachs API gives it a `dsp_` id derived from paybox's id, and
+finds it by either. Those tools are paybox's escape hatch and are not held to
+these rules. A refund made through the control API does not know about a
+lost dispute, a dispute opened there does not know about one already open,
+and a resolution given there can rule on a warning.
+
+### What a dispute does to the balance
+
+| When | What moves |
+| --- | --- |
+| Opened | The $15 fee is taken, and the disputed amount is set aside. |
+| `won`, `closed` or `prevented` | The amount comes back. The fee does not. |
+| `lost` | The amount stays gone: it "goes back to the customer". The fee is not charged again. |
+
+Both move in the charge's settlement currency, the currency a lost dispute
+lands in: NGN for an NGN charge ($15 is NGN 22,500 at the fixed rate), USD for
+everything else. A loss can take a balance negative, and while any balance is
+negative every payout is refused with `ORGANIZATION_IN_DEBT`. Future
+collections heal it.
+
+A refund of a disputed charge needs its own funds, like any refund: until it
+settles, both its own hold and the dispute's are taken. connect/disputes says
+"an unfundable refund is refused".
+
+The movements are worked out from the dispute records, not from the call that
+changed each one. So a dispute opened or settled with paybox's own tools
+(`paybox dispute`, the control API) moves the balance too. A merchant-accepted
+resolution from those tools raises a real refund, which reads as `lost`; the
+refund takes the money, so the amount set aside comes back and nothing is
+counted twice. A crash between a dispute and its ledger entry loses nothing:
+balance reads report what is owed until it is written.
+
+### Early dispute warnings
+
+Bachs charges $29 for an early dispute warning, once per payment. The API has
+no field that tells a warning from a dispute, so `warning: true` on the test
+control opens one. A warning is `needs_response` like any dispute and sends
+`dispute.created`, but sets nothing aside: no chargeback has been filed yet.
+It cannot be won or lost, only closed.
+
+Opening a dispute on a payment whose warning is still undecided turns that
+warning into the dispute ("both fees apply"). It takes the new request's
+amount, reason and deadline where given. The $15 fee and the hold follow, on
+the same `dispute_id` and with no second `dispute.created`.
+
+### Uploads
+
+Both upload endpoints take `multipart/form-data` with a `file` part.
+
+- **Type.** The type is detected from the file's contents ("which may differ
+  from what its extension suggests"). A general upload whose type paybox cannot
+  detect keeps the declared type. A dispute document must be a PDF, JPEG, PNG
+  or GIF by its contents.
+- **Size.** Up to 20 MB, or 10 MB for a dispute document; an oversized or
+  missing file is `400 VALIDATION_ERROR` on `file`.
+- **Storage.** The bytes are kept in paybox's database and served at the
+  upload's `url`. A dispute document has no `url`. paybox serves its dashboard
+  from the same origin, so anything other than a PDF or an image is served as
+  a download, never rendered.
+- **Attaching.** An upload is attached by naming it in a product's `media` or
+  a dispute's evidence. It attaches to one resource; naming it on another is
+  `400 INVALID_UPLOAD_REFERENCE`, and so is a dispute document named as
+  product media. A request that is refused attaches nothing. An attached
+  upload cannot be deleted. Replacing a product's `media`, or clearing an
+  evidence attachment, frees the upload again.
+
 ## Webhooks
 
 Every delivery carries the three documented headers:
@@ -641,6 +779,7 @@ Events emitted:
 - **Saved cards:** `payment_method.saved`.
 - **Payouts:** `payout.created`, `payout.paid`, `payout.failed`.
 - **Conversions:** `conversion.completed`.
+- **Disputes:** `dispute.created`, `dispute.updated`.
 
 `payment_method.saved` is not in the subscribable `event_types` enum (see
 [contradictions](#contradictions-in-bachs-documentation)). An endpoint created
@@ -751,6 +890,10 @@ impossible, not to save work.
   does not say what happens at a period boundary during recovery. paybox opens
   no new invoice while one is still owed, and billing resumes at the next
   boundary.
+- **A closed dispute's amount comes back at once.** At Bachs, "Bachs reviews
+  the case and releases any amount set aside. It is not released
+  automatically". That review has no sandbox trigger, so paybox releases the
+  amount with the closure.
 - **Every card is domestic.** Bachs adds 1.5% to an international USD card. A
   test card number carries no country, so that surcharge never applies.
 
@@ -787,12 +930,16 @@ cause. Where a choice was needed, the rule at the top of this file decided it.
 | Conversion id prefixes | REST: `cqt_`, `cvt_` | Webhooks: `cq_`, `cnv_` | REST's |
 | Mobile-money providers | Reference page: `GET /v1/reference/momo` | Payouts guide: `GET /v1/payouts/mobile-money-providers` | Both served |
 | Automatic payouts | Fees page: "There is no automatic withdrawal" | Payout schedules guide | Schedules |
+| `prevented` | Disputes guide: a status | Spec's status enums (object and filter) stop at `closed` | Served, and filterable |
+| Funds at `needs_response` | Spec: "no further funds have moved beyond that fee" | Guide and connect/disputes: the disputed amount is "set aside" from the available balance | Set aside |
+| `DISPUTE_NOT_EDITABLE`, `DEADLINE_PASSED` | Disputes guide | Missing from the error reference | Returned, with no `doc_url` |
+| `is_response_editable` while `under_review` | Guide: `false` | `dispute.updated` example: `true` | `false` |
+| Dispute id length | REST examples: `dsp_` and 12 hex | Event examples: `dsp_` and 10 | 12 |
 
 ## Not implemented
 
 These are later phases of Bachs. They are not shortcuts.
 
-- **Disputes**, and uploads and media.
 - **Connect**: accounts, persons, capabilities, platform fees, `X-Account-Id`,
   and **transfers**, which move money only to connected accounts.
 - Payment-method, rail and collection-currency listings, business structures

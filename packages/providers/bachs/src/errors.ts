@@ -53,6 +53,8 @@ const CODES = {
   DUPLICATE_CURRENCY: [400, 'products-&-prices'],
   ENVIRONMENT_MISMATCH: [400, 'products-&-prices'],
   INVALID_PRODUCT_REFERENCE: [400, 'products-&-prices'],
+  INVALID_UPLOAD_REFERENCE: [400, 'products-&-prices'],
+  MEDIA_LIMIT_EXCEEDED: [400, 'products-&-prices'],
   CHECKOUT_ERROR: [400, 'checkout-sessions'],
   CUSTOM_AMOUNT_REQUIRED: [400, 'checkout-sessions'],
   FIXED_AMOUNT_OVERRIDE_NOT_ALLOWED: [400, 'checkout-sessions'],
@@ -99,6 +101,10 @@ const CODES = {
   VIRTUAL_ACCOUNT_CURRENCY_NOT_SUPPORTED: [400, 'virtual-accounts'],
   DEPOSIT_LIMIT_EXCEEDED: [400, 'deposits'],
   UNSUPPORTED_DEPOSIT_CURRENCY: [400, 'deposits'],
+  // Both in the disputes guide (guides/disputes/overview) and missing from the
+  // error reference, like IDEMPOTENCY_CONFLICT; recorded in docs/bachs.md.
+  DISPUTE_NOT_EDITABLE: [409, null],
+  DEADLINE_PASSED: [410, null],
 } as const satisfies Record<string, readonly [number, string | null]>;
 
 export type BachsErrorCode = keyof typeof CODES;
