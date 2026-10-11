@@ -12,10 +12,15 @@ import type {
 } from '@paybox/webhooks';
 import { createHash } from 'node:crypto';
 import { eventId } from './ids.js';
+import { invoiceIdOf } from './billing.js';
 import { refundRecord } from './refunds.js';
 import { toDecimal } from './money.js';
 import {
   amountPaidOf,
+  metadataOf,
+  referenceOf,
+  serializeInvoiceData,
+  serializeWebhookSubscription,
   corridorOf,
   dataTime,
   envelopeTime,
@@ -26,8 +31,8 @@ import {
   customerName,
 } from './serializers.js';
 import { bachsSignatureHeaders } from './signature.js';
-import { bachsState, type StoredCheckout } from './state.js';
-import { paymentStatusOf, toBachsRefundEventStatus, webhookStatus } from './status.js';
+import { bachsState, type StoredCheckout, type StoredPaymentMeta } from './state.js';
+import { paymentStatusOf, subscriptionStatusOf, toBachsRefundEventStatus, webhookStatus } from './status.js';
 
 const PROVIDER = 'bachs' as const;
 
@@ -61,7 +66,7 @@ export interface StoredBachsEvent {
   id: string;
   type: string;
   canonicalEventId: string;
-  entityType: 'charge' | 'checkout' | 'customer' | 'refund';
+  entityType: 'charge' | 'checkout' | 'customer' | 'refund' | 'subscription' | 'invoice' | 'payment_method';
   entityId: string;
   payload: Record<string, unknown>;
   createdAt: string;
@@ -207,9 +212,149 @@ export class BachsWebhookFormatter implements WebhookFormatter {
         return this.#customerEvents(event, storage, state);
       case 'checkout':
         return this.#checkoutOnlyEvents(event, storage, state);
+      case 'subscription':
+        return this.#subscriptionEvents(event, storage, state);
+      case 'invoice':
+        return this.#invoiceEvents(event, storage, state);
+      case 'authorization':
+        return this.#paymentMethodEvents(event, storage, state);
       default:
         return [];
     }
+  }
+
+  /**
+   * `customer.subscription.*`. Every change the engine reports -- created,
+   * a status move, the adapter's own `subscription.updated` -- is one of
+   * three Bachs events: "Every state change emits a webhook".
+   */
+  async #subscriptionEvents(
+    event: PayboxEvent,
+    storage: Storage,
+    state: ReturnType<typeof bachsState>,
+  ): Promise<Draft[]> {
+    const type =
+      event.type === 'subscription.created'
+        ? 'customer.subscription.created'
+        : event.type === 'subscription.cancelled' || event.type === 'subscription.completed'
+          ? 'customer.subscription.deleted'
+          : ['subscription.updated', 'subscription.active', 'subscription.attention', 'subscription.non_renewing', 'subscription.trialing'].includes(event.type)
+            ? 'customer.subscription.updated'
+            : null;
+    if (!type) return [];
+    const core = await storage.subscriptions.byId(event.resourceId);
+    if (!core) return [];
+    const stored = await state.subscriptions.get(core.providerSubscriptionCode);
+    const customer = await storage.customers.byId(core.customerId);
+    if (!stored || !customer) return [];
+    const productRecord = await state.products.get(stored.productId);
+    const data = serializeWebhookSubscription({
+      core,
+      stored,
+      status: subscriptionStatusOf(core, stored, Date.parse(event.createdAt)),
+      customer,
+      customerRecord: await state.customers.get(customer.providerCustomerId),
+      product: productRecord ? await storage.products.byId(productRecord.engineId) : null,
+      productRecord,
+    });
+    return [{ type, entityType: 'subscription', entityId: stored.id, data }];
+  }
+
+  /** `invoice.created`, `invoice.paid`, `invoice.payment_failed`. */
+  async #invoiceEvents(
+    event: PayboxEvent,
+    storage: Storage,
+    state: ReturnType<typeof bachsState>,
+  ): Promise<Draft[]> {
+    const type =
+      event.type === 'invoice.created'
+        ? 'invoice.created'
+        : event.type === 'invoice.success'
+          ? 'invoice.paid'
+          : event.type === 'invoice.payment_failed'
+            ? 'invoice.payment_failed'
+            : null;
+    if (!type) return [];
+    const invoice = await storage.invoices.byId(event.resourceId);
+    if (!invoice) return [];
+    const core = invoice.subscriptionId ? await storage.subscriptions.byId(invoice.subscriptionId) : null;
+    const customer = await storage.customers.byId(invoice.customerId);
+    if (!customer) return [];
+    const payment = invoice.paymentId ? await storage.payments.byId(invoice.paymentId) : null;
+    const data = serializeInvoiceData({
+      invoice,
+      record: await state.invoices.get(invoice.id),
+      items: await storage.invoiceItems.listByInvoice(invoice.id),
+      bachsId: invoiceIdOf(invoice.id),
+      subscriptionId: core?.providerSubscriptionCode ?? null,
+      customer: {
+        customer_id: customer.providerCustomerId,
+        email: customer.email,
+        name: customerName(customer, await state.customers.get(customer.providerCustomerId)),
+      },
+      charge: payment ? this.#chargeObject(payment, customer.providerCustomerId, {}) : null,
+      metadata: {},
+    });
+    return [{ type, entityType: 'invoice', entityId: invoiceIdOf(invoice.id), data }];
+  }
+
+  /**
+   * `payment_method.saved`, from the saved-card guide's example: the only
+   * published shape, as the event has no reference page.
+   */
+  async #paymentMethodEvents(
+    event: PayboxEvent,
+    storage: Storage,
+    state: ReturnType<typeof bachsState>,
+  ): Promise<Draft[]> {
+    if (event.type !== 'authorization.created') return [];
+    const authorization = await storage.authorizations.byId(event.resourceId);
+    if (!authorization?.customerId) return [];
+    const method = await state.paymentMethods.get(authorization.providerAuthorizationCode);
+    const customer = await storage.customers.byId(authorization.customerId);
+    if (!method || !customer) return [];
+    const isDefault = (await state.paymentMethods.defaultFor(customer.id))?.id === method.id;
+    return [
+      {
+        type: 'payment_method.saved',
+        entityType: 'payment_method',
+        entityId: method.id,
+        data: {
+          payment_method_id: method.id,
+          customer: {
+            customer_id: customer.providerCustomerId,
+            email: customer.email,
+            name: customerName(customer, await state.customers.get(customer.providerCustomerId)),
+          },
+          type: 'card',
+          card_brand: authorization.brand,
+          card_last4: authorization.last4,
+          card_exp_month: Number(authorization.expMonth),
+          card_exp_year: Number(authorization.expYear),
+          currency: method.currency,
+          is_default: isDefault,
+          created_at: dataTime(authorization.createdAt),
+        },
+      },
+    ];
+  }
+
+  /** The charge object `checkout.completed` carries, reused where Bachs publishes no other. */
+  #chargeObject(payment: Payment, customerId: string | null, metadata: Record<string, unknown>) {
+    const fee = feeOf(payment) ?? 0;
+    return {
+      id: payment.providerTransactionId,
+      organization_id: this.#organizationId,
+      customer_id: customerId,
+      amount: toDecimal(payment.amount, payment.currency),
+      currency: payment.currency,
+      settlement_currency: payment.currency,
+      settlement_amount: toDecimal(payment.amount - fee, payment.currency),
+      status: paymentStatusOf(payment),
+      metadata,
+      created_at: dataTime(payment.createdAt),
+      updated_at: dataTime(payment.updatedAt),
+    };
   }
 
   async #paymentEvents(
@@ -220,13 +365,14 @@ export class BachsWebhookFormatter implements WebhookFormatter {
     const payment = await storage.payments.byId(event.resourceId);
     if (!payment) return [];
     const checkout = await state.checkouts.byPayment(payment.id);
+    const meta = await state.paymentMeta.get(payment.id);
     const customer = payment.customerId ? await storage.customers.byId(payment.customerId) : null;
     const status = paymentStatusOf(payment);
     const priorFailure = await hadFailureBefore(storage, payment.id, event.sequence);
 
     switch (event.type) {
       case 'payment.successful': {
-        const collection = this.#collectionSucceeded(payment, checkout, customer, state);
+        const collection = this.#collectionSucceeded(payment, checkout, meta, customer, state);
         const completed = checkout
           ? this.#checkoutCompleted(checkout, payment, customer, state)
           : null;
@@ -235,14 +381,14 @@ export class BachsWebhookFormatter implements WebhookFormatter {
       case 'payment.failed':
         // "Bachs sends this event once per payment, for the first failure."
         if (priorFailure) return [];
-        return [await this.#collectionFailed(payment, checkout, customer, state, 'FAILED')];
+        return [await this.#collectionFailed(payment, checkout, meta, customer, state, 'FAILED')];
       case 'payment.expired': {
         const drafts: Draft[] = [];
         // EXPIRED: "nobody paid before the charge closed" -- unless a failure
         // already reported this charge, which is the one collection.failed
         // it gets.
         if (!priorFailure && event.previousStatus !== 'failed') {
-          drafts.push(await this.#collectionFailed(payment, checkout, customer, state, 'EXPIRED'));
+          drafts.push(await this.#collectionFailed(payment, checkout, meta, customer, state, 'EXPIRED'));
         }
         if (checkout) drafts.push(await this.#checkoutExpired(checkout, customer, state));
         return drafts;
@@ -251,7 +397,7 @@ export class BachsWebhookFormatter implements WebhookFormatter {
         // Crypto only: "A bank transfer that arrives short does not send this
         // event: the checkout does not complete" (collection-underpaid).
         if (status === 'underpaid' && corridorOf(payment) === 'CRYPTO') {
-          return [this.#collectionUnderpaid(payment, checkout)];
+          return [this.#collectionUnderpaid(payment, checkout, meta)];
         }
         return [];
       default:
@@ -262,6 +408,7 @@ export class BachsWebhookFormatter implements WebhookFormatter {
   async #collectionSucceeded(
     payment: Payment,
     checkout: StoredCheckout | null,
+    meta: StoredPaymentMeta | null,
     customer: Customer | null,
     state: ReturnType<typeof bachsState>,
   ): Promise<Draft> {
@@ -277,7 +424,7 @@ export class BachsWebhookFormatter implements WebhookFormatter {
       data: {
         charge_id: payment.providerTransactionId,
         checkout_id: checkout?.id ?? null,
-        reference: checkout?.reference ?? null,
+        reference: referenceOf({ checkout, meta }),
         status: webhookStatus(status),
         amount: toDecimal(payment.amount, c),
         currency: c,
@@ -289,7 +436,7 @@ export class BachsWebhookFormatter implements WebhookFormatter {
         product_cart: cartOf(checkout),
         customer: await webhookCustomerRef(customer, checkout, state),
         payment_method_details: paymentMethodDetails(payment),
-        metadata: checkout?.metadata ?? {},
+        metadata: metadataOf({ checkout, meta }),
         ...(overpaid
           ? {
               expected_amount: toDecimal(payment.amount, c),
@@ -304,6 +451,7 @@ export class BachsWebhookFormatter implements WebhookFormatter {
   async #collectionFailed(
     payment: Payment,
     checkout: StoredCheckout | null,
+    meta: StoredPaymentMeta | null,
     customer: Customer | null,
     state: ReturnType<typeof bachsState>,
     status: 'FAILED' | 'EXPIRED',
@@ -317,7 +465,7 @@ export class BachsWebhookFormatter implements WebhookFormatter {
       data: {
         charge_id: payment.providerTransactionId,
         checkout_id: checkout?.id ?? null,
-        reference: checkout?.reference ?? null,
+        reference: referenceOf({ checkout, meta }),
         status,
         amount: toDecimal(payment.amount, c),
         currency: c,
@@ -335,12 +483,12 @@ export class BachsWebhookFormatter implements WebhookFormatter {
               ? 'Payment window expired before the full amount was received'
               : 'Payment window expired before payment was received'
             : (payment.failureMessage ?? 'Payment authorization failed'),
-        metadata: checkout?.metadata ?? {},
+        metadata: metadataOf({ checkout, meta }),
       },
     };
   }
 
-  #collectionUnderpaid(payment: Payment, checkout: StoredCheckout | null): Draft {
+  #collectionUnderpaid(payment: Payment, checkout: StoredCheckout | null, meta: StoredPaymentMeta | null): Draft {
     const c = payment.currency;
     const paid = amountPaidOf(payment);
     return {
@@ -349,14 +497,14 @@ export class BachsWebhookFormatter implements WebhookFormatter {
       entityId: payment.providerTransactionId,
       data: {
         charge_id: payment.providerTransactionId,
-        reference: checkout?.reference ?? null,
+        reference: referenceOf({ checkout, meta }),
         checkout_id: checkout?.id ?? null,
         amount_paid: toDecimal(paid, c),
         amount_expected: toDecimal(payment.amount, c),
         amount_remaining: toDecimal(Math.max(0, payment.amount - paid), c),
         currency: c,
         status: 'UNDERPAID',
-        metadata: checkout?.metadata ?? {},
+        metadata: metadataOf({ checkout, meta }),
       },
     };
   }
@@ -367,8 +515,8 @@ export class BachsWebhookFormatter implements WebhookFormatter {
     customer: Customer | null,
     state: ReturnType<typeof bachsState>,
   ): Promise<Draft> {
-    const fee = payment ? (feeOf(payment) ?? 0) : 0;
     const completedAt = payment?.paidAt ?? checkout.completedAt ?? checkout.updatedAt;
+    const fulfilment = await state.fulfilments.get(checkout.id);
     return {
       type: 'checkout.completed',
       entityType: 'checkout',
@@ -376,7 +524,7 @@ export class BachsWebhookFormatter implements WebhookFormatter {
       data: {
         checkout_id: checkout.id,
         status: 'completed',
-        mode: 'payment',
+        mode: checkout.mode ?? 'payment',
         payment_status: payment ? 'paid' : 'no_payment_required',
         // "`"0"` for a free checkout."
         amount: payment ? sessionAmount(checkout, payment) : '0',
@@ -384,22 +532,9 @@ export class BachsWebhookFormatter implements WebhookFormatter {
         reference: checkout.reference,
         customer: await webhookCustomer(customer, state),
         customer_details: checkout.customerDetails,
-        charge: payment
-          ? {
-              id: payment.providerTransactionId,
-              organization_id: this.#organizationId,
-              customer_id: customer?.providerCustomerId ?? null,
-              amount: toDecimal(payment.amount, payment.currency),
-              currency: payment.currency,
-              settlement_currency: payment.currency,
-              settlement_amount: toDecimal(payment.amount - fee, payment.currency),
-              status: paymentStatusOf(payment),
-              metadata: checkout.metadata,
-              created_at: dataTime(payment.createdAt),
-              updated_at: dataTime(payment.updatedAt),
-            }
-          : null,
-        subscription: null,
+        charge: payment ? this.#chargeObject(payment, customer?.providerCustomerId ?? null, checkout.metadata) : null,
+        // "`{ subscription_id }` for a subscription-mode checkout."
+        subscription: fulfilment?.subscriptionId ? { subscription_id: fulfilment.subscriptionId } : null,
         success_url: checkout.successUrl,
         cancel_url: checkout.cancelUrl,
         metadata: checkout.metadata,
@@ -422,7 +557,7 @@ export class BachsWebhookFormatter implements WebhookFormatter {
       data: {
         checkout_id: checkout.id,
         status: 'expired',
-        mode: 'payment',
+        mode: checkout.mode ?? 'payment',
         payment_status: null,
         amount: toDecimal(checkout.amount ?? 0, checkout.currency),
         currency: checkout.currency,

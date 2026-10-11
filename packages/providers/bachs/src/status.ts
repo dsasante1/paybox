@@ -1,4 +1,4 @@
-import type { PaymentStatus, RefundStatus } from '@paybox/shared';
+import type { InvoiceStatus, PaymentStatus, RefundStatus, SubscriptionStatus } from '@paybox/shared';
 
 /**
  * Bachs' status vocabularies.
@@ -227,4 +227,50 @@ export function paymentMessage(status: BachsPaymentStatus): string {
     case 'partially_refunded':
       return 'Partially refunded';
   }
+}
+
+/* ------------------------------ subscriptions ------------------------------ */
+
+/**
+ * `SubscriptionResponse.status`. "A subscription is always in exactly one
+ * status" (guides/subscriptions/overview). `paused` is in the OpenAPI enum
+ * and nowhere else -- no endpoint pauses or resumes -- so it is never
+ * produced.
+ */
+export type BachsSubscriptionStatus = 'trialing' | 'active' | 'past_due' | 'unpaid' | 'canceled' | 'paused';
+
+/**
+ * A projection, never stored: canonical `attention` is `past_due` while
+ * recovery runs and `unpaid` once it ran out on an account that keeps unpaid
+ * subscriptions; a future `trial_end` reads `trialing` even on a subscription
+ * the core still calls active ("This works even on an active subscription,
+ * which becomes trialing"). paybox's generic tooling can move the core row
+ * (`non_renewing`, `completed`) and the projection follows it.
+ */
+export function subscriptionStatusOf(
+  core: { status: SubscriptionStatus },
+  stored: { trialEnd: string | null; exhausted: boolean; owing?: boolean } | null,
+  now: number,
+): BachsSubscriptionStatus {
+  if (core.status === 'cancelled' || core.status === 'completed') return 'canceled';
+  if (stored?.owing) return stored.exhausted ? 'unpaid' : 'past_due';
+  switch (core.status) {
+    case 'attention':
+      return stored?.exhausted ? 'unpaid' : 'past_due';
+    case 'trialing':
+      return 'trialing';
+    default:
+      return stored?.trialEnd && Date.parse(stored.trialEnd) > now ? 'trialing' : 'active';
+  }
+}
+
+/**
+ * The invoice status on `invoice.*` webhooks: `draft`, `open`, `paid`,
+ * `uncollectible` or `void`. An invoice still being collected -- including
+ * one whose attempts have failed and are being retried -- is `open`.
+ */
+export function invoiceStatusOf(status: InvoiceStatus): 'draft' | 'open' | 'paid' | 'uncollectible' | 'void' {
+  if (status === 'success') return 'paid';
+  if (status === 'draft' || status === 'void' || status === 'uncollectible') return status;
+  return 'open';
 }

@@ -370,6 +370,10 @@ export function authorizationPatch(patch: Partial<Authorization>): Partial<Autho
   if (patch.customerId !== undefined) out.customer_id = patch.customerId;
   if (patch.reusable !== undefined) out.reusable = patch.reusable ? 1 : 0;
   if (patch.active !== undefined) out.active = patch.active ? 1 : 0;
+  // A card saved again after it was reissued keeps its row and takes the new
+  // expiry (Bachs: one `pm_` per card).
+  if (patch.expMonth !== undefined) out.exp_month = patch.expMonth;
+  if (patch.expYear !== undefined) out.exp_year = patch.expYear;
   if (patch.metadata !== undefined) out.metadata = writeJson(patch.metadata);
   if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
   return out;

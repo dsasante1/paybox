@@ -6,7 +6,9 @@ import { createHash } from 'node:crypto';
 import { fail } from './errors.js';
 import type { Corridor } from './fees.js';
 import { assertMetadata, notFound } from './http.js';
-import { hexId, urlToken } from './ids.js';
+import { derivedId, hexId, urlToken } from './ids.js';
+import type { BachsBilling } from './billing.js';
+import { assertNotExpired, cardFacts, factsFromDetails, TEST_CARDS } from './cards.js';
 import { checkoutLock, withLock } from './locks.js';
 import { toDecimal, toMinor } from './money.js';
 import { renderCheckoutPage, renderCheckoutResult } from './checkout-page.js';
@@ -20,7 +22,7 @@ import {
   serializePayment,
   sessionStatus,
 } from './serializers.js';
-import { bachsState, type StoredCheckout, type StoredLine } from './state.js';
+import { bachsState, type CheckoutMode, type StoredCheckout, type StoredLine, type StoredRecurring } from './state.js';
 import { paymentStatusOf } from './status.js';
 
 const PROVIDER = 'bachs' as const;
@@ -64,17 +66,6 @@ export const CRYPTO_ASSETS = [
 
 /** Minimum fixed checkout amount where Bachs publishes one (MerchantIntent.amount). */
 const MINIMUMS: Record<string, number> = { NGN: 10_000, USD: 100 };
-
-/**
- * Sandbox card numbers (integrate/sandbox, read 2026-10-10). "Any other card
- * number succeeds."
- */
-const TEST_CARDS: Record<string, { failureCode: string; message: string }> = {
-  '4000000000000002': { failureCode: 'card_declined', message: 'Your card was declined.' },
-  '4000000000009995': { failureCode: 'insufficient_funds', message: 'Your card has insufficient funds.' },
-  '4000000000000069': { failureCode: 'expired_card', message: 'Your card has expired.' },
-  '4000000000000119': { failureCode: 'provider_error', message: 'An error occurred while processing your card.' },
-};
 
 /**
  * `success_url` "must be a public `http` or `https` address: `localhost` and
@@ -164,9 +155,11 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
     authenticate(request);
     const body = createCheckoutSchema.parse(request.body ?? {});
 
-    if (body.save_payment_method) throw notImplemented('save_payment_method (saved cards)');
     if (body.platform_fee || body.transfer_data) throw notImplemented('Connect split payments');
-    if (Boolean(body.product_cart) === Boolean(body.pricing)) {
+    // "Send it with no pricing and the checkout collects a card and charges
+    // nothing" -- `setup` mode.
+    const setup = body.save_payment_method === true && !body.product_cart && !body.pricing;
+    if (!setup && Boolean(body.product_cart) === Boolean(body.pricing)) {
       throw fail(
         'validation_failed',
         'VALIDATION_ERROR',
@@ -191,12 +184,33 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
         );
       }
 
-      const priced = body.product_cart ? await priceCart(body.product_cart) : pricePricing(body.pricing!);
+      const priced: Priced = setup
+        ? // "To save without charging, you need a USD card."
+          { priceType: 'fixed', currency: 'USD', amount: 0, preset: null, minimum: null, maximum: null, currencyOptions: {}, lines: [], recurring: null }
+        : body.product_cart
+          ? await priceCart(body.product_cart)
+          : pricePricing(body.pricing!);
+      const mode: CheckoutMode = setup ? 'setup' : priced.recurring ? 'subscription' : 'payment';
+
+      if (mode === 'subscription') assertSubscriptionCheckout(priced, body);
+      if (setup && !(body.customer && 'customer_id' in body.customer)) {
+        throw fail(
+          'validation_failed',
+          'VALIDATION_ERROR',
+          'customer.customer_id: saving a card without a price needs an existing customer for the card to belong to.',
+        );
+      }
 
       // A free checkout needs no way to pay; anything else needs at least one.
       const free = priced.priceType === 'free';
       const currencies = [priced.currency, ...Object.keys(priced.currencyOptions)];
-      let corridors = free ? [] : corridorsFor(currencies);
+      let corridors = free
+        ? []
+        : mode === 'payment'
+          ? corridorsFor(currencies)
+          : // "Subscriptions are USD card only today", and a card saved
+            // without a charge must be a USD one.
+            (['USD_CARD'] as Corridor[]);
       if (!free && corridors.length === 0) {
         throw fail(
           'validation_failed',
@@ -214,6 +228,14 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
           );
         }
         corridors = corridors.filter((corridor) => body.payment_method_types!.includes(corridor));
+        if (corridors.length === 0 && mode === 'subscription') {
+          throw fail(
+            'validation_failed',
+            'SUBSCRIPTION_METHOD_NOT_SUPPORTED',
+            'Subscription checkouts can only be paid with a card. Include USD_CARD.',
+          );
+        }
+        if (corridors.length === 0 && body.save_payment_method) throw cannotSave();
         if (corridors.length === 0) {
           throw fail(
             'validation_failed',
@@ -241,10 +263,17 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
         }
       }
 
+      if (body.save_payment_method && !corridors.some((corridor) => CORRIDORS[corridor].method === 'card')) {
+        throw cannotSave();
+      }
+
       const customer = await resolveCustomer(body.customer ?? null);
       const now = clock.nowISO();
       const checkout: StoredCheckout = {
         id: hexId(ids, 'chk'),
+        mode,
+        savePaymentMethod: body.save_payment_method ?? false,
+        recurring: priced.recurring,
         token: urlToken(ids),
         paymentId: null,
         status: 'open',
@@ -264,7 +293,11 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
         customerDetails: customer
           ? { email: customer.customer.email, name: customer.name }
           : null,
-        customerCreation: body.customer_creation ?? 'if_required',
+        // "customer_creation is ignored for a subscription or a setup-mode
+        // checkout. Both always create a customer". A saved card needs an
+        // owner too, so a guest saving one joins the directory.
+        customerCreation:
+          mode !== 'payment' || body.save_payment_method ? 'always' : (body.customer_creation ?? 'if_required'),
         successUrl,
         cancelUrl: body.cancel_url ?? null,
         reference: body.reference ?? null,
@@ -315,6 +348,44 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
     maximum: number | null;
     currencyOptions: Record<string, number>;
     lines: StoredLine[];
+    /** Set when the cart's product recurs: the checkout starts a subscription. */
+    recurring: StoredRecurring | null;
+  }
+
+  function cannotSave() {
+    return fail(
+      'validation_failed',
+      'CHECKOUT_CANNOT_SAVE_PAYMENT_METHOD',
+      'Saving a payment method requires a card. This checkout does not offer one, so no card could be saved.',
+    );
+  }
+
+  /**
+   * The rules a subscription checkout adds (guides/checkout/checkout-sessions,
+   * "Recurring products"; error-reference, Subscriptions).
+   */
+  function assertSubscriptionCheckout(
+    priced: Priced,
+    body: ReturnType<typeof createCheckoutSchema.parse>,
+  ): void {
+    const recurring = priced.recurring!;
+    if (!body.customer) {
+      throw fail(
+        'validation_failed',
+        'VALIDATION_ERROR',
+        'customer: required for a recurring product. A subscription needs a durable identity to bill on renewal.',
+      );
+    }
+    if (recurring.currency === 'NGN') {
+      throw fail('validation_failed', 'NGN_SUBSCRIPTIONS_NOT_ENABLED', 'NGN subscriptions are not enabled. Contact support to request access.');
+    }
+    if (recurring.currency !== 'USD') {
+      throw fail(
+        'validation_failed',
+        'BASE_CURRENCY_NOT_HELD_BY_ORG',
+        `A recurring checkout must be priced in a currency you hold; ${recurring.currency} is not one.`,
+      );
+    }
   }
 
   async function priceCart(
@@ -338,9 +409,55 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
           `Product ${item.product_id} is archived and cannot be used for new checkouts.`,
         );
       }
-      if (stored.billingCycle) throw notImplemented('A subscription checkout (a recurring product in the cart)');
-
       const price = stored.price;
+      if (stored.billingCycle) {
+        // "A subscription checkout needs exactly one recurring catalog
+        // product. Raw amounts and inline products are not supported."
+        if (cart.length !== 1) {
+          throw fail(
+            'validation_failed',
+            'SUBSCRIPTION_REQUIRES_CATALOG_PRODUCT',
+            'A subscription checkout needs exactly one recurring catalog product.',
+          );
+        }
+        const override = item.pricing ?? null;
+        const priceType = override?.price_type ?? (override ? 'fixed' : price.priceType);
+        const unit = override
+          ? priceType === 'fixed' && override.amount
+            ? toMinor(override.amount, price.currency, `product_cart.${index}.pricing.amount`)
+            : 0
+          : (price.amount ?? 0);
+        if (priceType !== 'fixed' || unit <= 0 || (item.amount !== null && item.amount !== undefined)) {
+          throw fail(
+            'validation_failed',
+            'INVALID_SUBSCRIPTION_PRICE',
+            'The price is not valid for a subscription. It must be recurring with a positive amount.',
+          );
+        }
+        const quantity = item.quantity ?? 1;
+        const recurring: StoredRecurring = {
+          productId: item.product_id,
+          productName: product.name,
+          cycle: stored.billingCycle,
+          trial: stored.trialPeriod,
+          unitAmount: unit,
+          quantity,
+          currency: price.currency,
+          override: override !== null,
+        };
+        return {
+          priceType: 'fixed',
+          currency: price.currency,
+          amount: unit * quantity,
+          preset: null,
+          minimum: null,
+          maximum: null,
+          currencyOptions: {},
+          lines: [line(product.name, item.product_id, quantity, unit, price.currency, 'fixed', null, null)],
+          recurring,
+        };
+      }
+
       if (currency !== null && currency !== price.currency) {
         throw fail(
           'validation_failed',
@@ -418,6 +535,7 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
       maximum: custom?.maximum ?? null,
       currencyOptions,
       lines,
+      recurring: null,
     };
   }
 
@@ -465,10 +583,10 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
           `pricing.amount: the minimum for ${currency} is ${toDecimal(minimum, currency)}.`,
         );
       }
-      return { priceType, currency, amount, preset: null, minimum: null, maximum: null, currencyOptions: options, lines: [] };
+      return { priceType, currency, amount, preset: null, minimum: null, maximum: null, currencyOptions: options, lines: [], recurring: null };
     }
     if (priceType === 'free') {
-      return { priceType, currency, amount: 0, preset: null, minimum: null, maximum: null, currencyOptions: {}, lines: [] };
+      return { priceType, currency, amount: 0, preset: null, minimum: null, maximum: null, currencyOptions: {}, lines: [], recurring: null };
     }
     const optional = (value: string | undefined, field: string, allowZero = false) =>
       value === undefined ? null : toMinor(value, currency, field, { allowZero });
@@ -481,6 +599,7 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
       maximum: optional(pricing.maximum_amount, 'pricing.maximum_amount'),
       currencyOptions: {},
       lines: [],
+      recurring: null,
     };
   }
 
@@ -694,6 +813,9 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
    */
   async function completeFree(checkout: StoredCheckout): Promise<void> {
     assertOpen(checkout, null);
+    if (chargeless(checkout)) {
+      throw fail('invalid_state_transition', 'CHECKOUT_ERROR', 'This checkout needs a card.');
+    }
     if ((checkout.amount ?? 0) !== 0 || checkout.paymentId) {
       throw fail('invalid_state_transition', 'CHECKOUT_ERROR', 'This checkout needs a payment.');
     }
@@ -712,12 +834,63 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
     });
   }
 
+  /** Whether this checkout collects a card and charges nothing: `setup`, or a subscription's trial. */
+  function chargeless(checkout: StoredCheckout): boolean {
+    return checkout.mode === 'setup' || (checkout.mode === 'subscription' && Boolean(checkout.recurring?.trial));
+  }
+
+  /** The card the payer typed, checked; the number never leaves this function (spec §29). */
+  function readCard(form: Form) {
+    const number = (form.card_number ?? '').replace(/\s+/g, '');
+    if (!/^\d{12,19}$/.test(number)) {
+      throw fail('validation_failed', 'VALIDATION_ERROR', 'Enter a card number.');
+    }
+    // Blank means "a card good for years": the page cannot know the virtual
+    // date ahead of time, so its defaults are filled in from the clock here.
+    const month = form.exp_month ? Number(form.exp_month) : 12;
+    const year = form.exp_year ? Number(form.exp_year) : new Date(clock.now()).getUTCFullYear() + 5;
+    if (!Number.isInteger(month) || month < 1 || month > 12 || !Number.isInteger(year) || year < 2000) {
+      throw fail('validation_failed', 'VALIDATION_ERROR', 'Enter a valid expiry month and year.');
+    }
+    assertNotExpired(month, year, clock.now());
+    return { refusal: TEST_CARDS[number], facts: cardFacts(number, month, year) };
+  }
+
+  /**
+   * Collect a card without charging: "Bachs saves their card without charging
+   * it, creates the subscription in trialing, and schedules the first charge
+   * for the end of the trial", or, in `setup` mode, just saves it. A test
+   * card that would be refused is refused here too and nothing is saved.
+   */
+  async function saveWithoutCharge(checkout: StoredCheckout, form: Form): Promise<void> {
+    if (form.corridor && form.corridor !== 'USD_CARD') {
+      throw fail('validation_failed', 'PAYMENT_METHOD_NOT_ALLOWED', 'Only a USD card can be saved here.');
+    }
+    const card = readCard(form);
+    if (card.refusal) throw fail('validation_failed', 'PAYMENT_ERROR', card.refusal.message);
+    const fulfilment = await ctx.billing.fulfilCheckout(checkout, null, card.facts);
+    const now = clock.nowISO();
+    const next: StoredCheckout = { ...checkout, status: 'completed', completedAt: now, updatedAt: now };
+    await engine.recordEvent({
+      provider: PROVIDER,
+      type: 'checkout.completed',
+      resourceType: 'checkout',
+      resourceId: checkout.id,
+      data: { checkout_id: checkout.id, subscription_id: fulfilment.subscriptionId },
+      apply: (tx) => tx.providerState.put(PROVIDER, `checkout:${checkout.id}`, JSON.stringify(next), now),
+    });
+  }
+
   /** Start (or retry) an attempt on the chosen corridor. */
   async function pay(checkout: StoredCheckout, form: Form): Promise<void> {
     let payment = await paymentOf(checkout);
     assertOpen(checkout, payment);
     if (!checkout.customerDetails) {
       throw fail('validation_failed', 'VALIDATION_ERROR', 'Enter your email address first.');
+    }
+    if (chargeless(checkout)) {
+      await saveWithoutCharge(checkout, form);
+      return;
     }
     if (checkout.amount === null) {
       throw fail('validation_failed', 'CUSTOM_AMOUNT_REQUIRED', 'Choose an amount first.');
@@ -733,20 +906,29 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
       throw fail('validation_failed', 'PAYMENT_METHOD_NOT_ALLOWED', `This checkout is not priced in ${currency}.`);
     }
 
-    // Validate what the corridor needs before creating anything.
-    const details: Metadata = { corridor };
+    // Validate what the corridor needs before creating anything. The engine
+    // merges an attempt's details into the payment's, so the card facts are
+    // cleared unless this attempt sets them: a card refused earlier must not
+    // be saved by a later attempt on another rail ("a payment on another rail
+    // saves nothing").
+    const details: Metadata = { corridor, card_fingerprint: null, card_behaviour: null };
     let cardOutcome: (typeof TEST_CARDS)[string] | undefined;
     if (info.method === 'card') {
-      const number = (form.card_number ?? '').replace(/\s+/g, '');
-      if (!/^\d{12,19}$/.test(number)) {
-        throw fail('validation_failed', 'VALIDATION_ERROR', 'Enter a card number.');
-      }
       // The number decides the outcome and is then dropped: only the brand
       // and last four are kept, and the security code is never read at all
       // (spec §29).
-      cardOutcome = TEST_CARDS[number];
-      details.brand = number.startsWith('4') ? 'visa' : number.startsWith('5') ? 'mastercard' : 'card';
-      details.last4 = number.slice(-4);
+      const card = readCard(form);
+      cardOutcome = card.refusal;
+      details.brand = card.facts.brand;
+      details.last4 = card.facts.last4;
+      if ((checkout.mode === 'subscription' || checkout.savePaymentMethod) && !card.refusal) {
+        // What saving the card needs once the payment settles: a fingerprint
+        // (never the number), its expiry, and how later charges behave.
+        details.exp_month = card.facts.expMonth;
+        details.exp_year = card.facts.expYear;
+        details.card_fingerprint = card.facts.fingerprint;
+        details.card_behaviour = card.facts.behaviour;
+      }
     } else if (info.method === 'mobile_money') {
       const phone = (form.phone_number ?? '').trim();
       if (!/^\+?\d{8,15}$/.test(phone)) {
@@ -1027,6 +1209,8 @@ export function createBachsExpiryHandler(options: {
   storage: Storage;
   clock: { nowISO(): string };
   ids: IdFactory;
+  /** For the completion backstop; see `expire`. */
+  billing?: BachsBilling;
 }) {
   return async (job: Job): Promise<void> => {
     const checkoutId = String(job.payload.checkoutId ?? '');
@@ -1043,6 +1227,43 @@ export function createBachsExpiryHandler(options: {
     if (!checkout.paymentId) {
       if (checkout.status !== 'open') return;
       const now = options.clock.nowISO();
+      // A trial or setup checkout that saved its card (and started its
+      // subscription) but stopped before recording its completion completed,
+      // and must not now be reported expired beside a live subscription.
+      // A crash can also land before the fulfilment record itself, after the
+      // subscription was started: its id is derived from the checkout's.
+      const fulfilment = await state.fulfilments.get(checkout.id);
+      const started =
+        checkout.mode === 'subscription'
+          ? await state.subscriptions.get(derivedId('sub', `subscription:${checkout.id}`))
+          : null;
+      if (fulfilment?.paymentMethodId || started?.engineId) {
+        const completed: StoredCheckout = {
+          ...checkout,
+          status: 'completed',
+          completedAt: fulfilment?.at ?? started?.createdAt ?? now,
+          updatedAt: now,
+        };
+        await options.engine.recordEvent({
+          provider: PROVIDER,
+          type: 'checkout.completed',
+          resourceType: 'checkout',
+          resourceId: checkout.id,
+          data: { checkout_id: checkout.id, subscription_id: fulfilment?.subscriptionId ?? started?.id ?? null },
+          apply: async (tx) => {
+            await tx.providerState.put(PROVIDER, `checkout:${checkout.id}`, JSON.stringify(completed), now);
+            if (!fulfilment && started) {
+              await tx.providerState.put(
+                PROVIDER,
+                `checkout-fulfilment:${checkout.id}`,
+                JSON.stringify({ paymentMethodId: started.paymentMethodId, subscriptionId: started.id, at: started.createdAt }),
+                now,
+              );
+            }
+          },
+        });
+        return;
+      }
       const next: StoredCheckout = { ...checkout, status: 'expired', updatedAt: now };
       await options.engine.recordEvent({
         provider: PROVIDER,
@@ -1057,6 +1278,21 @@ export function createBachsExpiryHandler(options: {
 
     const payment = await options.storage.payments.byId(checkout.paymentId);
     if (!payment) return;
+    // A paid checkout's completion work -- the saved card, the subscription --
+    // runs from the payment's success event, which lives in memory. If that
+    // was lost (the process stopped between the payment committing and the
+    // work finishing, or the payment settled before this session had adopted
+    // it), this durable job is the backstop. Idempotent: a checkout already
+    // fulfilled is left alone.
+    if (
+      options.billing &&
+      payment.status === 'successful' &&
+      (checkout.mode === 'subscription' || checkout.savePaymentMethod) &&
+      !(await state.fulfilments.get(checkout.id))
+    ) {
+      await options.billing.fulfilCheckout(checkout, payment, factsFromDetails(payment.paymentMethodDetails));
+      return;
+    }
     // Every state still waiting on money. `authorized` is not one Bachs
     // reaches, but paybox's own tooling can put a payment there, and the
     // session must not then stay open forever.

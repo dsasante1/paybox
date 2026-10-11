@@ -44,7 +44,9 @@ export function registerPaymentRoutes(fastify: FastifyInstance, ctx: RouteContex
     const rows = await Promise.all(
       page.items.map(async (payment) => ({
         payment,
-        seq: (await state.checkouts.byPayment(payment.id))?.paymentSeq,
+        seq:
+          (await state.checkouts.byPayment(payment.id))?.paymentSeq ??
+          (await state.paymentMeta.get(payment.id))?.seq,
       })),
     );
     return rows
@@ -92,6 +94,7 @@ export function registerPaymentRoutes(fastify: FastifyInstance, ctx: RouteContex
         organizationId: ctx.organizationId,
         customerId: customer?.providerCustomerId ?? null,
         checkout: context.checkout,
+        meta: context.meta,
         history: context.history,
       }),
     );

@@ -462,6 +462,7 @@ export async function buildApp(context: PayboxContext): Promise<FastifyInstance>
           baseUrl: context.baseUrl,
           basePath: '/bachs',
           allowAnyKey: context.config.security.allowAnyKey,
+          subscriptionRecovery: context.config.bachs.subscriptionRecovery,
         });
       },
       { prefix: '/bachs' },

@@ -85,9 +85,32 @@ export interface StoredLine {
   maximum: number | null;
 }
 
+/** What a checkout is for. `payment` when absent: every pre-billing record. */
+export type CheckoutMode = 'payment' | 'subscription' | 'setup';
+
+/** The recurring product a subscription checkout sells, priced when the checkout was made. */
+export interface StoredRecurring {
+  productId: string;
+  productName: string;
+  cycle: Cadence;
+  trial: Cadence | null;
+  /** Per unit, minor units of `currency`; an ad hoc override when the cart set one. */
+  unitAmount: number;
+  quantity: number;
+  currency: string;
+  /** True when the cart overrode the catalog price ("an archived, one-off price"). */
+  override: boolean;
+}
+
 export interface StoredCheckout {
   /** `chk_…`. */
   id: string;
+  /** Absent on checkouts stored before subscriptions existed: `payment`. */
+  mode?: CheckoutMode;
+  /** `save_payment_method`. */
+  savePaymentMethod?: boolean;
+  /** Set for a subscription checkout. */
+  recurring?: StoredRecurring | null;
   /** The hosted page's URL token; addresses the session from a payer's browser. */
   token: string;
   /** Null until the payer starts paying -- Bachs' `charge: null` while open. */
@@ -149,6 +172,150 @@ export interface StoredEndpoint {
   eventSource: 'account' | 'connect' | 'all';
   disabledAt: string | null;
   disabledReason: string | null;
+}
+
+/** What a checkout's completion produced, written once by whichever path completed it. */
+export interface StoredFulfilment {
+  paymentMethodId: string | null;
+  subscriptionId: string | null;
+  at: string;
+}
+
+/**
+ * A saved card (`pm_…`). The card itself is a core Authorization
+ * (`engineId`); this is the Bachs remainder.
+ */
+export interface StoredPaymentMethod {
+  seq?: number;
+  id: string;
+  engineId: string;
+  /** Core customer id. "Cards are scoped to one customer." */
+  customerId: string;
+  /** The currency the card bills in: USD for a USD_CARD save, NGN for NGN_CARD. */
+  currency: string;
+  /**
+   * What later off-session charges do. Bachs' sandbox card 4000000000000341
+   * "Saves, and later charges are declined"; every other saved card succeeds.
+   */
+  behaviour: 'succeeds' | 'declines';
+  createdAt: string;
+}
+
+/** A Bachs subscription's remainder over the core Subscription (`engineId`). */
+export interface StoredSubscription {
+  seq?: number;
+  /** `sub_…`, also the core row's providerSubscriptionCode. */
+  id: string;
+  engineId: string;
+  /** Core customer id. */
+  customerId: string;
+  productId: string;
+  priceId: string;
+  /** The price is an ad hoc override: "an archived, one-off price ... kept out of your catalog". */
+  overridePrice: boolean;
+  itemId: string;
+  checkoutId: string | null;
+  paymentMethodId: string | null;
+  unitAmount: number;
+  quantity: number;
+  currency: string;
+  cycle: Cadence;
+  trialEnd: string | null;
+  /** Periods are measured from here: the start, or the end of the trial. */
+  anchor: string;
+  /** Periods elapsed since `anchor`; the current period ends at boundary `cycles`. */
+  cycles: number;
+  periodStart: string;
+  periodEnd: string;
+  /** When the next renewal job is due; null once nothing more is scheduled. */
+  nextRenewalAt: string | null;
+  previouslyBilledAt: string | null;
+  /**
+   * Whether the current period was invoiced. False for a trial and for a
+   * period that began while recovery was running, which no invoice covers:
+   * a plan change prorates nothing there, so no credit is given for time
+   * nobody paid for. Absent on records written before it existed: true.
+   */
+  periodBilled?: boolean;
+  /**
+   * A charge failed and its invoice is still owed. Bachs' `past_due` (or
+   * `unpaid` once `exhausted`) is read from this as much as from canonical
+   * `attention`: paybox's tooling can move the core row (to `non_renewing`,
+   * say) without paying anything, and the status must not claim `active`
+   * while money is owed. Set before the core row moves, cleared on recovery.
+   */
+  owing?: boolean;
+  cancelAtPeriodEnd: boolean;
+  canceledAt: string | null;
+  cancellationReason: string | null;
+  /** Recovery ran out and the account keeps unpaid subscriptions: Bachs' `unpaid`. */
+  exhausted: boolean;
+  /** `next_cycle` proration carried into the next renewal invoice, signed minor units. */
+  deferredProration: number;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+  priceCreatedAt: string;
+}
+
+/** A Bachs invoice's remainder over the core Invoice, keyed by the core id. */
+export interface StoredInvoice {
+  /** `inv_…`. */
+  id: string;
+  engineId: string;
+  subscriptionId: string | null;
+  kind: 'cycle' | 'proration';
+  /** Customer credit taken off this invoice, minor units. */
+  creditApplied: number;
+  /** Retries already made after the first failure (0-3). */
+  retries: number;
+  nextPaymentAttempt: string | null;
+  createdAt: string;
+}
+
+/** Why a payment that no checkout made exists: renewals, prorations, off-session charges. */
+export interface StoredPaymentMeta {
+  seq?: number;
+  billingReason: 'purchase' | 'subscription_create' | 'subscription_cycle' | 'subscription_update';
+  /** `api` for POST /v1/charges, `subscription` for renewals and prorations. */
+  channel: string;
+  subscriptionId: string | null;
+  invoiceEngineId: string | null;
+  reference: string | null;
+  description: string | null;
+  metadata: Record<string, unknown>;
+  /** Set when the card billed a different currency than the charge settles in. */
+  conversion: { cardCurrency: string; cardAmount: number; ngnPerUsd: number } | null;
+}
+
+/** One movement of a customer's credit balance; the balance is their sum. */
+export interface CreditEntry {
+  /** Positive: credit granted. Negative: credit applied to an invoice. */
+  amount: number;
+  reason: 'downgrade' | 'applied';
+  invoiceEngineId: string | null;
+  subscriptionId: string | null;
+  at: string;
+}
+
+export interface StoredProductGroup {
+  seq?: number;
+  /** `pgrp_…`. */
+  id: string;
+  name: string;
+  productIds: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StoredPortalSession {
+  /** `psn_…`. */
+  id: string;
+  token: string;
+  /** Core customer id. */
+  customerId: string;
+  expiresAt: string;
+  createdAt: string;
 }
 
 export interface StoredIdempotency {
@@ -240,6 +407,65 @@ export function bachsState(storage: Storage, now: () => string) {
       get: (id: string) => read<StoredEndpoint>(`endpoint:${id}`),
       put: (endpoint: StoredEndpoint) => write(`endpoint:${endpoint.id}`, endpoint),
       delete: (id: string) => storage.providerState.delete(PROVIDER, `endpoint:${id}`),
+    },
+    fulfilments: {
+      get: (checkoutId: string) => read<StoredFulfilment>(`checkout-fulfilment:${checkoutId}`),
+      put: (checkoutId: string, fulfilment: StoredFulfilment) =>
+        write(`checkout-fulfilment:${checkoutId}`, fulfilment),
+    },
+    paymentMethods: {
+      get: (id: string) => read<StoredPaymentMethod>(`pm:${id}`),
+      put: (method: StoredPaymentMethod) => write(`pm:${method.id}`, method),
+      /** The customer's default card: "The first card a customer saves becomes their default." */
+      async defaultFor(customerId: string): Promise<StoredPaymentMethod | null> {
+        const index = await read<{ id: string }>(`pm-default:${customerId}`);
+        return index ? read<StoredPaymentMethod>(`pm:${index.id}`) : null;
+      },
+      setDefault: (customerId: string, id: string) => write(`pm-default:${customerId}`, { id }),
+      async forCustomer(customerId: string): Promise<StoredPaymentMethod[]> {
+        return (await all<StoredPaymentMethod>('pm:')).filter((method) => method.customerId === customerId);
+      },
+    },
+    subscriptions: {
+      get: (id: string) => read<StoredSubscription>(`subscription:${id}`),
+      put: (subscription: StoredSubscription) => write(`subscription:${subscription.id}`, subscription),
+      all: () => all<StoredSubscription>('subscription:'),
+    },
+    invoices: {
+      get: (engineId: string) => read<StoredInvoice>(`invoice:${engineId}`),
+      put: (invoice: StoredInvoice) => write(`invoice:${invoice.engineId}`, invoice),
+    },
+    paymentMeta: {
+      get: (paymentId: string) => read<StoredPaymentMeta>(`payment-meta:${paymentId}`),
+      put: (paymentId: string, meta: StoredPaymentMeta) => write(`payment-meta:${paymentId}`, meta),
+    },
+    credit: {
+      async entries(customerId: string, currency: string): Promise<CreditEntry[]> {
+        return (await read<CreditEntry[]>(`credit:${customerId}:${currency}`)) ?? [];
+      },
+      async balance(customerId: string, currency: string): Promise<number> {
+        const entries = (await read<CreditEntry[]>(`credit:${customerId}:${currency}`)) ?? [];
+        return entries.reduce((sum, entry) => sum + entry.amount, 0);
+      },
+      async append(customerId: string, currency: string, entry: CreditEntry): Promise<void> {
+        const entries = (await read<CreditEntry[]>(`credit:${customerId}:${currency}`)) ?? [];
+        await write(`credit:${customerId}:${currency}`, [...entries, entry]);
+      },
+    },
+    groups: {
+      get: (id: string) => read<StoredProductGroup>(`group:${id}`),
+      put: (group: StoredProductGroup) => write(`group:${group.id}`, group),
+      delete: (id: string) => storage.providerState.delete(PROVIDER, `group:${id}`),
+      all: () => all<StoredProductGroup>('group:'),
+    },
+    portals: {
+      get: (id: string) => read<StoredPortalSession>(`portal:${id}`),
+      put: (session: StoredPortalSession) => write(`portal:${session.id}`, session),
+      async byToken(token: string): Promise<StoredPortalSession | null> {
+        const index = await read<{ id: string }>(`portal-token:${token}`);
+        return index ? read<StoredPortalSession>(`portal:${index.id}`) : null;
+      },
+      indexToken: (token: string, id: string) => write(`portal-token:${token}`, { id }),
     },
     idempotency: {
       get: (scope: string) => read<StoredIdempotency>(`idem:${scope}`),

@@ -55,7 +55,20 @@ function controls(action: string, buttons: Array<[string, string]>): string {
     .join('')}`;
 }
 
+const EVERY: Record<string, string> = { day: 'day', week: 'week', month: 'month', year: 'year' };
+
+function cadence(cycle: { interval: string; frequency: number }): string {
+  const unit = EVERY[cycle.interval] ?? cycle.interval;
+  return cycle.frequency === 1 ? unit : `${cycle.frequency} ${unit}s`;
+}
+
 function heading(checkout: StoredCheckout, payment: Payment | null): string {
+  if (checkout.mode === 'setup') return 'Save a card';
+  const recurring = checkout.recurring;
+  if (recurring) {
+    const price = `${formatAmount(recurring.unitAmount * recurring.quantity, recurring.currency)} every ${cadence(recurring.cycle)}`;
+    return recurring.trial ? `Free for ${cadence(recurring.trial)}, then ${price}` : price;
+  }
   if (payment) return formatAmount(payment.amount, payment.currency);
   if (checkout.amount === null) return `Pay what you want (${checkout.currency})`;
   return formatAmount(checkout.amount, checkout.currency);
@@ -103,6 +116,8 @@ export function renderCheckoutPage(options: {
          <button class="pay" type="submit">Continue</button>`,
       ),
     );
+  } else if (checkout.mode === 'setup' || (checkout.recurring?.trial && !payment)) {
+    parts.push(saveForm(checkout, `${base}/pay`));
   } else if (checkout.amount === 0 && !payment) {
     parts.push(form(`${base}/complete`, `<button class="pay" type="submit">Complete order</button>`));
   } else if (payment && ['pending', 'requires_action', 'processing'].includes(payment.status)) {
@@ -137,6 +152,7 @@ function methodForm(checkout: StoredCheckout, payment: Payment | null, action: s
     action,
     `<label for="corridor">Payment method</label><select id="corridor" name="corridor">${options}</select>
      <label for="card_number">Card number (cards)</label><input id="card_number" name="card_number" value="4242424242424242" autocomplete="off">
+     ${expiryFields()}
      <label for="phone_number">Mobile money number (mobile money)</label><input id="phone_number" name="phone_number" value="+233241234567">
      <label for="provider">Network (mobile money)</label><input id="provider" name="provider" value="MTN">
      <label for="asset">Asset (crypto)</label><select id="asset" name="asset">${assets}</select>
@@ -144,7 +160,34 @@ function methodForm(checkout: StoredCheckout, payment: Payment | null, action: s
      <p class="muted">Cards follow Bachs' sandbox numbers: <code>4000000000000002</code> declined,
      <code>4000000000009995</code> insufficient funds, <code>4000000000000069</code> expired,
      <code>4000000000000119</code> processing error; any other number succeeds about a second
-     later. Other methods wait for a paybox test control. See docs/bachs.md.</p>`,
+     later${saving(checkout) ? `, and <code>4000000000000341</code> is saved and then declined by
+     every later charge` : ''}. Other methods wait for a paybox test control. See docs/bachs.md.</p>`,
+  );
+}
+
+function saving(checkout: StoredCheckout): boolean {
+  return checkout.mode === 'subscription' || checkout.mode === 'setup' || checkout.savePaymentMethod === true;
+}
+
+function expiryFields(): string {
+  // Left blank, the card is good for years from the virtual date.
+  return `<label for="exp_month">Expiry month</label><input id="exp_month" name="exp_month" placeholder="12">
+     <label for="exp_year">Expiry year</label><input id="exp_year" name="exp_year" placeholder="five years on">`;
+}
+
+/** A card collected without a charge: a trial's, or a `setup` checkout's. */
+function saveForm(checkout: StoredCheckout, action: string): string {
+  const label = checkout.mode === 'setup' ? 'Save card' : 'Start trial';
+  return form(
+    action,
+    `<input type="hidden" name="corridor" value="USD_CARD">
+     <label for="card_number">Card number</label><input id="card_number" name="card_number" value="4242424242424242" autocomplete="off">
+     ${expiryFields()}
+     <p class="muted">Nothing is charged now; the card is saved${
+       checkout.mode === 'subscription' ? ' and billed when the trial ends' : ''
+     }. <code>4000000000000341</code> saves and is then declined by every later charge;
+     <code>4000000000000002</code> and the other refusal numbers are not saved.</p>
+     <button class="pay" type="submit">${label}</button>`,
   );
 }
 
@@ -210,7 +253,11 @@ export function renderCheckoutResult(options: {
     status === 'completed'
       ? payment
         ? 'Payment received.'
-        : 'Order complete. Nothing was due.'
+        : checkout.mode === 'setup'
+          ? 'Card saved.'
+          : checkout.mode === 'subscription'
+            ? 'Trial started. Nothing was charged.'
+            : 'Order complete. Nothing was due.'
       : status === 'expired'
         ? 'This checkout has expired.'
         : 'This checkout was cancelled.';

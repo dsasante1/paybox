@@ -57,6 +57,9 @@ balance:
   opening: 10000000       # opening test float per provider and currency, minor units
   transferFee: {}         # per-currency flat fee override, e.g. { NGN: 2500 }
 
+bachs:
+  subscriptionRecovery: cancel   # cancel | unpaid -- when a subscription's retries run out
+
 logLevel: info            # debug | info | warn | error
 ```
 
@@ -80,6 +83,7 @@ logLevel: info            # debug | info | warn | error
 | `simulation.autoAdvanceDelayMs` | `PAYBOX_AUTO_ADVANCE_MS` | `3000` | Virtual milliseconds between a charge and its instrument's outcome. Under a frozen clock this is how far you must `time advance`. |
 | `balance.enforce` | `PAYBOX_ENFORCE_BALANCE` | `true` | `false` lets any transfer through regardless of balance. |
 | `balance.opening` | `PAYBOX_OPENING_BALANCE` | `10000000` | Applies to every provider and currency. Not a ledger row: `paybox reset` leaves it alone. `0` starts empty. |
+| `bachs.subscriptionRecovery` | `PAYBOX_BACHS_SUBSCRIPTION_RECOVERY` | `cancel` | What a Bachs subscription does when its last retry fails: `cancel` (Bachs' default) or `unpaid`. A dashboard-only setting at Bachs; see [bachs.md](bachs.md#recovery). Anything else refuses to start. |
 | `balance.transferFee` | — | `{}` | File only. A currency listed here replaces Paystack's published tiered schedule outright with a flat fee in minor units. |
 | `logLevel` | `PAYBOX_LOG_LEVEL` | `info` | Structured JSON lines on stdout; `paybox logs` reads the in-memory ring buffer. |
 

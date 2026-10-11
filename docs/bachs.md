@@ -20,10 +20,14 @@ so paybox follows one rule throughout:
 Base path: `/bachs`. Bachs' own paths begin `/v1/`, so set your client's base
 URL to `http://localhost:8080/bachs` and every path works unchanged.
 
-This is the first phase of Bachs: **collection**. That covers checkout
-sessions, the hosted page, payments, products, customers, refunds, balances
-and the webhook-endpoint API. [Not implemented](#not-implemented) lists
-what comes later.
+Two of Bachs' phases are here.
+
+- **Collection**: checkout sessions, the hosted page, payments, products,
+  customers, refunds, balances and the webhook-endpoint API.
+- **Billing**: subscriptions, saved cards, off-session charges, product groups
+  and the customer portal.
+
+[Not implemented](#not-implemented) lists what comes later.
 
 ## Endpoints
 
@@ -31,11 +35,27 @@ what comes later.
 
 | Endpoint | Status | Notes |
 | --- | --- | --- |
-| `POST /v1/checkout-sessions` | **Partially compatible** | Cart or raw `pricing`; fixed, free and pay-what-you-want. No subscriptions, saved cards or Connect splits (`501`). Corridors that would need live FX are not offered. |
+| `POST /v1/checkout-sessions` | **Partially compatible** | Cart or raw `pricing`; fixed, free and pay-what-you-want; a recurring product starts a subscription; `save_payment_method` with or without a price. No Connect splits (`501`). Corridors that would need live FX are not offered. |
 | `GET /v1/checkout-sessions/{checkout_id}` | **Compatible** | `charge` is `null` until the payer starts paying. |
 | `GET /v1/payments` | **Compatible** | `status_filter`; default page 50 (the spec's; the pagination guide says 20). |
 | `GET /v1/payments/{payment_id}` | **Compatible** | `PaymentResponse`. |
 | `GET /v1/payments/charges/{charge_id}` | **Compatible** | `ChargeStatusResponse`: same id, a different shape, as published. |
+| `POST /v1/charges` | **Partially compatible** | A saved card, off-session: `201` with `processing`, settled a second later, or already `failed`. The processing fee is always absorbed; the customer-pays account setting is not modelled yet. |
+
+### Subscriptions, product groups and the portal
+
+| Endpoint | Status | Notes |
+| --- | --- | --- |
+| `GET /v1/subscriptions` | **Compatible** | Newest first; `customer_id`, `status`; default page 50. |
+| `GET /v1/subscriptions/{subscription_id}` | **Compatible** | `SubscriptionResponse`. |
+| `PATCH /v1/subscriptions/{subscription_id}` | **Compatible** | Exactly one intent: `product_id` (with `proration_behavior`), `trial_end`, `payment_method_id` or `metadata`. |
+| `DELETE /v1/subscriptions/{subscription_id}` | **Compatible** | Immediately, or `cancel_at_period_end`. |
+| `POST /v1/customers/{customer_id}/portal-sessions` | **Compatible** | `200` with `id` and `url`; the link lives one virtual hour. |
+| `POST /v1/product-groups` | **Compatible** | |
+| `GET /v1/product-groups` | **Compatible** | Default page 20. |
+| `GET /v1/product-groups/{group_id}` | **Compatible** | `include_archived`. |
+| `PATCH /v1/product-groups/{group_id}` | **Compatible** | `product_ids` replaces the list and its order. |
+| `DELETE /v1/product-groups/{group_id}` | **Compatible** | `204`; member products are unaffected. |
 
 ### Products and customers
 
@@ -95,6 +115,16 @@ page and are **not Bachs API**:
 | `POST /c/{token}/complete` | **Emulator-only** | Completes a free checkout. |
 | `POST /c/{token}/pay` | **Emulator-only** | Starts an attempt on one corridor. |
 | `POST /c/{token}/simulate` | **Emulator-only** | paybox's test controls. |
+
+Bachs hosts its customer portal at `portal.bachs.io/s/{token}`; paybox's is at
+`/bachs/portal/s/{token}`, and a portal session's `url` points there.
+
+| Endpoint | Status | Notes |
+| --- | --- | --- |
+| `GET /portal/s/{token}` | **Emulator-only** | Subscriptions, invoice history and saved cards. |
+| `POST /portal/s/{token}/subscriptions/{subscription_id}/cancel` | **Emulator-only** | Cancels at the end of the period. |
+| `POST /portal/s/{token}/subscriptions/{subscription_id}/resume` | **Emulator-only** | Undoes a scheduled cancellation. |
+| `POST /portal/s/{token}/subscriptions/{subscription_id}/pay` | **Emulator-only** | A recovery payment for a `past_due` or `unpaid` subscription. |
 
 ## How a checkout behaves
 
@@ -163,6 +193,7 @@ Card numbers are Bachs' own sandbox numbers (integrate/sandbox):
 | `4000000000009995` | Insufficient funds |
 | `4000000000000069` | Expired card |
 | `4000000000000119` | Processing error |
+| `4000000000000341` | Succeeds, is saved, and declines every later off-session charge |
 | any other | Succeeds about a second later ("finalizes on its own") |
 
 Every successful payment, whether a card or an approved test control, is
@@ -188,6 +219,192 @@ event", and the checkout stays open.
 Refunds take Bachs' own `simulated_outcome` (`success`, the default, or
 `failed`) and settle one second after they are created.
 
+## How billing behaves
+
+Sources: guides/subscriptions/{overview, manage, failed-payments, trials,
+proration}, guides/payments/charge-a-saved-card,
+guides/customer-portal/*, build/use-cases/saas-subscriptions, read
+2026-10-10.
+
+### Subscriptions
+
+There is no create endpoint. A checkout whose cart holds one recurring
+product becomes a subscription checkout, and Bachs' rules apply:
+
+- It needs a `customer`.
+- It sells exactly one recurring catalog product
+  (`SUBSCRIPTION_REQUIRES_CATALOG_PRODUCT`).
+- It is priced in USD. NGN is `403 NGN_SUBSCRIPTIONS_NOT_ENABLED`, and any
+  other currency is `422 BASE_CURRENCY_NOT_HELD_BY_ORG`.
+- It is paid by USD card only (`SUBSCRIPTION_METHOD_NOT_SUPPORTED`).
+
+When it completes, the card is saved, the first cycle is billed by the
+checkout's own charge, and the subscription starts. The checkout's `metadata`
+is copied onto the subscription with the system key `checkout_id`.
+
+A product with a `trial_period` collects the card without charging and
+starts the subscription `trialing`. `checkout.completed` then says
+`payment_status: "no_payment_required"`. The first cycle is billed when the
+trial ends.
+
+Renewals run on paybox's clock: one `time advance 1y` on a monthly plan bills
+twelve times, each at its own instant. Bachs' sandbox cannot do that, because
+subscriptions there renew in real time. Every renewal opens an invoice
+(`invoice.created`), charges the saved card (`collection.succeeded` or
+`collection.failed`), and reports the new period with
+`customer.subscription.updated`.
+
+Periods are counted from the start, or from the trial's end, in calendar
+units. A subscription that starts on 31 January renews on 28 February and then
+on 31 March, never drifting to the 28th. Bachs does not document month-end
+handling; this is paybox's choice.
+
+| Status | When |
+| --- | --- |
+| `trialing` | Before the trial ends, including an active subscription given a future `trial_end`. |
+| `active` | Billing normally. |
+| `past_due` | A charge failed and recovery is running. |
+| `unpaid` | Recovery ran out and the account keeps unpaid subscriptions. |
+| `canceled` | Terminal. |
+
+`paused` is in the OpenAPI enum but no endpoint reaches it, so paybox never
+produces it.
+
+### Recovery
+
+When a renewal fails:
+
+- the invoice stays open, `invoice.payment_failed` fires, and the
+  subscription goes `past_due`;
+- Bachs retries **1, 4 and 9 days** after the first failure, each failed try
+  firing `invoice.payment_failed` again with `attempt_count` and
+  `next_payment_attempt`;
+- a success at any point pays the invoice (`invoice.paid`) and moves the
+  subscription back to `active`.
+
+When the third retry fails, the invoice becomes `uncollectible` and the
+account setting decides what happens next. That setting is dashboard-only at
+Bachs, so in paybox it is configuration: `bachs.subscriptionRecovery` in
+`paybox.yml`, or `PAYBOX_BACHS_SUBSCRIPTION_RECOVERY`.
+
+- `cancel`, the default, cancels the subscription with reason `payment_failed`
+  and fires `customer.subscription.deleted`.
+- `unpaid` keeps the subscription `unpaid` and fires
+  `customer.subscription.updated`.
+
+Changing the card with `PATCH payment_method_id` on a `past_due` or `unpaid`
+subscription retries at once, and so does the portal's recovery payment.
+
+To make renewals fail, subscribe with `4000000000000341`; Bachs' sandbox has
+no other way. A renewal charge settles at the instant it is made, because
+nobody is waiting on it, so there is no in-flight payment for `paybox
+simulate` to steer.
+
+### Changing a subscription
+
+`PATCH` takes exactly one intent; more than one, or none, is `400
+VALIDATION_ERROR`. A canceled subscription is `SUBSCRIPTION_NOT_MODIFIABLE`.
+
+- **`product_id`**: the target must recur at the same interval and frequency
+  (`SUBSCRIPTION_PLAN_INTERVAL_MISMATCH`) and have a fixed price in the
+  subscription's currency (`PLAN_NOT_PRICED_IN_CURRENCY`). `reset` is
+  `PRORATION_BEHAVIOR_NOT_SUPPORTED`.
+  - The charge is `new × remaining` minus `old × remaining`, where `remaining`
+    is the share of the current period still ahead, to the millisecond. Each
+    term is rounded half-up to the cent, in integer arithmetic.
+  - `invoice_now` (the default) charges a positive difference now on a
+    proration invoice, with the payment's `billing_reason` set to
+    `subscription_update`.
+  - `next_cycle` adds it to the next renewal invoice.
+  - `none` changes the terms only.
+  - During a trial nothing is prorated.
+  - While `past_due` or `unpaid` a plan change is refused with
+    `SUBSCRIPTION_NOT_MODIFIABLE`. Prorating a period nobody paid for would
+    credit time that was never bought. For the same reason, a period that
+    began while recovery was running, and so was never invoiced, is not
+    prorated after the subscription recovers. Bachs does not say; this is
+    paybox's choice.
+- **`trial_end`**: a future date adds or extends a trial. A past or present one
+  ends the trial and bills now, starting a fresh cycle. That is
+  `SUBSCRIPTION_NOT_TRIALING` when no trial is running.
+- **`payment_method_id`**: must be a card saved by this customer.
+- **`metadata`**: merged. A key sent as `""` is deleted, `metadata: ""` clears
+  everything, and `checkout_id` is kept.
+
+### Credit
+
+A downgrade under `invoice_now` or `next_cycle` becomes **customer credit**,
+per customer and currency. Credit is applied to the next invoice before the
+card is charged, shown as the gap between `subtotal` and `total`. An invoice
+that credit covers in full is paid without charging the card. There is no
+API to read the balance, at Bachs or here.
+
+### Cancelling
+
+- `DELETE` cancels now and fires `customer.subscription.deleted`. An invoice
+  still owed becomes `uncollectible`, and its retries stop.
+- `DELETE` with `cancel_at_period_end: true` fires
+  `customer.subscription.updated` and ends the subscription at the period end,
+  with no further charge. While a cancellation is scheduled, `next_billed_at`
+  is `null`.
+- Only the portal can undo a scheduled cancellation, as at Bachs.
+
+paybox's own tools can cancel a Bachs subscription too, for example
+`POST /api/subscriptions/{id}/disable` with `cancelled`. Bachs' renewal jobs
+re-read the subscription each time they run, so they stop. A
+`non_renewing` set that way reads as a cancellation at period end.
+
+### Saved cards and off-session charges
+
+- A card is saved only when a checkout asks: `save_payment_method`, or a
+  subscription.
+  - With a price, the customer pays and the card is kept.
+  - Without one, the checkout is `setup` mode: it collects a USD card,
+    charges nothing, and needs an existing `customer.customer_id`.
+  - A checkout that offers no card is refused with
+    `CHECKOUT_CANNOT_SAVE_PAYMENT_METHOD`.
+  - A guest saving a card joins the customer directory, because a card needs
+    an owner.
+- `payment_method.saved` fires when the card is saved.
+  - The first card a customer saves is the default.
+  - Saving the same card again returns the same `pm_` and fires nothing. A
+    later expiry date replaces the old one, as for a reissued card. A card
+    entered with an expiry already past is refused ("Your card has
+    expired.") and is not saved.
+  - A card paid by another rail saves nothing.
+- `POST /v1/charges` charges the named card, or the default one.
+  - It answers `201` with `processing`, then `collection.succeeded` a second
+    later. A refused card answers `201` with `failed`.
+  - The documented refusals each have their code: `NO_SAVED_PAYMENT_METHOD`,
+    `SAVED_PAYMENT_METHOD_NOT_FOUND` (another customer's card reads as
+    missing), `PAYMENT_METHOD_UNUSABLE` (expired, or removed with paybox's
+    tools) and `PAYMENT_METHOD_NOT_ENABLED` (a currency other than USD or
+    NGN).
+  - A charge in the other of USD and NGN converts at the fixed rate below,
+    and the payment records the card amount and the rate.
+
+### The customer portal
+
+A portal session's `url` opens paybox's portal for one customer, for one
+virtual hour; after that it shows an expiry page. Bachs' portal settings live
+only in its dashboard, so paybox offers what an account with the default
+settings offers:
+
+- viewing subscriptions, invoices and saved cards;
+- cancelling at the end of the period;
+- undoing a scheduled cancellation;
+- a recovery payment for a `past_due` or `unpaid` subscription.
+
+Switching plans, adding or removing cards, and editing name or phone are off
+by default at Bachs, so they are not offered. A session reaches only its own
+customer's subscriptions.
+
+### Product groups
+
+Product groups are stored and returned as published. `CreateCheckoutSessionRequest`
+has no field that names a group, so a group cannot yet be offered at
+checkout, and `session_mode` is always `CART`.
+
 ## Webhooks
 
 Every delivery carries the three documented headers:
@@ -212,9 +429,25 @@ instant, so a retry an hour later passes a 300-second tolerance check.
 | Rotation | The old secret keeps signing for 24 hours. V2 carries a `v1=` for each valid secret, newest first, and `X-Bachs-Signature` uses the new one. |
 | `event_source: "connect"` | Receives nothing: paybox has no connected accounts yet. |
 
-Events emitted: `checkout.completed`, `checkout.expired`, `collection.succeeded`,
-`collection.failed`, `collection.underpaid`, `customer.created`,
-`customer.updated`, `refund.created`, `refund.paid` and `refund.failed`.
+Events emitted:
+- **Checkout and collection:** `checkout.completed`, `checkout.expired`,
+  `collection.succeeded`, `collection.failed`, `collection.underpaid`.
+- **Customers:** `customer.created`, `customer.updated`.
+- **Refunds:** `refund.created`, `refund.paid`, `refund.failed`.
+- **Subscriptions:** `customer.subscription.created`,
+  `customer.subscription.updated`, `customer.subscription.deleted`.
+- **Invoices:** `invoice.created`, `invoice.paid`, `invoice.payment_failed`.
+- **Saved cards:** `payment_method.saved`.
+
+`payment_method.saved` is not in the subscribable `event_types` enum (see
+[contradictions](#contradictions-in-bachs-documentation)). An endpoint created
+through `POST /v1/webhooks/endpoints` therefore cannot ask for it. An endpoint
+registered with paybox's control API, which receives every event, does get it.
+
+Invoices exist only in webhooks; Bachs publishes no invoice REST object. Their
+`charge` is the charge object that `checkout.completed` carries, because
+Bachs gives it no shape of its own. On a payment, `invoice` names the invoice
+the payment collected.
 
 Refunds made with paybox's own tools (`paybox refund`, the dashboard) on a
 Bachs charge are Bachs refunds too. They appear in `/v1/refunds`, count
@@ -276,10 +509,14 @@ impossible, not to save work.
   over, so refusing requests would lock a test suite out for good after its
   hundredth. To exercise Bachs' `429 TOO_MANY_REQUESTS`, use paybox's network
   simulation, which answers in Bachs' envelope.
-- **No currency conversion.**
+- **One fixed exchange rate: 1 USD = 1,500 NGN.** Bachs converts at "the
+  prevailing rate", and a moving rate would break determinism. 1,500 is the
+  figure Bachs' own examples use most often. Today the only conversion is an
+  off-session charge in the other currency than the card's.
+- **No conversion at checkout.**
   - Bachs converts: a USD price can be paid in NGN at a live rate, and every
-    collection settles into a USD or NGN balance. paybox never converts, and a
-    live rate would break determinism.
+    collection settles into a USD or NGN balance. paybox does not do this
+    yet.
   - So a checkout offers only the corridors that can charge one of its
     currencies, meaning the base currency or one given in `currency_options`.
     Crypto is offered on USD checkouts.
@@ -303,6 +540,15 @@ impossible, not to save work.
 - **Webhook endpoints may be local.** Bachs requires a public HTTPS URL and
   forwards to `localhost` through its CLI. Delivering to your local app is
   what paybox is for, so any `http` or `https` URL is accepted.
+- **Off-session charges always absorb the fee.** Whether the customer pays
+  the processing fee is an account setting (`29.00` becomes `30.85`). Until
+  checkout settings are emulated, the card is charged what you ask.
+- **A plan change is refused while a payment is owed.** See
+  [Changing a subscription](#changing-a-subscription).
+- **Failed renewals do not invoice the periods that pass while unpaid.** Bachs
+  does not say what happens at a period boundary during recovery. paybox opens
+  no new invoice while one is still owed, and billing resumes at the next
+  boundary.
 - **Every card is domestic.** Bachs adds 1.5% to an international USD card. A
   test card number carries no country, so that surcharge never applies.
 
@@ -324,18 +570,23 @@ cause. Where a choice was needed, the rule at the top of this file decided it.
 | `VALIDATION_ERROR` status | Error reference: `400` | Webhook-endpoint spec: `422` | `400` |
 | Bank-transfer refunds | Refunds guide table: not refundable | Same page lists a bank-transfer timing; underpaid page says refundable | Not refundable |
 | `IDEMPOTENCY_CONFLICT` | Idempotency guide | Missing from the error reference | Returned, with no `doc_url` |
-| Subscribable events | Events overview lists `payment_method.saved` | `event_types` enum omits it | Enum |
+| Subscribable events | Events overview and saved-card guide list `payment_method.saved` | `event_types` enum omits it | Enum |
+| Subscription item id | Spec: `si_…` | Subscriptions overview: `il_…` | `si_` |
+| `paused` | Spec enum: a status | Guides: "always in exactly one" of five, none `paused` | Never produced |
+| Missing subscription | Spec: `404 NOT_FOUND` | Error reference: `SUBSCRIPTION_NOT_FOUND` | `NOT_FOUND` |
+| Downgrade under `none` | Proration table: "no charge, no credit" | Same page: credit "regardless of the proration_behavior" | No credit |
+| `next_billed_at` on a canceled subscription | Manage guide: cleared | `customer.subscription.deleted` example: still set | Cleared |
+| Invoice retrieval | Changelog: invoices "you can retrieve" | No invoice endpoint or schema in the spec | Webhooks only |
+| Product group size | Description: "two or more" | Schema: `minItems: 1` | One or more |
 
 ## Not implemented
 
 These are later phases of Bachs. They are not shortcuts.
 
-- **Subscriptions**, invoices and the customer portal. A recurring product in
-  a cart is `501`.
-- **Saved cards**: `save_payment_method`, `POST /v1/charges`,
-  `payment_method.saved`.
 - **Payouts**: destinations, quotes, schedules.
 - **Conversions**, **transfers**, **virtual accounts** and **disputes**.
 - **Connect**: accounts, persons, capabilities, platform fees, `X-Account-Id`.
-- Product groups, uploads and media, reference data, payment-method and
-  currency listings, and checkout settings.
+- Uploads and media, reference data, payment-method and currency listings,
+  and checkout settings.
+- Offering a product group at checkout (`SELECTION` sessions): the request has
+  no field for it.

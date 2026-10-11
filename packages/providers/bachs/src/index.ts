@@ -35,5 +35,14 @@ export {
   assertPublicUrl,
 } from './routes-checkout.js';
 export { BACHS_EVENT_TYPES } from './routes-webhooks.js';
+export {
+  BachsBilling,
+  BACHS_SUBSCRIPTION_RENEW_JOB,
+  BACHS_SUBSCRIPTION_RETRY_JOB,
+  periodBoundary,
+  prorate,
+  type RecoveryMode,
+} from './billing.js';
+export { NGN_PER_USD, convertMinor } from './rates.js';
 export { bachsPlugin, registerBachs, type BachsPluginOptions } from './routes.js';
 export { BACHS_COVERAGE } from './coverage.js';
