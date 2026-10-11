@@ -259,6 +259,25 @@ Everything else -- the self-enqueuing cycle, the invoice-limit check, the
 carried across untouched. Both providers now produce twelve monthly invoices
 one calendar month apart from a single `time advance 360d`.
 
+Bachs is the exception, and deliberately. Its billing differs from the
+runner's in ways that are not constants:
+
+- a failed renewal is retried on the *same* invoice on days 1, 4 and 9, then
+  cancelled or left `unpaid`;
+- a scheduled cancellation ends at the period's close;
+- customer credit is applied to an invoice before the card is charged;
+- a plan change is prorated to the cent.
+
+Teaching the shared runner all of that would have meant changing the renewal
+code Paystack and Stripe run on. So Bachs registers two jobs of its own,
+`bachs.subscription.renew` and `bachs.subscription.retry`, the same way it
+already owned its checkout expiry. They follow the same rules as the runner:
+each enqueues its successor, there is no new scheduler primitive, and each
+runs under `VirtualClock#at`. They also still write core plans,
+subscriptions, invoices, authorizations and payments, so the dashboard, CLI
+and event log see Bachs billing like any other. The runner is never started
+for a Bachs subscription. See `providers/bachs/src/billing.ts`.
+
 ## FX without the engine ever converting
 
 WeWire and Wise are payout providers built around a rate: you quote a pair,
@@ -602,6 +621,22 @@ extra event would shift every later sequence number in their logs, so the
 event is opt-in per call.
 
 ### What the adapter keeps for itself
+
+- **Billing.** As described under
+  [Recurring billing](#recurring-billing-is-provider-neutral), the adapter
+  owns subscriptions and their recovery. Each job re-reads the subscription
+  under that subscription's lock. A job that finds it ended, or finds its own
+  due date superseded, does nothing. That is what stops paybox's generic
+  tooling, which can cancel a subscription without the adapter, from leaving
+  a job acting on stale state.
+- **Checkout completion.** Saving a card and starting a subscription follow a
+  payment's own `payment.successful` event, whoever settled the payment.
+  Handlers for a specific event type run before the dispatcher's catch-all, so
+  `checkout.completed` is built after the subscription it names exists. That
+  handler takes a lock of its own (`fulfil:<checkout>`), not the checkout's,
+  because the event can be published by a caller already holding the
+  checkout lock. Lock order is checkout, then fulfil, then customer, then
+  subscription, then credit, then charge (`providers/bachs/src/locks.ts`).
 
 - **Checkout state.** A checkout's status is never stored once a payment
   exists. It is computed from the payment on every read, because a dozen

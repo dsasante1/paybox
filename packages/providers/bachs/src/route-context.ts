@@ -3,6 +3,7 @@ import type { Clock, Customer, IdFactory, Payment } from '@paybox/shared';
 import type { PaymentEngine, Storage } from '@paybox/core';
 import type { PaymentSimulator } from '@paybox/simulator';
 import type { WebhookDispatcher } from '@paybox/webhooks';
+import type { BachsBilling } from './billing.js';
 import type { PaymentContext } from './serializers.js';
 import type { BachsState, StoredCustomer } from './state.js';
 
@@ -23,6 +24,10 @@ export interface RouteContext {
   authenticate: (request: FastifyRequest) => string;
   /** Everything a payment's serialisers need beyond the payment row. */
   paymentContext(payment: Payment): Promise<PaymentContext>;
+  /** Subscriptions, invoices and off-session charges. */
+  billing: BachsBilling;
+  /** Set by the catalog routes: a product's running totals for `ProductResponse`. */
+  productTotals(productId: string): Promise<{ totalPayments: number; totalAmount: number }>;
   /** Set by the catalog routes; used by checkout to create or match a buyer. */
   customers: {
     create(input: {

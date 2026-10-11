@@ -63,6 +63,16 @@ Canonical vocabulary is snake_case. The full list and the transitions between
 them are in [Payment lifecycle](payment-lifecycle.md); each provider's mapping
 is in its contract (`docs/<provider>.md`, "Status mapping").
 
+A provider status can also be a **projection** that the canonical vocabulary
+has no word for. Bachs' subscription statuses are one case:
+
+- `past_due` and `unpaid` are both canonical `attention`. Which one it is
+  depends on whether recovery has run out.
+- A future `trial_end` reads as `trialing` on a subscription the core still
+  calls `active`.
+
+The adapter computes these on every read rather than storing them.
+
 ### Handles
 
 A payment has several names, and which one you use depends on where you are:

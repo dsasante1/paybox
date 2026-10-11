@@ -217,3 +217,67 @@ export const listRefundsQuery = z.object({
   offset: z.coerce.number().int().min(0).optional(),
   status: z.enum(['processing', 'success', 'failed']).optional(),
 });
+
+/* --------------------------------- billing --------------------------------- */
+
+export const listSubscriptionsQuery = z.object({
+  limit: z.coerce.number().int().min(1).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+  cursor: z.string().optional(),
+  customer_id: z.string().optional(),
+  // `paused` is in the object's enum but not the filter's.
+  status: z.enum(['trialing', 'active', 'past_due', 'unpaid', 'canceled']).optional(),
+});
+
+/**
+ * `UpdateSubscriptionRequest`. `proration_behavior` is a plain string here so
+ * that `reset` reaches the route and gets its documented
+ * `PRORATION_BEHAVIOR_NOT_SUPPORTED` rather than a schema error.
+ */
+export const updateSubscriptionSchema = z.object({
+  product_id: z.string().optional(),
+  trial_end: z.string().optional(),
+  payment_method_id: z.string().optional(),
+  // "`metadata: ""` clears everything" (guides/subscriptions/manage).
+  metadata: z.union([z.record(z.string(), z.unknown()), z.literal('')]).optional(),
+  proration_behavior: z.string().optional(),
+});
+
+/** `CancelSubscriptionRequest`; the body is optional. */
+export const cancelSubscriptionSchema = z.object({
+  cancel_at_period_end: z.boolean().optional(),
+  reason: z.string().max(255).nullable().optional(),
+});
+
+/** `CreateProductGroupRequest`. */
+export const createProductGroupSchema = z.object({
+  name: z.string().min(1).max(255),
+  product_ids: z.array(z.string()).min(1),
+});
+
+/** `UpdateProductGroupRequest`: `product_ids` replaces the list and its order. */
+export const updateProductGroupSchema = z.object({
+  name: z.string().min(1).max(255).optional(),
+  product_ids: z.array(z.string()).min(1).optional(),
+});
+
+export const listProductGroupsQuery = z.object({
+  limit: z.coerce.number().int().min(1).optional(),
+  cursor: z.string().optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+});
+
+export const getProductGroupQuery = z.object({
+  include_archived: z.enum(['true', 'false']).optional(),
+});
+
+/** `CreateChargeRequest`. */
+export const createChargeSchema = z.object({
+  customer: z.string(),
+  payment_method: z.string().optional(),
+  amount: decimal,
+  currency: z.string(),
+  description: z.string().optional(),
+  reference: z.string().optional(),
+  metadata: metadata.optional(),
+});
