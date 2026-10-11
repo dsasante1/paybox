@@ -166,15 +166,19 @@ export class BachsBilling {
     currency: string;
     meta: MetaInput;
     settle: 'now' | 'later';
+    /** A processing fee the customer pays on top of `amount`; zero when the merchant absorbs it. */
+    feeOnTop?: number;
   }): Promise<Payment> {
     const { method, authorization } = input;
     const corridor = method.currency === 'NGN' ? 'NGN_CARD' : 'USD_CARD';
+    // "The card is charged more than this and the response `amount` shows the total."
+    const total = input.amount + (input.feeOnTop ?? 0);
     const conversion =
       input.currency === method.currency
         ? null
         : {
             cardCurrency: method.currency,
-            cardAmount: convertMinor(input.amount, input.currency, method.currency),
+            cardAmount: convertMinor(total, input.currency, method.currency),
             ngnPerUsd: NGN_PER_USD,
           };
     const chargeId = hexId(this.#ids, 'ch');
@@ -184,7 +188,7 @@ export class BachsBilling {
       ...(input.customer.subaccountId
         ? { subaccountId: input.customer.subaccountId, settlementMode: 'direct' as const }
         : {}),
-      amount: input.amount,
+      amount: total,
       currency: input.currency,
       // The engine's reference is unique; Bachs' `reference` is the merchant's
       // own label and need not be, so it lives on the meta record.
@@ -200,6 +204,7 @@ export class BachsBilling {
         exp_year: authorization.expYear,
         payment_method_id: method.id,
         off_session: true,
+        ...(input.feeOnTop ? { customer_fee: input.feeOnTop } : {}),
       },
       metadata: {},
       status: 'created',

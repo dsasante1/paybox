@@ -78,7 +78,11 @@ export async function transferView(
     const checkout = sourceCharge ? await state.checkouts.byPayment(sourceCharge.id) : null;
     // A fee-first split's payout row carries the sale's gross, "even though
     // the seller is credited only gross − fee" (connect/split-payments).
-    if (sourceCharge && checkout?.split?.platformFee != null) amount = sourceCharge.amount;
+    // A fee the customer paid on top is not part of the sale.
+    if (sourceCharge && checkout?.split?.platformFee != null) {
+      const onTop = sourceCharge.paymentMethodDetails.customer_fee;
+      amount = sourceCharge.amount - (typeof onTop === 'number' ? onTop : 0);
+    }
   }
   return {
     id: transferIdOf(transfer.id),

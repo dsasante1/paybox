@@ -7,6 +7,16 @@ out with the next tag — see [docs/releasing.md](docs/releasing.md).
 
 ## Unreleased
 
+- **Bachs: Connect, part three**
+  ([contract](docs/bachs.md#checkout-settings)).
+  - **Checkout settings:** `/v1/accounts/checkout/settings`, per owner. These
+    set which methods a checkout offers, and `fee_preference`.
+    `customer_pays` adds the processing fee on top: a `29.00` charge on a USD
+    card is `30.85`, and the merchant settles `29.00`.
+  - **Listings:** `/v1/payment-methods`, `/v1/payment-methods/rails` and
+    `/v1/currencies/supported`.
+  - `POST /v1/charges` is now fully compatible.
+
 - **Bachs: Connect, part two**
   ([contract](docs/bachs.md#split-payments)).
   - **Split payments:** a direct charge with a `platform_fee`, and destination

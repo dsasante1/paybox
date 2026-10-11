@@ -332,6 +332,7 @@ export function activeCapabilities(account: StoredAccount): string[] {
 export function serializeAccount(
   account: StoredAccount,
   detail: { requirements: Requirement[]; values?: unknown[]; persons?: unknown[] } | null,
+  feeHandling: 'account_pays_fee' | 'customer_pays_fee' = 'account_pays_fee',
 ) {
   const requirements = detail ? { ...serializeRequirements(detail.requirements) } : null;
   if (requirements && detail?.values) Object.assign(requirements, { values: detail.values });
@@ -343,7 +344,7 @@ export function serializeAccount(
     parent_organization_id: account.parent,
     country: account.country,
     entity_type: account.entityType,
-    fee_handling: 'account_pays_fee',
+    fee_handling: feeHandling,
     enabled_payment_methods: null,
     adaptive_pricing: true,
     balance_currencies: account.balanceCurrencies,

@@ -22,6 +22,7 @@ import { isStablecoin } from './rates.js';
 import { BANKS, MOMO_COUNTRIES } from './reference.js';
 import type { RouteContext } from './route-context.js';
 import { CORRIDORS } from './routes-checkout.js';
+import { feeHandlingOf, settingsOf } from './settings.js';
 import type {
   StoredAccount,
   StoredAccountDocument,
@@ -159,7 +160,9 @@ export function registerAccountRoutes(fastify: FastifyInstance, ctx: RouteContex
     const documents = await state.accountDocuments.of(account.id);
     const requirements = requirementsOf(account, persons, documents);
     const withValues = include.includes('requirements.values');
-    return serializeAccount(account, {
+    return serializeAccount(
+      account,
+      {
       requirements,
       ...(withValues
         ? {
@@ -177,7 +180,14 @@ export function registerAccountRoutes(fastify: FastifyInstance, ctx: RouteContex
             })),
           }
         : {}),
-    });
+      },
+      await feeHandling(account.id),
+    );
+  }
+
+  /** `fee_handling`: the owner's checkout settings (`fee_preference`). */
+  async function feeHandling(account: string | null) {
+    return feeHandlingOf(await settingsOf(state, account));
   }
 
   /** `TaskValueItem[]`: what has been submitted, sensitive values masked. */
@@ -223,7 +233,7 @@ export function registerAccountRoutes(fastify: FastifyInstance, ctx: RouteContex
       parent_organization_id: null,
       country: 'NG',
       entity_type: 'company',
-      fee_handling: 'account_pays_fee',
+      fee_handling: await feeHandling(null),
       enabled_payment_methods: Object.fromEntries(Object.keys(CORRIDORS).map((corridor) => [corridor, { enabled: true }])),
       adaptive_pricing: true,
       balance_currencies: ['NGN', 'USD'],
@@ -373,8 +383,12 @@ export function registerAccountRoutes(fastify: FastifyInstance, ctx: RouteContex
     const children = actor.account
       ? []
       : (await state.accounts.all()).filter((account) => account.parent === platformId).sort((a, b) => b.seq - a.seq);
+    const items = [];
+    for (const account of children.slice(offset, offset + limit)) {
+      items.push(serializeAccount(account, null, await feeHandling(account.id)));
+    }
     return reply.send({
-      items: children.slice(offset, offset + limit).map((account) => serializeAccount(account, null)),
+      items,
       total: children.length,
       limit,
       offset,
@@ -384,7 +398,10 @@ export function registerAccountRoutes(fastify: FastifyInstance, ctx: RouteContex
   fastify.get('/v1/accounts/me', async (request, reply) => {
     const actor = await ctx.actor(request);
     if (!actor.account) return reply.send(await platformView(false));
-    return reply.send({ ...serializeAccount(actor.account, null), parent_organization_id: actor.account.parent });
+    return reply.send({
+      ...serializeAccount(actor.account, null, await feeHandling(actor.account.id)),
+      parent_organization_id: actor.account.parent,
+    });
   });
 
   fastify.get<{ Params: { account_id: string } }>('/v1/accounts/:account_id', async (request, reply) => {

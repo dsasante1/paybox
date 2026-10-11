@@ -16,6 +16,7 @@ import { BachsDisputes } from './disputes.js';
 import { registerDisputeRoutes } from './routes-disputes.js';
 import { registerAccountRoutes } from './routes-accounts.js';
 import { registerConnectMoneyRoutes } from './routes-connect-money.js';
+import { registerSettingsRoutes } from './routes-settings.js';
 import { UPLOAD_MAX_BYTES } from './uploads.js';
 import { registerCheckoutRoutes } from './routes-checkout.js';
 import { registerPaymentRoutes } from './routes-payments.js';
@@ -188,6 +189,7 @@ export const bachsPlugin: FastifyPluginAsync<BachsPluginOptions> = async (fastif
   registerDisputeRoutes(fastify, ctx);
   registerAccountRoutes(fastify, ctx);
   registerConnectMoneyRoutes(fastify, ctx);
+  registerSettingsRoutes(fastify, ctx);
   registerPortalRoutes(fastify, ctx);
   registerWebhookRoutes(fastify, ctx);
 };

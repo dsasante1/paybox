@@ -79,6 +79,9 @@ export function renderCheckoutPage(options: {
   payment: Payment | null;
   basePath: string;
   error: string | null;
+  /** The methods and crypto assets on offer now; the checkout's own and every asset by default. */
+  corridors?: Corridor[];
+  assets?: string[];
 }): string {
   const { checkout, payment } = options;
   const base = `${options.basePath}/c/${encodeURIComponent(checkout.token)}`;
@@ -126,7 +129,7 @@ export function renderCheckoutPage(options: {
     if (payment?.status === 'failed') {
       parts.push(`<div class="err">${escapeHtml(payment.failureMessage ?? 'The payment failed.')} You can try again.</div>`);
     }
-    parts.push(methodForm(checkout, payment, `${base}/pay`));
+    parts.push(methodForm(checkout, payment, `${base}/pay`, options.corridors, options.assets));
   }
 
   return renderHostedPage({
@@ -142,12 +145,18 @@ export function renderCheckoutPage(options: {
   });
 }
 
-function methodForm(checkout: StoredCheckout, payment: Payment | null, action: string): string {
-  const corridors = checkout.corridors.filter((corridor) => !payment || corridorCurrency(corridor) === payment.currency);
+function methodForm(
+  checkout: StoredCheckout,
+  payment: Payment | null,
+  action: string,
+  offered: Corridor[] = checkout.corridors,
+  available: readonly string[] = ASSETS,
+): string {
+  const corridors = offered.filter((corridor) => !payment || corridorCurrency(corridor) === payment.currency);
   const options = corridors
     .map((corridor) => `<option value="${corridor}">${escapeHtml(LABELS[corridor])}</option>`)
     .join('');
-  const assets = ASSETS.map((asset) => `<option value="${asset}">${asset}</option>`).join('');
+  const assets = available.map((asset) => `<option value="${asset}">${asset}</option>`).join('');
   return form(
     action,
     `<label for="corridor">Payment method</label><select id="corridor" name="corridor">${options}</select>

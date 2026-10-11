@@ -8,6 +8,7 @@ import { hexId } from './ids.js';
 import { toMinor } from './money.js';
 import { canConvert } from './rates.js';
 import { hasCapability } from './accounts.js';
+import { feeOnTop, settingsOf } from './settings.js';
 import { owns, ownerField, type Actor } from './actor.js';
 import type { RouteContext } from './route-context.js';
 import {
@@ -388,6 +389,14 @@ export function registerBillingRoutes(fastify: FastifyInstance, ctx: RouteContex
         metadata: body.metadata ?? {},
       },
       settle: 'later',
+      // The account's fee preference: "when your account passes the fee to
+      // the customer, the card is charged more than this".
+      feeOnTop: feeOnTop(
+        await settingsOf(state, actor.account?.id ?? null),
+        amount,
+        currency,
+        method.currency === 'NGN' ? 'NGN_CARD' : 'USD_CARD',
+      ),
     });
     return reply.status(201).send(serializePayment(payment, await ctx.paymentContext(payment)));
   });

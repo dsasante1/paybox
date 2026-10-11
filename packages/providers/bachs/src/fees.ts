@@ -1,3 +1,4 @@
+import { convertMinor } from './rates.js';
 /**
  * Bachs' processing fees, as published (docs.bachs.io/for-you/fees, read
  * 2026-10-10). Pure arithmetic on integer minor units, rounded half-up, so a
@@ -57,7 +58,22 @@ export function virtualAccountFee(amount: number): number {
   return Math.min(Math.floor((amount * 100 + 5_000) / 10_000), 30_000);
 }
 
-/** The processing fee on `amount` minor units collected through `corridor`. */
+/** The currency each corridor's fee rule is written in. */
+const RULE_CURRENCY: Record<string, string> = { USD_CARD: 'USD', NGN_CARD: 'NGN', NGN_BANK_TRANSFER: 'NGN', CRYPTO: 'USD' };
+
+/**
+ * The fee on `amount` minor units of `currency` through `corridor`, worked
+ * out in the currency the rule is written in. A USD card's "$0.40" stays 40
+ * cents when the charge is in naira and the card converts it.
+ */
+export function processingFeeIn(amount: number, currency: string, corridor: Corridor): number {
+  const ruleCurrency = RULE_CURRENCY[corridor] ?? (corridor.startsWith('MOMO_') ? corridor.slice(5) : currency);
+  if (ruleCurrency === currency) return processingFee(amount, corridor);
+  const fee = processingFee(convertMinor(amount, currency, ruleCurrency), corridor);
+  return convertMinor(fee, ruleCurrency, currency);
+}
+
+/** The processing fee on `amount` minor units collected through `corridor`, in the corridor's own currency. */
 export function processingFee(amount: number, corridor: Corridor): number {
   const rule = ruleFor(corridor);
   // Half-up on the basis-point product: (amount * bps + 5000) / 10000.
