@@ -30,6 +30,9 @@
       "path": "../../packages/providers/kora"
     },
     {
+      "path": "../../packages/providers/bachs"
+    },
+    {
       "path": "../../packages/providers/quiddpay"
     },
     {

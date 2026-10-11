@@ -7,6 +7,26 @@ out with the next tag — see [docs/releasing.md](docs/releasing.md).
 
 ## Unreleased
 
+- **A ninth provider: Bachs** — `/bachs`, the first phase of its API:
+  [contract](docs/bachs.md).
+  - **Endpoints.** Checkout sessions with paybox's hosted page, payments,
+    products, customers, refunds, balances, and Bachs' full webhook-endpoint
+    API (events, attempts, resend, replay, metrics, secret rotation).
+  - **Collection.** All five rails: card, NGN bank transfer, nine mobile-money
+    corridors, and crypto with under- and overpayment.
+  - **Pricing.** Fixed, free and pay-what-you-want checkouts.
+  - **Not yet.** Subscriptions, saved cards, payouts, disputes and Connect
+    are later phases and answer `501`.
+- **Webhook delivery can now stop early, for providers that ask.** The new
+  delivery status `failed` means the provider treats the response as a
+  refusal: Bachs stops on most `4xx` and every `3xx`. `exhausted` still means
+  the retries ran out. A stopped delivery is never sent again by a stale job.
+  For every other provider, delivery is unchanged.
+- **Signing-secret rotation overlap.** An endpoint can sign with a rotated-out
+  secret until it expires (migration 0021).
+- **Six more currencies**: TZS, UGX, XAF, RWF, MWK and ZMW, for Bachs'
+  mobile-money corridors.
+
 - **Tingg is named wherever the other providers are.** It was in the generated
   endpoint tables but not in the hand-written prose beside them: the landing
   page's description, notice and docs index, the README's introduction and

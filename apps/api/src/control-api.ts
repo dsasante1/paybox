@@ -10,6 +10,7 @@ import {
 } from '@paybox/shared';
 import { parseDuration } from '@paybox/core';
 import type { SimulatedOutcome } from '@paybox/simulator';
+import { generateBachsWebhookSecret } from '@paybox/bachs';
 import { generateStripeWebhookSecret } from '@paybox/stripe';
 import { generateWewireWebhookSecret } from '@paybox/wewire';
 import { TINGG_UNUSED_SECRET } from '@paybox/tingg';
@@ -105,6 +106,7 @@ export const controlApiPlugin: FastifyPluginAsync<{ context: PayboxContext }> = 
     tingg: { status: 'partial', keys: { ...context.tinggKeys } },
     wewire: { status: 'partial', keys: context.wewireKeys },
     wise: { status: 'partial', keys: context.wiseKeys },
+    bachs: { status: 'partial', keys: context.bachsKeys },
   };
 
   fastify.get('/providers', async () => ({
@@ -705,6 +707,9 @@ export const controlApiPlugin: FastifyPluginAsync<{ context: PayboxContext }> = 
         return generateWewireWebhookSecret(context.ids.token(24));
       case 'wise':
         return WISE_UNUSED_SECRET;
+      case 'bachs':
+        // Bachs mints a `whsec_` secret per endpoint, as WeWire does.
+        return generateBachsWebhookSecret(context.ids.token(24));
     }
   }
 

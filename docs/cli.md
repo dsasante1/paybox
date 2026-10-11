@@ -186,7 +186,7 @@ An endpoint receives every event **for its provider** (`--provider` defaults
 to `paystack`; an unknown provider is refused). `--secret` is what deliveries
 are signed with; leave it out and the endpoint gets one shaped the way that
 provider's verifier expects — the local key for Paystack, Kora and
-Flutterwave, a fresh `whsec_…` for Stripe and WeWire — and the command prints
+Flutterwave, a fresh `whsec_…` for Stripe, WeWire and Bachs — and the command prints
 it. Filtering by event type (`eventTypes`) and disabling an endpoint are
 available on the API (`PATCH /api/webhooks/endpoints/:id`).
 

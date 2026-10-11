@@ -43,8 +43,23 @@ export interface WebhookEndpoint {
   /** Empty means "all events for this provider". */
   eventTypes: string[];
   description: string | null;
+  /**
+   * Secrets that were rotated out but still sign deliveries until
+   * `expiresAt`. A provider that overlaps old and new secrets during a
+   * rotation -- Bachs keeps the previous one valid for 24 hours and signs with
+   * both -- needs them at signing time, so they live on the endpoint rather
+   * than in an adapter's own state. Absent or empty for every endpoint that
+   * has never been rotated with an overlap.
+   */
+  previousSecrets?: PreviousSecret[];
   createdAt: string;
   updatedAt: string;
+}
+
+export interface PreviousSecret {
+  secret: string;
+  /** Virtual-time instant after which this secret no longer signs. */
+  expiresAt: string;
 }
 
 export type DeliveryStatus = 'pending' | 'delivering' | 'succeeded' | 'failed' | 'exhausted';

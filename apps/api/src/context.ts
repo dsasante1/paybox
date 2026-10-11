@@ -49,6 +49,13 @@ import {
   generateFlutterwaveKeys,
   generateV4Credentials,
 } from '@paybox/flutterwave';
+import {
+  BACHS_CHECKOUT_EXPIRE_JOB,
+  BachsWebhookFormatter,
+  createBachsExpiryHandler,
+  generateBachsKeys,
+  toBachsPaymentStatus,
+} from '@paybox/bachs';
 import { KoraWebhookFormatter, generateKoraKeys } from '@paybox/kora';
 import { QuiddpayWebhookFormatter, generateQuiddpayKeys } from '@paybox/quiddpay';
 import {
@@ -105,6 +112,12 @@ export interface PayboxContext {
   wewireKeys: { secretKey: string };
   /** Wise uses a bearer token; its webhooks are RSA-signed, not shared-secret. */
   wiseKeys: { apiToken: string };
+  /**
+   * Bachs has one secret key; webhook signing secrets are per endpoint and
+   * minted when one is registered. The organization id is what every Bachs
+   * webhook carries as `organization_id`.
+   */
+  bachsKeys: { secretKey: string; organizationId: string };
   baseUrl: string;
   shutdown(): Promise<void>;
 }
@@ -155,6 +168,8 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
     // Tingg's status vocabulary is numeric -- 130 pending, 183 successful,
     // 180 rejected -- so the stored providerStatus is a decimal string.
     if (provider === 'tingg') return toTinggStatus(status);
+    // Bachs' payment object: `succeeded`, `created`, `processing`, ...
+    if (provider === 'bachs') return toBachsPaymentStatus(status);
     return status;
   };
 
@@ -368,6 +383,19 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
   const wewireKeys = generateWewireKeys(ids.token(20));
   const wiseKeys = generateWiseKeys(ids.token(20));
   const flutterwaveV4 = generateV4Credentials(ids.token(20));
+  // From a stream of its own: drawing from `ids` here would shift every id
+  // minted after startup, and with it every literal id the suite asserts.
+  const bachsKeys = generateBachsKeys(createIdFactory(random.fork('bachs-keys')).token(20));
+  // Registered here rather than with the others because its envelope carries
+  // the organization id derived just above. The dispatcher looks formatters
+  // up per event, so the order of registration does not matter.
+  dispatcher.register(new BachsWebhookFormatter({ organizationId: bachsKeys.organizationId }));
+  // Bachs owns its checkout's expiry: one job closes the session whatever it
+  // holds -- no payment, an attempt in flight, or a last attempt that failed.
+  scheduler.register(
+    BACHS_CHECKOUT_EXPIRE_JOB,
+    createBachsExpiryHandler({ engine, simulator, storage, clock, ids }),
+  );
 
   return {
     config,
@@ -393,6 +421,7 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
     tinggKeys,
     wewireKeys,
     wiseKeys,
+    bachsKeys,
     baseUrl,
     async shutdown() {
       await scheduler.stop();

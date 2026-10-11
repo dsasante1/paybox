@@ -9,6 +9,7 @@ import { FLUTTERWAVE_V3_COVERAGE, FLUTTERWAVE_V4_COVERAGE } from '@paybox/flutte
 import { KORA_COVERAGE } from '@paybox/kora';
 import { WEWIRE_COVERAGE } from '@paybox/wewire';
 import { WISE_COVERAGE } from '@paybox/wise';
+import { BACHS_COVERAGE } from '@paybox/bachs';
 
 /**
  * The OpenAPI document lists the whole served surface (spec §44).
@@ -27,6 +28,7 @@ const MANIFESTS: readonly CoverageManifest[] = [
   KORA_COVERAGE,
   WEWIRE_COVERAGE,
   WISE_COVERAGE,
+  BACHS_COVERAGE,
 ];
 
 const publicPath = (manifest: CoverageManifest, entry: CoverageEntry) =>

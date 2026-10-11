@@ -8,6 +8,7 @@ import { quiddpayPlugin } from '@paybox/quiddpay';
 import { tinggPlugin } from '@paybox/tingg';
 import { wewirePlugin } from '@paybox/wewire';
 import { wisePlugin } from '@paybox/wise';
+import { bachsErrorBody, bachsPlugin } from '@paybox/bachs';
 import { paystackPlugin, fail } from '@paybox/paystack';
 import type { PayboxContext } from './context.js';
 import { controlApiPlugin } from './control-api.js';
@@ -429,6 +430,41 @@ export async function buildApp(context: PayboxContext): Promise<FastifyInstance>
         });
       },
       { prefix: '/wise' },
+    );
+  }
+
+  if (context.config.providers.bachs?.enabled !== false) {
+    await app.register(
+      async (scope) => {
+        await scope.register(networkPlugin, {
+          simulator: context.network,
+          // Bachs' flat error object; a simulated rate limit is its own
+          // TOO_MANY_REQUESTS, which is what a client branches on.
+          errorBody: (status) =>
+            status === 429
+              ? bachsErrorBody('TOO_MANY_REQUESTS', 'Rate limit exceeded. Retry after the time in Retry-After.')
+              : bachsErrorBody(
+                  'SERVICE_UNAVAILABLE',
+                  'The service is temporarily unavailable (simulated by paybox).',
+                ),
+        });
+        // No `idempotencyPlugin`: Bachs' Idempotency-Key covers POST and
+        // PATCH only, expires after 24 hours and has an in-flight state, so
+        // the adapter implements it. See providers/bachs/src/http.ts.
+        await scope.register(bachsPlugin, {
+          engine: context.engine,
+          simulator: context.simulator,
+          storage: context.storage,
+          clock: context.clock,
+          ids: context.ids,
+          dispatcher: context.dispatcher,
+          organizationId: context.bachsKeys.organizationId,
+          baseUrl: context.baseUrl,
+          basePath: '/bachs',
+          allowAnyKey: context.config.security.allowAnyKey,
+        });
+      },
+      { prefix: '/bachs' },
     );
   }
 

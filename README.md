@@ -1,8 +1,8 @@
 # paybox
 
 A local payment infrastructure emulator. Point an existing Paystack, Stripe,
-Flutterwave, Kora, Quid Payments, Tingg, WeWire or Wise integration at
-`localhost` and test the parts of payments that are hard to test: pending
+Flutterwave, Kora, Quid Payments, Tingg, WeWire, Wise or Bachs integration
+at `localhost` and test the parts of payments that are hard to test: pending
 transactions, asynchronous mobile-money authorization, duplicate webhooks,
 retries, timeouts, refunds, idempotency and flaky networks.
 
@@ -35,6 +35,7 @@ reaches a payment network, and it refuses live API keys.
 | Tingg | `/tingg` | 11 | **Partial** — [what works](docs/tingg.md) |
 | WeWire | `/wewire` | 25 | **Partial** — [what works](docs/wewire.md) |
 | Wise | `/wise` | 30 | **Partial** — [what works](docs/wise.md) |
+| Bachs | `/bachs` | 40 | **Partial** — [what works](docs/bachs.md) |
 <!-- coverage:end -->
 
 Endpoint counts are generated from each adapter's coverage manifest and checked
@@ -50,7 +51,7 @@ Flutterwave ships two live APIs with different authentication, envelopes and
 webhook signatures, so paybox implements them as two adapters rather than one
 with a flag.
 
-The engine is provider-independent, and nine adapters across eight providers
+The engine is provider-independent, and ten adapters across nine providers
 now sit on it. Anything a
 provider needs from the engine reaches it as an injected function — a status
 mapping, an instrument table, an authorization minter — never an import, so no
@@ -171,8 +172,8 @@ The ones most people need first:
 |---|---|
 | [Getting started](docs/getting-started.md) | Install, point an app at it, first payment, first webhook |
 | [Concepts](docs/concepts.md) | Canonical statuses, the event log, virtual time, determinism |
-| [Providers](docs/providers.md) | Base URL, credential, webhook verification and SDK settings for each of the eight |
-| [Contracts](docs/paystack.md) | What each adapter does and does not implement: [Paystack](docs/paystack.md), [Stripe](docs/stripe.md), [Flutterwave](docs/flutterwave.md), [Kora](docs/kora.md), [Quid Payments](docs/quiddpay.md), [Tingg](docs/tingg.md), [WeWire](docs/wewire.md), [Wise](docs/wise.md) |
+| [Providers](docs/providers.md) | Base URL, credential, webhook verification and SDK settings for each of the nine |
+| [Contracts](docs/paystack.md) | What each adapter does and does not implement: [Paystack](docs/paystack.md), [Stripe](docs/stripe.md), [Flutterwave](docs/flutterwave.md), [Kora](docs/kora.md), [Quid Payments](docs/quiddpay.md), [Tingg](docs/tingg.md), [WeWire](docs/wewire.md), [Wise](docs/wise.md), [Bachs](docs/bachs.md) |
 | [Test instruments](docs/test-instruments.md) | Which card or phone number produces which outcome |
 | [Payment lifecycle](docs/payment-lifecycle.md) | Statuses, transitions, refunds, transfers, subscriptions, disputes |
 | [Time control](docs/time.md) | What `time advance` runs, and what it does not |

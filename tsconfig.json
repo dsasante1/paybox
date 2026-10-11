@@ -6,6 +6,7 @@
     { "path": "./packages/storage" },
     { "path": "./packages/webhooks" },
     { "path": "./packages/simulator" },
+    { "path": "./packages/providers/bachs" },
     { "path": "./packages/providers/flutterwave" },
     { "path": "./packages/providers/kora" },
     { "path": "./packages/providers/quiddpay" },

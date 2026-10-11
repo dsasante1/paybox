@@ -529,3 +529,89 @@ pins it, and fails if the tiebreak is removed.
 
 The general lesson, now twice learned: in an append-only table under a frozen
 clock, a timestamp is not an ordering and an id is not a sequence.
+
+## Seams Bachs needed, and why they are general
+
+Bachs was the first provider whose webhook layer cares *what* failed, not only
+*whether* something failed. It took five additions to `@paybox/webhooks` and
+two to the engine. Every one is opt-in, so a formatter or a caller that
+declares none behaves exactly as before. The other eight adapters are
+untouched, and `tests/webhook-classification.test.ts` pins that.
+
+### `WebhookFormatter.classifyResponse` — a delivery can be refused
+
+Until Bachs, every non-2xx was retried until the ladder ran out. Bachs retries
+a timeout, a `5xx`, a `408` and a `429`, but **stops** on any other `4xx` ("we
+treat it as a refusal, so trying again would not help") and on every `3xx`
+("we do not follow redirects"). Retrying a `401` five times would teach a
+developer that a broken signature check is merely slow.
+
+A formatter may now classify every attempt as `delivered`, `retry` or `stop`.
+`stop` is recorded as `failed`, a status that existed in `DeliveryStatus`
+but that nothing set until now. It is kept distinct from `exhausted`, so the
+log tells "refused" from "gave up". This is where an existing rule moved: the
+dispatcher no longer owns the retry decision for a formatter that opts in.
+Moving it exposed a latent gap, now closed. `deliver()` used to treat only
+`succeeded` and `exhausted` as final, so a job left queued before a refusal
+would have sent the delivery again.
+
+### `SigningContext.secrets` and `WebhookEndpoint.previousSecrets` — rotation overlap
+
+Bachs keeps a rotated-out secret valid for 24 hours and signs each delivery
+with both, with one `v1=` per secret in `X-Bachs-Signature-V2`. The secrets
+live on the endpoint (migration 0021) rather than in adapter state, because the
+dispatcher needs them at signing time. They are filtered by the attempt's own
+virtual timestamp, so a retry after the overlap carries one signature.
+
+### `followsEndpointChanges` — a queued retry answers to the endpoint now
+
+At Bachs, a disabled endpoint receives "not even retries that were already
+queued", and a changed URL takes the queued retries with it. By default paybox
+keeps a delivery's URL from creation and sends regardless, which is right for
+every other provider. With the flag set, each attempt re-reads the endpoint.
+
+### `afterAttempt` — attempt-level history
+
+paybox keeps one row per delivery. Bachs lists every attempt with its own
+`wha_` id, HTTP status and response snippet, and turns an endpoint off after 72
+hours of unbroken failure. The hook hands each recorded attempt to the
+formatter, which keeps that history in `provider_state`. A throw in the hook is
+logged and never undoes the attempt.
+
+### `ResendOptions` — a resend is a single try
+
+"A resend or a replay is a single try." `replay` and `replayEvent` accept
+`maxAttempts`, and `replayEvent` accepts `endpointIds` and `eventTypes`, because
+one canonical event can be two Bachs events and a resend names one of them.
+paybox's own control-API retry and replay pass nothing and keep the full
+ladder. That tooling is the emulator's, not a provider's.
+
+### `PaymentEngine.recordEvent` — events without a payment
+
+A free Bachs checkout completes, and an unattempted one expires, with **no
+payment behind it**: Bachs creates no charge. No payment transition could
+carry `checkout.completed` or `checkout.expired`. `recordEvent` appends an
+informational event about a provider-owned resource (`resourceType:
+'checkout'`), and runs the adapter's projection write in the same transaction,
+so the event-log invariant holds for it too.
+
+### `updateCustomer(…, { event: true })`
+
+Bachs sends `customer.updated`. Every other provider here does not, and an
+extra event would shift every later sequence number in their logs, so the
+event is opt-in per call.
+
+### What the adapter keeps for itself
+
+- **Checkout state.** A checkout's status is never stored once a payment
+  exists. It is computed from the payment on every read, because a dozen
+  generic writers (`paybox simulate`, scenarios, the dashboard, the jobs) can
+  move a payment without the adapter knowing.
+- **Bachs' one-refund-per-charge rule.** It is narrower than the engine's
+  total-refunded guard. The check and the create are two engine calls that
+  cannot share a transaction, so the adapter serialises them with a per-charge
+  lock. That is sufficient in one process on one SQLite connection.
+- **Ordering.** `engine.createCustomer` and `engine.createRefund` publish their
+  events from inside the call, so the adapter writes its own record first,
+  keyed by an id it minted. The webhook must already be able to read the name
+  or reference the merchant just sent.

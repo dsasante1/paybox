@@ -872,4 +872,16 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_ledger_sequence ON balance_ledger (provider, currency, sequence);
     `,
   },
+  {
+    id: '0021_webhook_previous_secrets',
+    sql: `
+      -- Secrets rotated out of an endpoint that still sign until they expire.
+      -- Bachs overlaps old and new for 24 hours after a rotation and signs
+      -- every delivery with both, so a subscriber can deploy the new secret
+      -- without dropping traffic. The dispatcher needs them at signing time,
+      -- hence a column here rather than adapter state. '[]' is "no overlap",
+      -- which is every endpoint until something rotates one.
+      ALTER TABLE webhook_endpoints ADD COLUMN previous_secrets TEXT NOT NULL DEFAULT '[]';
+    `,
+  },
 ];

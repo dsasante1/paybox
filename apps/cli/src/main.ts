@@ -27,6 +27,7 @@ import { QUIDDPAY_COVERAGE } from '@paybox/quiddpay';
 import { TINGG_COVERAGE } from '@paybox/tingg';
 import { WEWIRE_COVERAGE } from '@paybox/wewire';
 import { WISE_COVERAGE } from '@paybox/wise';
+import { BACHS_COVERAGE } from '@paybox/bachs';
 import { CliError, PayboxClient } from './client.js';
 import {
   heading,
@@ -179,6 +180,7 @@ const MANIFESTS: readonly CoverageManifest[] = [
   TINGG_COVERAGE,
   WEWIRE_COVERAGE,
   WISE_COVERAGE,
+  BACHS_COVERAGE,
 ];
 
 program
@@ -647,7 +649,7 @@ webhook
 webhook
   .command('list')
   .description('List webhook deliveries')
-  .option('-s, --status <status>', 'pending | succeeded | failed | exhausted')
+  .option('-s, --status <status>', 'pending | delivering | succeeded | failed (refused or stopped) | exhausted (retries used up)')
   .option('-n, --limit <n>', 'how many', '25')
   .action(async (options: { status?: string; limit: string }) => {
     const query = new URLSearchParams({ limit: options.limit });

@@ -26,6 +26,7 @@ The pattern is the same everywhere:
 | Tingg | `http://127.0.0.1:8080/tingg` | `paybox_local_tingg_…` (+ OAuth client credentials) | `apiKey:` header **and** `Authorization: Bearer <token>` |
 | WeWire | `http://127.0.0.1:8080/wewire` | `sk_test_local_…` | `ww-api-key: <key>` — no Bearer |
 | Wise | `http://127.0.0.1:8080/wise` | `wise_test_local_…` | `Authorization: Bearer` |
+| Bachs | `http://127.0.0.1:8080/bachs` | `sk_sandbox_local_…` | `Authorization: Bearer` |
 
 Credentials are regenerated from the seed on every start; with a fixed
 `PAYBOX_SEED` they are stable.
@@ -44,6 +45,9 @@ Credentials are regenerated from the seed on every start; with a fixed
   See [tingg.md](tingg.md#authentication).
 - **A wrong header.** WeWire with `Authorization: Bearer` fails, because that
   is what WeWire does.
+- **Bachs answers a live key with `401 UNAUTHORIZED`**, not `403`: Bachs keeps
+  `403 FORBIDDEN` for a valid key that lacks a scope, and its sandbox rejects a
+  production key as an invalid one.
 
 ## Idempotency
 
@@ -61,6 +65,15 @@ retried with the same key. Body comparison is order-insensitive.
 WeWire and Wise take their idempotency key **in the body**, as those APIs do:
 `idempotencyKey` on WeWire's payout, collection and disbursement endpoints;
 `customerTransactionId` on Wise's `POST /v1/transfers`.
+
+Bachs takes the header, with three differences that are Bachs' own:
+- It covers `POST` and `PATCH` only, never `DELETE`.
+- A cached response expires after **24 hours** of virtual time.
+- A retry while the first request is still running is
+  `409 IDEMPOTENCY_IN_PROGRESS`; a different body is `409 IDEMPOTENCY_CONFLICT`.
+
+`POST /v1/refunds` also takes a body `idempotency_key`. See
+[bachs.md](bachs.md#request-conventions).
 
 ## Simulated outages
 
@@ -80,6 +93,7 @@ body sees exactly what its provider would send:
 | Tingg | `{ "status": { "status_code": 500, "status_description": "…" } }` |
 | WeWire | `{ "success": false, "error": { "code": "INTEGRATION_UNAVAILABLE", "message": "…", "statusCode": 500 } }` |
 | Wise | `{ "timestamp": "…", "errors": [ { "code": "unexpected.error", "message": "…" } ] }` |
+| Bachs | `{ "detail": "…", "error_code": "SERVICE_UNAVAILABLE", "doc_url": "…" }` (429: `TOO_MANY_REQUESTS`) |
 
 ---
 
@@ -478,6 +492,54 @@ branches on `data.current_state`. Contract: [wise.md](wise.md).
 
 ---
 
+## Bachs
+
+```env
+BACHS_BASE_URL=http://127.0.0.1:8080/bachs              # paths start /v1/, as at Bachs
+BACHS_API_KEY=sk_sandbox_local_…
+```
+
+Checkout-first, like Quid Payments. A merchant creates a session and sends the
+payer to `checkout_url`, which is paybox's hosted page at `/bachs/c/{token}`:
+
+```
+POST /v1/products                  → a product (optional: `pricing` takes a raw amount)
+POST /v1/checkout-sessions         → { checkout_id, checkout_url, status: "open", … }
+   … the payer pays on checkout_url …
+collection.succeeded + checkout.completed   (either order; fulfil on the first)
+```
+
+Cards follow Bachs' sandbox numbers (`4000000000000002` declined, and so on)
+and settle **one second** after payment, so run `paybox time advance 1s`. Bank
+transfer, mobile money and crypto wait for a paybox test control on the page.
+
+**Webhook.** Register an endpoint through Bachs' own API. The response
+carries a `whsec_` signing secret, once:
+
+```bash
+curl -X POST http://127.0.0.1:8080/bachs/v1/webhooks/endpoints \
+  -H "Authorization: Bearer $BACHS_API_KEY" -H 'content-type: application/json' \
+  -d '{"name":"local","url":"http://localhost:3000/webhooks/bachs","event_types":["collection.succeeded","checkout.completed"]}'
+```
+
+`X-Bachs-Signature` is the hex HMAC-SHA256 of `"{X-Bachs-Timestamp}.{raw body}"`,
+keyed with the whole secret string. `X-Bachs-Signature-V2` carries the same
+digest as `t=…,v1=…`, with one `v1=` per valid secret during a 24-hour
+rotation overlap.
+
+```js
+import { createHmac } from 'node:crypto';
+const t = req.headers['x-bachs-timestamp'];
+const ok = createHmac('sha256', secret).update(`${t}.${rawBody}`).digest('hex')
+  === req.headers['x-bachs-signature'];
+```
+
+Bachs stops retrying on a `4xx` other than `408` or `429`, and on any `3xx`.
+Return `5xx` when your own processing fails, so the delivery is retried.
+Contract: [bachs.md](bachs.md).
+
+---
+
 ## Pointing an SDK at the emulator
 
 Three tiers, in order of preference. Settings named here come from each
@@ -485,8 +547,8 @@ SDK's own documentation; confirm against the version you run.
 
 **1. Base URL from configuration.** Most integrations build requests against
 an env var or a constant. Change it; done. This covers every hand-rolled
-client and the Paystack, Flutterwave, Kora, Quid Payments, Tingg, WeWire and
-Wise examples above.
+client and the Paystack, Flutterwave, Kora, Quid Payments, Tingg, WeWire,
+Wise and Bachs examples above.
 
 **2. An SDK setting that accepts a path.** Stripe's server SDKs expose one:
 

@@ -23,6 +23,7 @@ import { QUIDDPAY_COVERAGE, registerQuiddpay } from '@paybox/quiddpay';
 import { TINGG_COVERAGE, registerTingg } from '@paybox/tingg';
 import { WEWIRE_COVERAGE, registerWewire } from '@paybox/wewire';
 import { WISE_COVERAGE, registerWise } from '@paybox/wise';
+import { BACHS_COVERAGE, registerBachs } from '@paybox/bachs';
 
 /**
  * The coverage contract, enforced.
@@ -173,6 +174,17 @@ beforeAll(async () => {
     manifest: WISE_COVERAGE,
     routes: await routesOf('/wise', (app) => registerWise(app, { ...common, basePath: '/wise' })),
   });
+  subjects.push({
+    manifest: BACHS_COVERAGE,
+    routes: await routesOf('/bachs', (app) =>
+      registerBachs(app, {
+        ...common,
+        basePath: '/bachs',
+        dispatcher: context.dispatcher,
+        organizationId: context.bachsKeys.organizationId,
+      }),
+    ),
+  });
 });
 
 afterAll(async () => {
@@ -190,6 +202,7 @@ describe('every route is declared', () => {
     'tingg',
     'wewire',
     'wise',
+    'bachs',
   ])(
     '%s serves nothing it has not declared',
     (id) => {
@@ -219,6 +232,7 @@ describe('every declaration is real', () => {
     'tingg',
     'wewire',
     'wise',
+    'bachs',
   ])(
     '%s declares nothing it does not serve',
     (id) => {
@@ -249,6 +263,7 @@ describe('every declaration is documented', () => {
     'tingg',
     'wewire',
     'wise',
+    'bachs',
   ])(
     '%s has a documentation row for each entry',
     (id) => {
@@ -364,12 +379,13 @@ describe('the published table', () => {
 
 describe('what the manifests report', () => {
   it('covers every adapter the app serves', () => {
-    // Nine adapters across eight providers: Flutterwave serves two API
+    // Ten adapters across nine providers: Flutterwave serves two API
     // versions that share nothing. Tingg goes the other way -- two APIs that
     // also share nothing, served from one prefix because a real client points
     // one base URL at both. See providers/tingg/src/routes.ts.
-    expect(subjects).toHaveLength(9);
+    expect(subjects).toHaveLength(10);
     expect(subjects.map((s) => s.manifest.id).sort()).toEqual([
+      'bachs',
       'flutterwave-v3',
       'flutterwave-v4',
       'kora',

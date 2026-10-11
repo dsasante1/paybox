@@ -15,8 +15,10 @@ import type {
   WebhookEndpoint,
 } from '@paybox/core';
 import type {
+  AttemptRecord,
   DeliveryTransport,
   ForcedOutcome,
+  ResponseClassification,
   RetryPolicy,
   TransportResult,
   WebhookChaos,
@@ -26,6 +28,27 @@ import { createRetryPolicy } from './retry.js';
 import { UndiciTransport } from './transport.js';
 
 export const WEBHOOK_DELIVERY_JOB = 'webhook.deliver';
+
+/**
+ * Options for re-sending something that was already sent once.
+ *
+ * Both default to today's behaviour. A provider whose own resend is a single
+ * try -- Bachs: "A resend or a replay is a single try. We do not retry it." --
+ * passes `maxAttempts: 1` from its adapter; paybox's own retry and replay
+ * tooling passes nothing and keeps the full ladder.
+ */
+export interface ResendOptions {
+  /** Cap the new delivery at this many attempts instead of the policy's. */
+  maxAttempts?: number;
+  /** Re-send only to these endpoints (replayEvent). */
+  endpointIds?: string[];
+  /**
+   * Re-send only these provider event types (replayEvent). One canonical
+   * event can be several provider events, and a provider's resend names one
+   * of them.
+   */
+  eventTypes?: string[];
+}
 
 export interface DispatcherOptions {
   storage: Storage;
@@ -108,6 +131,32 @@ export class WebhookDispatcher {
     return formatter.interpretResponse({ status: result.status, body: result.body }) === 'delivered';
   }
 
+  /**
+   * What this attempt means: delivered, worth another try, or refused.
+   *
+   * A formatter that declares `classifyResponse` owns the whole decision.
+   * Every other formatter gets the reading it always had -- accepted or
+   * retried, never stopped -- so `stop` exists only where a provider asked
+   * for it.
+   */
+  #classify(provider: ProviderId, result: TransportResult): ResponseClassification {
+    const formatter = this.#formatters.get(provider);
+    if (formatter?.classifyResponse) return formatter.classifyResponse(result);
+    return this.#accepted(provider, result) ? 'delivered' : 'retry';
+  }
+
+  /**
+   * Every secret that signs a delivery to this endpoint at `at`, the current
+   * one first. Rotated-out secrets count until they expire, which is what
+   * lets a provider sign with old and new together during an overlap.
+   */
+  #secretsFor(endpoint: WebhookEndpoint, at: number): string[] {
+    const previous = (endpoint.previousSecrets ?? [])
+      .filter((entry) => Date.parse(entry.expiresAt) > at)
+      .map((entry) => entry.secret);
+    return [endpoint.secret, ...previous];
+  }
+
   attachTo(bus: EventBus): void {
     bus.onAny(async (event) => {
       await this.onEvent(event);
@@ -140,7 +189,7 @@ export class WebhookDispatcher {
    * Fan-out
    * ---------------------------------------------------------------- */
 
-  async onEvent(event: PayboxEvent): Promise<WebhookDelivery[]> {
+  async onEvent(event: PayboxEvent, options: ResendOptions = {}): Promise<WebhookDelivery[]> {
     const formatter = this.#formatters.get(event.provider);
     if (!formatter) return [];
 
@@ -159,6 +208,7 @@ export class WebhookDispatcher {
 
     const created: WebhookDelivery[] = [];
     for (const webhook of webhooks) {
+      if (options.eventTypes && !options.eventTypes.includes(webhook.eventType)) continue;
       const matched = await this.#storage.webhooks.endpointsFor(
         event.provider,
         webhook.eventType,
@@ -168,9 +218,12 @@ export class WebhookDispatcher {
       // endpoint when it takes the request, so an empty result here means the
       // developer's URL was never recorded -- worth saying out loud, because
       // the symptom is a webhook that simply never arrives.
-      const endpoints = webhook.deliverTo
+      const narrowed = webhook.deliverTo
         ? matched.filter((endpoint) => endpoint.url === webhook.deliverTo)
         : matched;
+      const endpoints = options.endpointIds
+        ? narrowed.filter((endpoint) => options.endpointIds?.includes(endpoint.id))
+        : narrowed;
       if (endpoints.length === 0) {
         this.#logger.debug('No webhook endpoint matched', {
           provider: event.provider,
@@ -188,15 +241,25 @@ export class WebhookDispatcher {
       for (const endpoint of endpoints) {
         const copies = this.#chaos.duplicate ? 2 : 1;
         for (let copy = 0; copy < copies; copy++) {
+          const timestamp = this.#clock.now();
           created.push(
-            await this.#createAndSchedule(endpoint, event, webhook.eventType, rawBody, {
-              ...(webhook.headers ?? {}),
-              ...formatter.sign(rawBody, endpoint.secret, {
-                timestamp: this.#clock.now(),
-                attempt: 0,
-                ...(webhook.variant !== undefined ? { variant: webhook.variant } : {}),
-              }),
-            }),
+            await this.#createAndSchedule(
+              endpoint,
+              event,
+              webhook.eventType,
+              rawBody,
+              {
+                ...(webhook.headers ?? {}),
+                ...formatter.sign(rawBody, endpoint.secret, {
+                  timestamp,
+                  attempt: 0,
+                  secrets: this.#secretsFor(endpoint, timestamp),
+                  ...(webhook.variant !== undefined ? { variant: webhook.variant } : {}),
+                }),
+              },
+              null,
+              options.maxAttempts,
+            ),
           );
         }
       }
@@ -211,6 +274,7 @@ export class WebhookDispatcher {
     rawBody: string,
     headers: Record<string, string>,
     replayOf: string | null = null,
+    maxAttemptsOverride?: number,
   ): Promise<WebhookDelivery> {
     const now = this.#clock.nowISO();
     const delivery: WebhookDelivery = {
@@ -230,7 +294,8 @@ export class WebhookDispatcher {
       attempt: 0,
       maxAttempts: (() => {
         const policy = this.#policyFor(endpoint.provider);
-        return policy.enabled ? policy.maxAttempts : 1;
+        const ladder = policy.enabled ? policy.maxAttempts : 1;
+        return maxAttemptsOverride !== undefined ? Math.min(ladder, maxAttemptsOverride) : ladder;
       })(),
       responseStatus: null,
       responseBody: null,
@@ -294,25 +359,89 @@ export class WebhookDispatcher {
   async deliver(deliveryId: string): Promise<WebhookDelivery> {
     const delivery = await this.#storage.webhooks.deliveryById(deliveryId);
     if (!delivery) throw new PayboxError('not_found', `No webhook delivery ${deliveryId}.`);
-    if (delivery.status === 'succeeded' || delivery.status === 'exhausted') return delivery;
+    // All three are final. `failed` -- a provider refused the delivery -- has
+    // to be here as much as `exhausted`: a job left in the queue from before
+    // the refusal must not send it again.
+    if (
+      delivery.status === 'succeeded' ||
+      delivery.status === 'exhausted' ||
+      delivery.status === 'failed'
+    ) {
+      return delivery;
+    }
+
+    const formatter = this.#formatters.get(delivery.provider);
+    let url = delivery.url;
+    if (formatter?.followsEndpointChanges) {
+      const endpoint = await this.#storage.webhooks.endpointById(delivery.endpointId);
+      if (!endpoint || !endpoint.enabled) {
+        return this.#storage.webhooks.updateDelivery(deliveryId, {
+          status: 'failed',
+          errorMessage: endpoint
+            ? 'Endpoint is disabled; queued delivery stopped without sending.'
+            : 'Endpoint was deleted; queued delivery stopped without sending.',
+          nextRetryAt: null,
+          updatedAt: this.#clock.nowISO(),
+        });
+      }
+      url = endpoint.url;
+    }
 
     await this.#storage.webhooks.updateDelivery(deliveryId, {
       status: 'delivering',
+      // The row records where the request actually went.
+      ...(url !== delivery.url ? { url } : {}),
       updatedAt: this.#clock.nowISO(),
     });
 
-    const result = await this.#attempt(delivery);
+    const at = this.#clock.nowISO();
+    const result = await this.#attempt({ ...delivery, url });
     const attempt = delivery.attempt + 1;
     const policy = this.#policyFor(delivery.provider);
-    const ok = this.#accepted(delivery.provider, result);
+    const verdict = this.#classify(delivery.provider, result);
+    const updated = await this.#record(deliveryId, delivery, policy, verdict, result, attempt);
+    await this.#afterAttempt(formatter, {
+      delivery: updated,
+      attemptNo: attempt,
+      result,
+      classification: verdict,
+      at,
+      url,
+    });
+    return updated;
+  }
 
-    if (ok) {
+  /** Write the outcome of one attempt to the delivery row, scheduling a retry if one is due. */
+  async #record(
+    deliveryId: string,
+    delivery: WebhookDelivery,
+    policy: RetryPolicy,
+    verdict: ResponseClassification,
+    result: TransportResult,
+    attempt: number,
+  ): Promise<WebhookDelivery> {
+    if (verdict === 'delivered') {
       return this.#storage.webhooks.updateDelivery(deliveryId, {
         status: 'succeeded',
         attempt,
         responseStatus: result.status,
         responseBody: result.body,
         errorMessage: null,
+        durationMs: result.durationMs,
+        nextRetryAt: null,
+        updatedAt: this.#clock.nowISO(),
+      });
+    }
+
+    // A refusal ends the delivery whatever is left of the ladder, and is told
+    // apart from running out of attempts.
+    if (verdict === 'stop') {
+      return this.#storage.webhooks.updateDelivery(deliveryId, {
+        status: 'failed',
+        attempt,
+        responseStatus: result.status,
+        responseBody: result.body,
+        errorMessage: result.error ?? this.#rejectionMessage(result),
         durationMs: result.durationMs,
         nextRetryAt: null,
         updatedAt: this.#clock.nowISO(),
@@ -347,6 +476,23 @@ export class WebhookDispatcher {
     });
     await this.#enqueue(deliveryId, delayMs);
     return updated;
+  }
+
+  async #afterAttempt(
+    formatter: WebhookFormatter | undefined,
+    attempt: AttemptRecord,
+  ): Promise<void> {
+    if (!formatter?.afterAttempt) return;
+    try {
+      await formatter.afterAttempt(attempt, { storage: this.#storage, baseUrl: this.#baseUrl });
+    } catch (error) {
+      // The attempt already happened and is recorded; bookkeeping that fails
+      // afterwards must not turn it into an error the scheduler retries.
+      this.#logger.warn('afterAttempt hook failed', {
+        deliveryId: attempt.delivery.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   /**
@@ -398,11 +544,13 @@ export class WebhookDispatcher {
     // best we have, and failing the attempt outright would be worse.
     if (!endpoint) return delivery.headers;
 
+    const timestamp = this.#clock.now();
     return {
       ...delivery.headers,
       ...formatter.sign(delivery.payload, endpoint.secret, {
-        timestamp: this.#clock.now(),
+        timestamp,
         attempt: delivery.attempt,
+        secrets: this.#secretsFor(endpoint, timestamp),
       }),
     };
   }
@@ -422,8 +570,10 @@ export class WebhookDispatcher {
   async retryNow(deliveryId: string): Promise<WebhookDelivery> {
     const delivery = await this.#storage.webhooks.deliveryById(deliveryId);
     if (!delivery) throw new PayboxError('not_found', `No webhook delivery ${deliveryId}.`);
-    // A manual retry re-opens an exhausted delivery and grants one more
-    // attempt, which is what a developer means by "try that again".
+    // A manual retry re-opens a finished delivery -- exhausted, or refused by
+    // a provider that stops on some responses -- and grants one more attempt,
+    // which is what a developer means by "try that again". This is paybox's
+    // own tooling, so it does not follow any provider's resend rules.
     await this.#storage.webhooks.updateDelivery(deliveryId, {
       status: 'pending',
       maxAttempts: Math.max(delivery.maxAttempts, delivery.attempt + 1),
@@ -444,7 +594,7 @@ export class WebhookDispatcher {
    * The signature is reused too, unless the provider's covers a timestamp, in
    * which case it is regenerated at send time like any other attempt.
    */
-  async replay(deliveryId: string): Promise<WebhookDelivery> {
+  async replay(deliveryId: string, options: ResendOptions = {}): Promise<WebhookDelivery> {
     const original = await this.#storage.webhooks.deliveryById(deliveryId);
     if (!original) throw new PayboxError('not_found', `No webhook delivery ${deliveryId}.`);
     const endpoint = await this.#storage.webhooks.endpointById(original.endpointId);
@@ -466,6 +616,9 @@ export class WebhookDispatcher {
       errorMessage: null,
       durationMs: null,
       nextRetryAt: null,
+      ...(options.maxAttempts !== undefined
+        ? { maxAttempts: Math.min(original.maxAttempts, options.maxAttempts) }
+        : {}),
       replayOfDeliveryId: original.id,
       createdAt: now,
       updatedAt: now,
@@ -476,10 +629,10 @@ export class WebhookDispatcher {
   }
 
   /** Send the event again from scratch, re-formatting and re-signing it. */
-  async replayEvent(eventId: string): Promise<WebhookDelivery[]> {
+  async replayEvent(eventId: string, options: ResendOptions = {}): Promise<WebhookDelivery[]> {
     const event = await this.#storage.events.byId(eventId);
     if (!event) throw new PayboxError('not_found', `No event ${eventId}.`);
-    return this.onEvent(event);
+    return this.onEvent(event, options);
   }
 }
 
