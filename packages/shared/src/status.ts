@@ -195,6 +195,11 @@ export const PAYMENT_METHODS = [
   // but a first-class one where Quid Payments operates -- and unrepresentable
   // as any of the above, since no account of the payer's is ever debited.
   'cash',
+  // A payer sends a stablecoin or a native asset to an address the checkout
+  // shows them. Bachs offers it as one corridor across several networks and
+  // credits the merchant in USD; an underpayment is a state of its own there,
+  // because a wallet can send less than was asked.
+  'crypto',
 ] as const;
 export type PaymentMethod = (typeof PAYMENT_METHODS)[number];
 
@@ -207,5 +212,6 @@ export const PROVIDERS = [
   'tingg',
   'wewire',
   'wise',
+  'bachs',
 ] as const;
 export type ProviderId = (typeof PROVIDERS)[number];

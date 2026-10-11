@@ -39,7 +39,8 @@ if it is real, then use the local one from `paybox status`.
 **401 "Expected a test secret key beginning with sk_test_".** The key is not
 shaped like a test key for that provider. Formats: Paystack, Kora, WeWire
 `sk_test_…`; Stripe `sk_test_…` or `rk_test_…`; Flutterwave v3
-`FLWSECK_TEST-…`; Quid Payments `ak_test_…`; Wise `wise_test_local_…`. Tingg
+`FLWSECK_TEST-…`; Quid Payments `ak_test_…`; Wise `wise_test_local_…`;
+Bachs `sk_sandbox_…` (and its 401 body is Bachs' own, `"Invalid API key"`). Tingg
 publishes no test-key prefix, so paybox matches the exact key it generated.
 `PAYBOX_ALLOW_ANY_KEY=1` relaxes the shape check for key-rotation tests; live
 keys stay refused.
@@ -141,6 +142,7 @@ exact bytes it sends, so it fails here too. Beyond that, per provider:
 | Kora | signs `JSON.stringify(body.data)` **only**, hex |
 | WeWire | `{id}.{timestamp}.{body}`; key is the **base64-decoded** part after `whsec_`; tolerance vs the clock |
 | Wise | RSA-SHA256, base64, against the PEM from `GET /wise/paybox/webhook-public-key` (authenticated) |
+| Bachs | `X-Bachs-Signature`: HMAC-SHA256, **hex**, over `${X-Bachs-Timestamp}.${body}`, keyed with the whole `whsec_…` string; V2 may carry two `v1=` during a rotation; **timestamp tolerance vs the clock** |
 
 And make sure your verifier holds **the endpoint's secret**, not a key you
 assumed: `paybox webhook add` prints it, the dashboard copies it, and

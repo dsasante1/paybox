@@ -25,6 +25,7 @@ export function printBanner(options: {
     quiddpayKeys,
     tinggKeys,
     wiseKeys,
+    bachsKeys,
   } = context;
   const out = (line = '') => process.stdout.write(`${line}\n`);
 
@@ -46,6 +47,7 @@ export function printBanner(options: {
   out(`    Tingg      ${baseUrl}/tingg       partial — see docs/tingg.md`);
   out(`    WeWire     ${baseUrl}/wewire      partial — see docs/wewire.md`);
   out(`    Wise       ${baseUrl}/wise        partial — see docs/wise.md`);
+  out(`    Bachs      ${baseUrl}/bachs       partial — see docs/bachs.md`);
   for (const id of [] as string[]) {
     out(`    ${id.padEnd(10)} not implemented yet`);
   }
@@ -73,6 +75,9 @@ export function printBanner(options: {
   out(`    Tingg payouts ${tinggKeys.payoutsUsername} / ${tinggKeys.payoutsPassword}`);
   out(`    WeWire     ${wewireKeys.secretKey}`);
   out(`    Wise       ${wiseKeys.apiToken}`);
+  // Bachs signs webhooks with a per-endpoint `whsec_` secret, returned once
+  // when the endpoint is registered through POST /v1/webhooks/endpoints.
+  out(`    Bachs      ${bachsKeys.secretKey}`);
   out();
   out('  Point your app at the emulator:');
   out(`    PAYSTACK_BASE_URL=${baseUrl}/paystack`);
@@ -83,6 +88,7 @@ export function printBanner(options: {
   out(`    TINGG_BASE_URL=${baseUrl}/tingg`);
   out(`    WEWIRE_BASE_URL=${baseUrl}/wewire`);
   out(`    WISE_API_BASE=${baseUrl}/wise`);
+  out(`    BACHS_BASE_URL=${baseUrl}/bachs`);
   out();
 
   if (config.freezeClock) {

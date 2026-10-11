@@ -40,7 +40,7 @@ describe('provider listing', () => {
       (res.json().providers as { id: string; status: string }[]).map((p) => [p.id, p.status]),
     );
 
-    // All six adapters serve their manifests; the listing must say so
+    // Every adapter serves its manifest; the listing must say so
     // without ever claiming "full".
     for (const id of [
       'paystack',
@@ -50,6 +50,7 @@ describe('provider listing', () => {
       'quiddpay',
       'wewire',
       'wise',
+      'bachs',
     ]) {
       expect(byId[id]).toBe('partial');
     }

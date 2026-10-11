@@ -84,6 +84,7 @@ QUIDDPAY_BASE_URL=http://127.0.0.1:8080/quiddpay
 TINGG_BASE_URL=http://127.0.0.1:8080/tingg
 WEWIRE_BASE_URL=http://127.0.0.1:8080/wewire
 WISE_API_BASE=http://127.0.0.1:8080/wise
+BACHS_BASE_URL=http://127.0.0.1:8080/bachs
 ```
 
 If your code builds URLs from a constant, that constant is the one line to

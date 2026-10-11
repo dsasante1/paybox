@@ -634,7 +634,15 @@ export interface PayboxEvent {
     | 'invoice'
     | 'dispute'
     | 'subaccount'
-    | 'dedicated_account';
+    | 'dedicated_account'
+    /**
+     * A provider's own resource that the engine has no model for, recorded
+     * through `PaymentEngine.recordEvent` so its lifecycle still reaches the
+     * event log and the webhook dispatcher. Bachs' checkout session is one: a
+     * free checkout completes, and an unpaid one expires, with no payment
+     * behind it at all.
+     */
+    | 'checkout';
   /** Monotonic per-resource, so replay ordering is total and stable. */
   sequence: number;
   data: Metadata;

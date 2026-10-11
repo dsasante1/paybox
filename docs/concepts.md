@@ -22,7 +22,8 @@ real API would answer.
 
 ```
 your application ──▶ /paystack, /stripe, /flutterwave, /flutterwave/v4, /kora,
-                     /quiddpay, /tingg, /wewire, /wise    provider-compatible APIs
+                     /quiddpay, /tingg, /wewire, /wise,
+                     /bachs                               provider-compatible APIs
 you / your tests ──▶ /api (CLI · dashboard · curl)        the control plane
 the payer        ──▶ hosted pages                         checkout, 3-DS, onboarding
 ```

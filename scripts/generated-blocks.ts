@@ -27,6 +27,7 @@ import { QUIDDPAY_COVERAGE } from '@paybox/quiddpay';
 import { TINGG_COVERAGE } from '@paybox/tingg';
 import { WEWIRE_COVERAGE } from '@paybox/wewire';
 import { WISE_COVERAGE } from '@paybox/wise';
+import { BACHS_COVERAGE } from '@paybox/bachs';
 
 export const MANIFESTS: readonly CoverageManifest[] = [
   PAYSTACK_COVERAGE,
@@ -38,6 +39,7 @@ export const MANIFESTS: readonly CoverageManifest[] = [
   TINGG_COVERAGE,
   WEWIRE_COVERAGE,
   WISE_COVERAGE,
+  BACHS_COVERAGE,
 ];
 
 /** The markers the generated block sits between. */

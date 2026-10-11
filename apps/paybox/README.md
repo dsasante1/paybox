@@ -1,8 +1,8 @@
 # paybox-emulator
 
 A local payment infrastructure emulator. Point an existing Paystack, Stripe,
-Flutterwave, Kora, Quid Payments, Tingg, WeWire or Wise integration at
-`localhost` and test the parts of payments that are hard to test: pending
+Flutterwave, Kora, Quid Payments, Tingg, WeWire, Wise or Bachs integration
+at `localhost` and test the parts of payments that are hard to test: pending
 transactions, asynchronous mobile-money authorization, duplicate webhooks,
 retries, timeouts, refunds, idempotency and flaky networks — deterministically,
 with no provider sandbox.

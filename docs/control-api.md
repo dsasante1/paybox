@@ -71,7 +71,8 @@ tab renders.
     { "id": "tingg",  "keys": { "apiKey": "paybox_local_tingg_…", "clientId": "…", "clientSecret": "…",
                                 "payoutsUsername": "…", "payoutsPassword": "…" } },
     { "id": "wewire", "keys": { "secretKey": "…" } },
-    { "id": "wise",   "keys": { "apiToken": "wise_test_local_…" } }
+    { "id": "wise",   "keys": { "apiToken": "wise_test_local_…" } },
+    { "id": "bachs",  "keys": { "secretKey": "sk_sandbox_local_…", "organizationId": "acct_…" } }
   ],
   "keys": { "secretKey": "sk_test_local_…", "publicKey": "pk_test_local_…" } }
 ```
@@ -87,7 +88,7 @@ adapter, by design — see each provider's contract for what that means.
 | Query | Default | |
 |---|---|---|
 | `status` | — | canonical status |
-| `provider` | — | `paystack`, `stripe`, `flutterwave`, `kora`, `quiddpay`, `tingg`, `wewire`, `wise` |
+| `provider` | — | `paystack`, `stripe`, `flutterwave`, `kora`, `quiddpay`, `tingg`, `wewire`, `wise`, `bachs` |
 | `reference` | — | exact match |
 | `limit` | `50` | page size |
 | `offset` | `0` | |
@@ -268,7 +269,7 @@ reads and controls them.
     "description": "optional" }
   ```
 
-  `provider` defaults to `paystack` and must be one of the eight; an unknown
+  `provider` defaults to `paystack` and must be one of the nine; an unknown
   value is a 400 rather than an endpoint nothing can ever match. An endpoint
   only ever receives its own provider's events. `eventTypes` are **provider**
   event names; empty means everything that provider emits. `secret` is what
@@ -284,6 +285,7 @@ reads and controls them.
   | Tingg | `unused-tingg-does-not-sign-webhooks` — Tingg signs nothing, and its callback address arrives per request, so a registered endpoint receives no Tingg events ([providers.md](providers.md#tingg)) |
   | WeWire | a fresh `whsec_<base64>` per endpoint, so Standard Webhooks libraries can decode it |
   | Wise | `wise-rsa-signed` — unused; Wise signs with RSA |
+  | Bachs | a fresh `whsec_` and 64 hex characters per endpoint, the shape Bachs issues. Bachs' own `POST /bachs/v1/webhooks/endpoints` does the same and adds a name and an `event_source` |
 
   The response carries the secret in full. 201.
 - `PATCH /api/webhooks/endpoints/:id` — any of `url`, `secret`, `enabled`,
@@ -293,13 +295,18 @@ reads and controls them.
 ### Deliveries
 
 - `GET /api/webhooks/deliveries?status=<s>&limit=100` — `pending`,
-  `delivering`, `succeeded`, `failed`, `exhausted`.
+  `delivering`, `succeeded`, `failed`, `exhausted`. `exhausted` means every
+  retry was used up. `failed` means the delivery ended early: the provider
+  treats the response as a refusal (Bachs stops on most `4xx` and every `3xx`),
+  or the endpoint was disabled or deleted while a retry waited. Neither is sent
+  again on its own.
 - `GET /api/webhooks/deliveries/:id` — the full record: the exact `payload`
   bytes, the `headers` sent, `attempt`/`maxAttempts`, `responseStatus`,
   `responseBody`, `errorMessage`, `durationMs`, `nextRetryAt`,
   `replayOfDeliveryId`.
 - `POST /api/webhooks/deliveries/:id/retry` — one more attempt on the same
-  row, now; reopens an exhausted delivery.
+  row, now; reopens an exhausted or failed delivery. This is paybox tooling,
+  so it does not follow any provider's resend rules.
 - `POST /api/webhooks/deliveries/:id/replay` — a **new** delivery carrying the
   identical payload (and identical signature, unless the provider re-signs
   per attempt). Returns the new delivery with `replayOfDeliveryId` set.

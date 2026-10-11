@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>paybox — a local payment infrastructure emulator</title>
-<meta name="description" content="Point an existing Paystack, Stripe, Flutterwave, Kora, Quid Payments, Tingg, WeWire or Wise integration at localhost and test pending payments, webhook retries, duplicate deliveries, timeouts, refunds and idempotency — deterministically, with no provider sandbox.">
+<meta name="description" content="Point an existing Paystack, Stripe, Flutterwave, Kora, Quid Payments, Tingg, WeWire, Wise or Bachs integration at localhost and test pending payments, webhook retries, duplicate deliveries, timeouts, refunds and idempotency — deterministically, with no provider sandbox.">
 <link rel="canonical" href="https://paybox-emulator.vercel.app/">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <meta name="theme-color" content="#f8f9fa" media="(prefers-color-scheme: light)">
@@ -464,8 +464,8 @@ thead th:nth-child(3){text-align:right}
   <div class="legal">
     <p>
       MIT licensed. Not affiliated with, endorsed by, or connected to Paystack,
-      Stripe, Flutterwave, Kora, Quid Payments, Tingg (Cellulant), WeWire or
-      Wise. Provider names are used only to describe API compatibility.
+      Stripe, Flutterwave, Kora, Quid Payments, Tingg (Cellulant), WeWire, Wise
+      or Bachs. Provider names are used only to describe API compatibility.
     </p>
     <p>
       This page is static. paybox itself runs on your machine and never talks to it.
@@ -559,6 +559,7 @@ thead th:nth-child(3){text-align:right}
                         <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/tingg.md">tingg</a></li>
                         <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/wewire.md">wewire</a></li>
                         <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/wise.md">wise</a></li>
+                        <li><a class="f" href="https://github.com/dsasante1/paybox/blob/main/docs/bachs.md">bachs</a></li>
                       </ul>
                     </details>
                   </li>
@@ -618,8 +619,8 @@ thead th:nth-child(3){text-align:right}
           <h1>Test the parts of payments that are <em>hard to test.</em></h1>
           <p class="lede">
             paybox is a local payment infrastructure emulator. Point an existing
-            Paystack, Stripe, Flutterwave, Kora, Quid Payments, Tingg, WeWire or
-            Wise integration at <code>localhost</code> and drive pending mobile-money
+            Paystack, Stripe, Flutterwave, Kora, Quid Payments, Tingg, WeWire,
+            Wise or Bachs integration at <code>localhost</code> and drive pending mobile-money
             authorization, webhook retries, duplicate deliveries, timeouts,
             refunds and idempotency — <b>deterministically, offline.</b>
           </p>
@@ -997,9 +998,10 @@ thead th:nth-child(3){text-align:right}
     <tr><th scope="row">Tingg</th><td><code>/tingg</code></td><td class="num">11</td><td><span class="pill">Partial</span> <a href="https://github.com/dsasante1/paybox/blob/main/docs/tingg.md">what works</a></td></tr>
     <tr><th scope="row">WeWire</th><td><code>/wewire</code></td><td class="num">25</td><td><span class="pill">Partial</span> <a href="https://github.com/dsasante1/paybox/blob/main/docs/wewire.md">what works</a></td></tr>
     <tr><th scope="row">Wise</th><td><code>/wise</code></td><td class="num">30</td><td><span class="pill">Partial</span> <a href="https://github.com/dsasante1/paybox/blob/main/docs/wise.md">what works</a></td></tr>
+    <tr><th scope="row">Bachs</th><td><code>/bachs</code></td><td class="num">40</td><td><span class="pill">Partial</span> <a href="https://github.com/dsasante1/paybox/blob/main/docs/bachs.md">what works</a></td></tr>
   </tbody>
 </table>
-<p class="note">324 endpoints across 9 adapters, counted from the manifests the test suite checks against the router.</p>
+<p class="note">364 endpoints across 10 adapters, counted from the manifests the test suite checks against the router.</p>
 <!-- coverage:end -->
         </div>
 

@@ -458,6 +458,7 @@ describe('/api/providers', () => {
       'quiddpay',
       'wewire',
       'wise',
+      'bachs',
     ]) {
       expect(byId[id]).toBeDefined();
     }
@@ -465,6 +466,7 @@ describe('/api/providers', () => {
       context.flutterwaveV4,
     );
     expect((byId.wise as { apiToken: string }).apiToken).toBe(context.wiseKeys.apiToken);
+    expect((byId.bachs as { secretKey: string }).secretKey).toMatch(/^sk_sandbox_local_/);
   });
 });
 

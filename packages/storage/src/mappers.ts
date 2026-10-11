@@ -35,6 +35,7 @@ import type {
   DeliveryStatus,
   Job,
   JobStatus,
+  PreviousSecret,
   TransferRecipient,
   WebhookDelivery,
   WebhookEndpoint,
@@ -1036,6 +1037,7 @@ export const toEndpoint = (row: WebhookEndpointRow): WebhookEndpoint => ({
   enabled: row.enabled === 1,
   eventTypes: JSON.parse(row.event_types || '[]') as string[],
   description: row.description,
+  previousSecrets: readPreviousSecrets(row.previous_secrets),
   createdAt: row.created_at,
   updatedAt: row.updated_at,
 });
@@ -1048,6 +1050,7 @@ export const fromEndpoint = (endpoint: WebhookEndpoint): WebhookEndpointRow => (
   enabled: endpoint.enabled ? 1 : 0,
   event_types: JSON.stringify(endpoint.eventTypes),
   description: endpoint.description,
+  previous_secrets: JSON.stringify(endpoint.previousSecrets ?? []),
   created_at: endpoint.createdAt,
   updated_at: endpoint.updatedAt,
 });
@@ -1059,8 +1062,32 @@ export function endpointPatch(patch: Partial<WebhookEndpoint>): Partial<WebhookE
   if (patch.enabled !== undefined) out.enabled = patch.enabled ? 1 : 0;
   if (patch.eventTypes !== undefined) out.event_types = JSON.stringify(patch.eventTypes);
   if (patch.description !== undefined) out.description = patch.description;
+  if (patch.previousSecrets !== undefined) {
+    out.previous_secrets = JSON.stringify(patch.previousSecrets);
+  }
   if (patch.updatedAt !== undefined) out.updated_at = patch.updatedAt;
   return out;
+}
+
+/**
+ * Tolerant like every other JSON read here: a hand-edited row with garbage in
+ * the column reads as "no overlap", which only ever means fewer signatures.
+ */
+function readPreviousSecrets(value: string | null | undefined): PreviousSecret[] {
+  if (!value) return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (entry): entry is PreviousSecret =>
+        typeof entry === 'object' &&
+        entry !== null &&
+        typeof (entry as PreviousSecret).secret === 'string' &&
+        typeof (entry as PreviousSecret).expiresAt === 'string',
+    );
+  } catch {
+    return [];
+  }
 }
 
 export const toDelivery = (row: WebhookDeliveryRow): WebhookDelivery => ({
@@ -1110,6 +1137,7 @@ export const fromDelivery = (delivery: WebhookDelivery): WebhookDeliveryRow => (
 export function deliveryPatch(patch: Partial<WebhookDelivery>): Partial<WebhookDeliveryRow> {
   const out: Partial<WebhookDeliveryRow> = {};
   if (patch.status !== undefined) out.status = patch.status;
+  if (patch.url !== undefined) out.url = patch.url;
   if (patch.attempt !== undefined) out.attempt = patch.attempt;
   if (patch.responseStatus !== undefined) out.response_status = patch.responseStatus;
   if (patch.responseBody !== undefined) out.response_body = patch.responseBody;

@@ -106,6 +106,8 @@ export interface WebhookEndpointRow {
   enabled: number;
   event_types: string;
   description: string | null;
+  /** JSON `PreviousSecret[]`; migration 0021. */
+  previous_secrets: string;
   created_at: string;
   updated_at: string;
 }

@@ -1172,11 +1172,76 @@ export class PaymentEngine {
     return result;
   }
 
-  async updateCustomer(id: string, patch: Partial<Customer>): Promise<Customer> {
-    return this.#storage.customers.update(id, {
-      ...patch,
-      updatedAt: this.#clock.nowISO(),
+  /**
+   * Update a customer's stored fields.
+   *
+   * `event: true` also appends `customer.updated`, in the same transaction as
+   * the write. Opt-in, because most providers here send no such webhook and
+   * an extra event would shift every later sequence number in their logs;
+   * Bachs does send one, on an update and on a create that matched an
+   * existing email.
+   */
+  async updateCustomer(
+    id: string,
+    patch: Partial<Customer>,
+    options: { event?: boolean } = {},
+  ): Promise<Customer> {
+    const stamped = { ...patch, updatedAt: this.#clock.nowISO() };
+    if (!options.event) return this.#storage.customers.update(id, stamped);
+
+    const { result, events } = await this.#storage.transaction(async (tx) => {
+      const updated = await tx.customers.update(id, stamped);
+      const event = await this.#appendEvent(tx, {
+        type: 'customer.updated',
+        provider: updated.provider,
+        resourceId: updated.id,
+        resourceType: 'customer',
+        data: { id: updated.id, email: updated.email },
+        previousStatus: null,
+        currentStatus: null,
+      });
+      return { result: updated, events: [event] };
     });
+    await this.#bus.emitAll(events);
+    return result;
+  }
+
+  /**
+   * Record an informational event about a provider-owned resource.
+   *
+   * For a lifecycle the engine has no model for but a provider still reports
+   * by webhook. Bachs' checkout session is the case that needed it: a free
+   * checkout completes and an abandoned one expires with no payment behind
+   * either, so no payment transition could carry the event.
+   *
+   * `apply` runs inside the same transaction as the append, so the adapter's
+   * own projection and the event that describes it commit together -- the
+   * same guarantee every engine-owned transition has. Like every event, it
+   * reaches the bus only after commit.
+   */
+  async recordEvent<T = void>(input: {
+    provider: ProviderId;
+    type: string;
+    resourceType: PayboxEvent['resourceType'];
+    resourceId: string;
+    data: Metadata;
+    apply?: (tx: Storage) => Promise<T>;
+  }): Promise<{ event: PayboxEvent; result: T | undefined }> {
+    const { event, result } = await this.#storage.transaction(async (tx) => {
+      const applied = input.apply ? await input.apply(tx) : undefined;
+      const appended = await this.#appendEvent(tx, {
+        type: input.type,
+        provider: input.provider,
+        resourceId: input.resourceId,
+        resourceType: input.resourceType,
+        data: input.data,
+        previousStatus: null,
+        currentStatus: null,
+      });
+      return { event: appended, result: applied };
+    });
+    await this.#bus.emitAll([event]);
+    return { event, result };
   }
 
   /* ---------------------------------------------------------------- *

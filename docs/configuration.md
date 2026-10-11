@@ -43,6 +43,7 @@ providers:                # omit a provider to leave it enabled
   tingg:       { enabled: true }
   wewire:      { enabled: true }
   wise:        { enabled: true }
+  bachs:       { enabled: true }
 
 security:
   allowAnyKey: false      # accept keys that are not sk_test_-shaped; live keys still refused

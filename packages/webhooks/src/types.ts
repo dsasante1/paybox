@@ -63,7 +63,25 @@ export interface SigningContext {
    * variant on the delivery row.
    */
   variant?: string;
+  /**
+   * Every secret currently valid for the endpoint, the current one first.
+   *
+   * Longer than one only while a rotation overlaps old and new: Bachs keeps
+   * the previous secret valid for 24 hours and signs each delivery with both,
+   * so a subscriber can deploy the new one without dropping traffic. Always
+   * set by the dispatcher; a provider that signs with one secret uses the
+   * `secret` argument and ignores this.
+   */
+  secrets?: string[];
 }
+
+/**
+ * How a provider reads one delivery attempt, given everything the transport
+ * saw. `stop` ends the delivery for good -- recorded as `failed`, with no
+ * further attempt scheduled -- which is what a provider does when it treats
+ * a response as a refusal rather than a hiccup.
+ */
+export type ResponseClassification = 'delivered' | 'retry' | 'stop';
 
 /**
  * A provider's webhook contract (spec §9, §30).
@@ -129,6 +147,46 @@ export interface WebhookFormatter {
     | 'delivered'
     | 'retry';
   /**
+   * Classify **every** attempt, not only a 2xx, for a provider whose retry
+   * rule depends on what failed.
+   *
+   * The default reading -- any 2xx delivered, anything else retried until the
+   * ladder runs out -- is right for every provider but one. Bachs refuses to
+   * retry most 4xx responses ("we treat it as a refusal, so trying again
+   * would not help") and every 3xx, because it does not follow redirects,
+   * while still retrying a 408, a 429, a 5xx and a timeout. Retrying a 401
+   * five times would teach a developer that their broken signature check is
+   * merely slow.
+   *
+   * When declared it replaces both the 2xx test and `interpretResponse`, so a
+   * formatter owns the whole decision. `stop` is final even with attempts
+   * left and even with retries switched off; it is recorded as `failed`
+   * rather than `exhausted`, so the log tells "refused" from "gave up".
+   */
+  classifyResponse?(result: TransportResult): ResponseClassification;
+  /**
+   * Make every attempt answer to the endpoint as it is *now*.
+   *
+   * By default a delivery keeps the URL it was created with and is sent
+   * whatever happens to its endpoint afterwards. Bachs does neither: "Events
+   * already queued for the old URL are retried against the new one", and
+   * while an endpoint is off "nothing is sent to this URL, not even retries
+   * that were already queued". With this set, each attempt re-reads the
+   * endpoint, sends to its current URL, and ends the delivery as `failed` --
+   * without sending -- if the endpoint was disabled or deleted.
+   */
+  readonly followsEndpointChanges?: boolean;
+  /**
+   * Called after every attempt has been recorded, with what happened.
+   *
+   * For a provider that exposes delivery history at finer grain than paybox's
+   * one-row-per-delivery log: Bachs lists each attempt with its own id, HTTP
+   * status and response snippet, and turns an endpoint off after 72 hours of
+   * unbroken failure. Runs after the delivery row is written; a throw here is
+   * logged and does not undo the attempt.
+   */
+  afterAttempt?(attempt: AttemptRecord, context: FormatterContext): Promise<void>;
+  /**
    * This provider's own retry ladder, overriding the dispatcher's.
    *
    * The default is one policy for the whole emulator, which is right while
@@ -142,6 +200,20 @@ export interface WebhookFormatter {
    * provider declared its own.
    */
   readonly retry?: RetryPolicy;
+}
+
+/** One attempt as `afterAttempt` sees it. */
+export interface AttemptRecord {
+  /** The delivery row after this attempt was recorded. */
+  delivery: WebhookDelivery;
+  /** 1-based number of this attempt within its delivery. */
+  attemptNo: number;
+  result: TransportResult;
+  classification: ResponseClassification;
+  /** Virtual-time instant the attempt was made, ISO 8601. */
+  at: string;
+  /** The URL the request actually went to. */
+  url: string;
 }
 
 /** Outcome of one HTTP attempt. */

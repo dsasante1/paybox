@@ -16,11 +16,25 @@ export const SUPPORTED_CURRENCIES = [
   'EUR',
   'XOF',
   'EGP',
+  // Bachs' mobile-money corridors reach six markets the other adapters do
+  // not. Supporting a currency is only knowing its exponent; it converts
+  // nothing.
+  'TZS',
+  'UGX',
+  'XAF',
+  'RWF',
+  'MWK',
+  'ZMW',
 ] as const;
 
 export type Currency = (typeof SUPPORTED_CURRENCIES)[number];
 
 /** Currencies with no minor unit. Amounts for these are whole numbers. */
+// UGX and RWF are exponent 0 in ISO 4217 but are deliberately not listed:
+// Bachs prints every amount with two decimals, and Tingg's schema converts
+// major units with a fixed x100, so both treat them as two-place currencies
+// on the wire. Listing them here would make Tingg store a UGX amount at 100x
+// its value. XOF and XAF predate that and stay.
 const ZERO_DECIMAL = new Set(['XOF', 'XAF', 'JPY', 'KRW']);
 
 export function minorUnitExponent(currency: string): number {

@@ -81,6 +81,16 @@ describe('POST /api/webhooks/endpoints without a secret', () => {
     expect(kora.body.secret).toBe(context.koraKeys.secretKey);
   });
 
+  it('issues Bachs a per-endpoint whsec_ secret of 64 hex characters', async () => {
+    const first = await register({ url: 'http://localhost:9999/a', provider: 'bachs' });
+    const second = await register({ url: 'http://localhost:9999/b', provider: 'bachs' });
+    // createWebhookEndpoint's example: whsec_ and 64 hex. The HMAC key is the
+    // whole string's bytes, so any shape would verify -- this one looks right.
+    expect(first.body.secret).toMatch(/^whsec_[0-9a-f]{64}$/);
+    expect(second.body.secret).not.toBe(first.body.secret);
+    expect(first.body.secret).not.toBe(context.bachsKeys.secretKey);
+  });
+
   it('records the unused placeholder for Wise, which signs with RSA', async () => {
     const { body } = await register({ url: 'http://localhost:9999/hook', provider: 'wise' });
     expect(body.secret).toBe(WISE_UNUSED_SECRET);

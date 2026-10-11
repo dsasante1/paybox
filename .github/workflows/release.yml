@@ -205,7 +205,9 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: ${{ vars.DOCKERHUB_IMAGE }}
-          short-description: Local payment infrastructure emulator — Paystack, Stripe, Flutterwave, Kora, WeWire, Wise
+          # Docker Hub caps this at 100 characters, which is why it names
+          # every provider but drops "Local" and "infrastructure".
+          short-description: Payment emulator for Paystack, Stripe, Flutterwave, Kora, Quid Payments, Tingg, WeWire, Wise, Bachs
           readme-filepath: apps/paybox/README.md
 
   release:

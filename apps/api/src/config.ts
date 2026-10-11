@@ -81,6 +81,7 @@ const DEFAULTS: PayboxConfig = {
     tingg: { enabled: true },
     wewire: { enabled: true },
     wise: { enabled: true },
+    bachs: { enabled: true },
   },
   security: { allowAnyKey: false },
   simulation: { autoAdvance: true, autoAdvanceDelayMs: 3_000 },
