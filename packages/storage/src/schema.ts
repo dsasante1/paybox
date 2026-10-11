@@ -159,6 +159,16 @@ export interface IdempotencyRow {
   created_at: string;
 }
 
+/** Migration 0022: the virtual clock, one row (`id` is always 1). */
+export interface ClockStateRow {
+  id: number;
+  mode: string;
+  now_ms: number;
+  offset_ms: number;
+  configured_start_at: string | null;
+  updated_at: string;
+}
+
 /**
  * Adapter scratch space (migration 0019).
  *
@@ -468,6 +478,7 @@ export interface Database {
   jobs: JobRow;
   idempotency_keys: IdempotencyRow;
   provider_state: ProviderStateRow;
+  clock_state: ClockStateRow;
   authorizations: AuthorizationRow;
   dedicated_accounts: DedicatedAccountRow;
   instrument_setups: InstrumentSetupRow;

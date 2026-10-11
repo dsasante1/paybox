@@ -1,4 +1,5 @@
 import type {
+  ClockState,
   Authorization,
   Customer,
   DedicatedAccount,
@@ -515,6 +516,30 @@ export interface ProviderStateRepository {
 }
 
 /**
+ * The virtual clock, recorded so a restart can resume it.
+ *
+ * Virtual time used to live only in memory, so restarting a server on the
+ * same database rewound it to `PAYBOX_START_AT` -- earlier than events and
+ * jobs it had already written, which then stopped being due. One row, written
+ * on every change to the clock.
+ *
+ * `configuredStartAt` is the `PAYBOX_START_AT` the process booted with. A
+ * restart resumes only while it is unchanged: changing it is how a developer
+ * deliberately moves to another date (docs/time.md), and that still works.
+ */
+export interface ClockRecord {
+  state: ClockState;
+  configuredStartAt: string | null;
+  updatedAt: string;
+}
+
+export interface ClockRepository {
+  get(): Promise<ClockRecord | null>;
+  /** Insert or overwrite the single row. */
+  put(record: ClockRecord): Promise<void>;
+}
+
+/**
  * The storage port. `transaction` hands back a Storage bound to the open
  * transaction, so the engine can append an event and update the payment
  * projection atomically -- the invariant the whole event-log design rests on.
@@ -543,6 +568,8 @@ export interface Storage {
   readonly jobs: JobRepository;
   readonly idempotency: IdempotencyRepository;
   readonly providerState: ProviderStateRepository;
+  /** The virtual clock as last recorded; see `ClockRepository`. */
+  readonly clock: ClockRepository;
   transaction<T>(fn: (tx: Storage) => Promise<T>): Promise<T>;
   /** Drop all rows but keep the schema (spec §27 `paybox reset`). */
   reset(): Promise<void>;

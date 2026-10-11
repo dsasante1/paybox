@@ -32,6 +32,7 @@ import type {
   TransferStatus,
 } from '@paybox/shared';
 import type {
+  ClockRecord,
   DeliveryStatus,
   Job,
   JobStatus,
@@ -42,6 +43,7 @@ import type {
 } from '@paybox/core';
 import type {
   AuthorizationRow,
+  ClockStateRow,
   DedicatedAccountRow,
   DisputeRow,
   InstrumentSetupRow,
@@ -1218,4 +1220,27 @@ export const fromRecipient = (r: TransferRecipient): TransferRecipientRow => ({
   metadata: writeJson(r.metadata),
   created_at: r.createdAt,
   updated_at: r.updatedAt,
+});
+
+/**
+ * The clock row. Tolerant like every other read here: an unknown mode reads
+ * as `system`, the clock's own default.
+ */
+export const toClockRecord = (row: ClockStateRow): ClockRecord => ({
+  state: {
+    mode: row.mode === 'frozen' ? 'frozen' : 'system',
+    now: Number(row.now_ms),
+    offsetMs: Number(row.offset_ms),
+  },
+  configuredStartAt: row.configured_start_at,
+  updatedAt: row.updated_at,
+});
+
+export const fromClockRecord = (record: ClockRecord): ClockStateRow => ({
+  id: 1,
+  mode: record.state.mode,
+  now_ms: record.state.now,
+  offset_ms: record.state.offsetMs,
+  configured_start_at: record.configuredStartAt,
+  updated_at: record.updatedAt,
 });

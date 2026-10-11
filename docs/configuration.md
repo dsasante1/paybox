@@ -69,7 +69,7 @@ logLevel: info            # debug | info | warn | error
 | `database.path` | `PAYBOX_DATABASE` | `./data/paybox.db` | Relative to the working directory; the directory is created if missing. `:memory:` keeps nothing between starts. |
 | `seed` | `PAYBOX_SEED` | `paybox` | Any string. Seeds every id, generated reference, local credential, and webhook retry jitter. |
 | `freezeClock` | `PAYBOX_FREEZE_CLOCK` | `false` | Start frozen. `paybox time unfreeze` resumes at runtime. |
-| `startAt` | `PAYBOX_START_AT` | wall-clock now | ISO-8601 instant. Works frozen or flowing; flowing time simply starts from here. |
+| `startAt` | `PAYBOX_START_AT` | wall-clock now | ISO-8601 instant. Works frozen or flowing; flowing time simply starts from here. Used on a fresh database, or when it differs from the last start; otherwise a restart resumes the recorded clock ([time.md](time.md)). |
 | `webhooks.retry.enabled` | `PAYBOX_WEBHOOK_RETRY` | `true` | `false` means one attempt per delivery, then `exhausted`. |
 | `webhooks.retry.maxAttempts` | `PAYBOX_WEBHOOK_MAX_ATTEMPTS` | `5` | Ignored when `schedule` is `paystack`. |
 | `webhooks.retry.schedule` | `PAYBOX_WEBHOOK_SCHEDULE` | `exponential` | `exponential`: 1 s doubling to a 1 h cap, with jitter in [½, 1]× — five attempts finish inside ~15 s of virtual time. `paystack`: ten attempts an hour apart, Paystack's documented test-mode ladder. |
@@ -178,7 +178,8 @@ before doing this on a shared network.
 ### Persist or don't
 
 The default database is a file under `./data/`, so payments, endpoints and
-scheduled jobs survive a restart — a scenario mid-run resumes where it was.
+scheduled jobs survive a restart — a scenario mid-run resumes where it was —
+and so does virtual time, unless `PAYBOX_START_AT` changed.
 `paybox reset --yes` empties it. `:memory:` is the right choice for a test
 suite; a file is the right choice while you are exploring.
 

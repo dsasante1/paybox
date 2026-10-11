@@ -145,9 +145,52 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
   }
   const { storage } = await openStorage({ database: config.database.path });
 
+  // Virtual time survives a restart on the same database: the clock resumes
+  // where it was recorded, unless PAYBOX_START_AT has changed since -- which
+  // is how a developer deliberately moves to another date, and still works.
+  // A fresh database (and :memory:, always fresh) starts as it always has.
+  //
+  // "Changed" means a different instant, not a different spelling of one:
+  // `…00Z` and `…00.000Z`, or a number in paybox.yml, are the same start, and
+  // treating them as a change would rewind the clock -- the very bug this
+  // prevents. A recorded state that cannot be used (a hand-edited row) is
+  // ignored rather than allowed to stop the server starting.
+  const configuredStartAt = normaliseStartAt(config.startAt);
+  // A row the driver cannot even read (an integer past 2^53) counts as none.
+  const recorded = await storage.clock.get().catch(() => null);
+  const resume =
+    recorded &&
+    normaliseStartAt(recorded.configuredStartAt) === configuredStartAt &&
+    usableClockState(recorded.state)
+      ? recorded.state
+      : null;
   const clock = new VirtualClock({
     ...(config.startAt ? { startAt: config.startAt } : {}),
+    ...(resume ? { resume } : {}),
     frozen: config.freezeClock,
+  });
+  const recordClock = () => {
+    // The clock's own instant, never a scheduler job's scoped override.
+    const state = clock.state();
+    return storage.clock.put({
+      state,
+      configuredStartAt,
+      updatedAt: new Date(state.now).toISOString(),
+    });
+  };
+  await recordClock();
+  // Each change is recorded in order, and shutdown waits for the last one,
+  // so an advance right before a restart is not lost. A failed write must
+  // not fail the change itself.
+  let clockWrites: Promise<void> = Promise.resolve();
+  clock.onChange(() => {
+    clockWrites = clockWrites.then(recordClock).catch((error: unknown) => {
+      // Said out loud: an unrecorded clock rewinds on the next restart, and
+      // that should not be a mystery.
+      logger.warn('Could not record the virtual clock; a restart may not resume it', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
   });
   const random = createRandom(config.seed);
   const ids = createIdFactory(random);
@@ -425,7 +468,32 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
     baseUrl,
     async shutdown() {
       await scheduler.stop();
+      await clockWrites;
       await storage.close();
     },
   };
+}
+
+/**
+ * A start instant in one canonical spelling, or null when none is set. An
+ * unparseable value is kept as written: the clock refuses it at construction,
+ * which is the error the developer should see.
+ */
+function normaliseStartAt(value: string | number | null | undefined): string | null {
+  if (value === null || value === undefined || value === '') return null;
+  const ms = typeof value === 'number' ? value : Date.parse(String(value));
+  if (!Number.isFinite(ms) || Math.abs(ms) > MAX_DATE_MS) return String(value);
+  return new Date(ms).toISOString();
+}
+
+/** The largest instant a Date can hold (ECMA-262 §21.4.1.1). */
+const MAX_DATE_MS = 8.64e15;
+
+function usableClockState(state: { now: number; offsetMs: number }): boolean {
+  return (
+    Number.isFinite(state.now) &&
+    Math.abs(state.now) <= MAX_DATE_MS &&
+    Number.isFinite(state.offsetMs) &&
+    Math.abs(state.offsetMs) <= MAX_DATE_MS
+  );
 }

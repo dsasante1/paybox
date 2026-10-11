@@ -160,7 +160,14 @@ a new delivery with the same bytes. If you want to test idempotency, replay.
 ## Time
 
 **400 "refusing to move virtual time backwards".** `set` and `freeze` only
-move forward. Restart with `PAYBOX_START_AT` for an earlier date.
+move forward. Restart with a different `PAYBOX_START_AT` for an earlier date,
+or with a fresh database. A restart with the same value resumes where the
+clock was ([time.md](time.md)).
+
+**The clock did not go back to `PAYBOX_START_AT` after a restart.** It is not
+meant to: virtual time on a database file survives a restart. Change
+`PAYBOX_START_AT`, or start from a fresh database (or `:memory:`), to begin
+again.
 
 **Timestamps in responses are in the past / the future.** That is virtual
 time. `paybox status` and `GET /api/time` show the current instant and the
