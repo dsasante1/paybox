@@ -3,6 +3,7 @@ import type { Clock, Customer, IdFactory, Payment } from '@paybox/shared';
 import type { PaymentEngine, Storage } from '@paybox/core';
 import type { PaymentSimulator } from '@paybox/simulator';
 import type { WebhookDispatcher } from '@paybox/webhooks';
+import type { Actor } from './actor.js';
 import type { BachsBilling } from './billing.js';
 import type { BachsDisputes } from './disputes.js';
 import type { BachsTreasury } from './treasury.js';
@@ -24,6 +25,8 @@ export interface RouteContext {
   /** Where the adapter is mounted, e.g. `/bachs`. */
   basePath: string;
   authenticate: (request: FastifyRequest) => string;
+  /** Authenticate, then resolve who the request runs as (`X-Account-Id`). */
+  actor: (request: FastifyRequest) => Promise<Actor>;
   /** Everything a payment's serialisers need beyond the payment row. */
   paymentContext(payment: Payment): Promise<PaymentContext>;
   /** Subscriptions, invoices and off-session charges. */
@@ -42,6 +45,7 @@ export interface RouteContext {
       phone: string | null;
       metadata: Record<string, unknown>;
       address: Record<string, unknown> | null;
+      owner: Actor;
     }): Promise<{ customer: Customer; stored: StoredCustomer }>;
     update(
       customer: Customer,

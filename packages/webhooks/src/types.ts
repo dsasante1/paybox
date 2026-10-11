@@ -33,6 +33,19 @@ export interface FormattedWebhook {
    * registered once and receive everything they subscribed to.
    */
   deliverTo?: string;
+  /**
+   * Deliver only to these endpoints, for a provider whose routing depends on
+   * more than the event type.
+   *
+   * Bachs does: an event happens on one account, and goes to that account's
+   * own endpoints and to its platform's endpoints that asked for connected
+   * accounts' events (`event_source`). The formatter, which can read the
+   * adapter's state, works out who that is; the dispatcher still matches
+   * event types and drops disabled endpoints as usual.
+   *
+   * Omit it for the normal case.
+   */
+  endpointIds?: string[];
 }
 
 export interface FormatterContext {

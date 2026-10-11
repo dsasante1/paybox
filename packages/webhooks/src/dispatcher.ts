@@ -218,9 +218,12 @@ export class WebhookDispatcher {
       // endpoint when it takes the request, so an empty result here means the
       // developer's URL was never recorded -- worth saying out loud, because
       // the symptom is a webhook that simply never arrives.
-      const narrowed = webhook.deliverTo
+      const byUrl = webhook.deliverTo
         ? matched.filter((endpoint) => endpoint.url === webhook.deliverTo)
         : matched;
+      const narrowed = webhook.endpointIds
+        ? byUrl.filter((endpoint) => webhook.endpointIds?.includes(endpoint.id))
+        : byUrl;
       const endpoints = options.endpointIds
         ? narrowed.filter((endpoint) => options.endpointIds?.includes(endpoint.id))
         : narrowed;

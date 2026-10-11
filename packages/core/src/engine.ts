@@ -1136,8 +1136,10 @@ export class PaymentEngine {
     phone?: string | null;
     metadata?: Metadata;
     providerCustomerId?: string;
+    /** The connected account whose customer this is; the platform when omitted. */
+    subaccountId?: string | null;
   }): Promise<Customer> {
-    const existing = await this.#storage.customers.byEmail(input.provider, input.email);
+    const existing = await this.#storage.customers.byEmail(input.provider, input.email, input.subaccountId ?? null);
     if (existing) return existing;
 
     const now = this.#clock.nowISO();
@@ -1150,6 +1152,7 @@ export class PaymentEngine {
       lastName: input.lastName ?? null,
       phone: input.phone ?? null,
       metadata: input.metadata ?? {},
+      ...(input.subaccountId ? { subaccountId: input.subaccountId } : {}),
       createdAt: now,
       updatedAt: now,
     };
@@ -3214,6 +3217,8 @@ export class PaymentEngine {
     reason: string;
     resourceId?: string | null;
     checkFunds?: boolean;
+    /** Whose pot both legs move in; the platform's when omitted. */
+    subaccountId?: string | null;
   }): Promise<void> {
     validateAmount(input.from.amount);
     validateAmount(input.to.amount);
@@ -3223,8 +3228,11 @@ export class PaymentEngine {
       throw new PayboxError('validation_failed', 'An exchange needs two different currencies.');
     }
     await this.#storage.transaction(async (tx) => {
+      const owner = input.subaccountId ?? null;
       if (input.checkFunds && this.#enforceBalance) {
-        const available = this.#openingBalance + (await tx.ledger.net(input.provider, from, null));
+        // The opening float is the platform's alone (see getBalance).
+        const opening = owner === null ? this.#openingBalance : 0;
+        const available = opening + (await tx.ledger.net(input.provider, from, owner));
         if (available < input.from.amount) {
           throw new PayboxError(
             'balance_insufficient',
@@ -3233,7 +3241,7 @@ export class PaymentEngine {
           );
         }
       }
-      const base = { provider: input.provider, reason: input.reason, resourceId: input.resourceId ?? null, subaccountId: null };
+      const base = { provider: input.provider, reason: input.reason, resourceId: input.resourceId ?? null, subaccountId: owner };
       await this.#ledgerIn(tx, 'debit', { ...base, currency: from, amount: input.from.amount });
       await this.#ledgerIn(tx, 'credit', { ...base, currency: to, amount: input.to.amount });
     });

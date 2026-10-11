@@ -1,5 +1,6 @@
 import type { Clock, Dispute, IdFactory, Metadata, Payment, PayboxEvent } from '@paybox/shared';
 import type { PaymentEngine, Storage } from '@paybox/core';
+import { paymentPot } from './actor.js';
 import { fail } from './errors.js';
 import { disputeIdOf, hexId } from './ids.js';
 import { everyRow } from './http.js';
@@ -250,7 +251,13 @@ export class BachsDisputes {
       for (const field of ATTACHMENT_FIELDS) {
         const uploadId = patch[field];
         if (typeof uploadId !== 'string') continue;
-        attaching.push(await requireUpload(this.state, uploadId, field, { type: 'dispute', id: disputeIdOf(dispute) }));
+        attaching.push(
+          await requireUpload(this.state, uploadId, field, {
+            type: 'dispute',
+            id: disputeIdOf(dispute),
+            account: await this.#ownerOf(dispute),
+          }),
+        );
       }
       for (const upload of attaching) {
         if (upload.linkedResourceId !== null) continue;
@@ -412,6 +419,14 @@ export class BachsDisputes {
       });
     }
   };
+
+  /** The Bachs id of the account that owns a dispute's charge; null for the platform. */
+  async #ownerOf(dispute: Dispute): Promise<string | null> {
+    const payment = await this.#storage.payments.byId(dispute.paymentId);
+    const pot = payment ? paymentPot(payment) : null;
+    if (pot === null) return null;
+    return (await this.state.accounts.all()).find((account) => account.engineId === pot)?.id ?? null;
+  }
 
   /** The Bachs record, or the defaults a dispute opened by paybox's own tooling reads as. */
   async recordOf(dispute: Dispute): Promise<StoredDispute> {

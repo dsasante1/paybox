@@ -4,6 +4,7 @@ import type { Clock, IdFactory, Payment } from '@paybox/shared';
 import type { PaymentEngine, Storage } from '@paybox/core';
 import type { PaymentSimulator } from '@paybox/simulator';
 import type { WebhookDispatcher } from '@paybox/webhooks';
+import { resolveActor } from './actor.js';
 import { assertBachsCredentials } from './auth.js';
 import { bachsErrorBody, toBachsError } from './errors.js';
 import { registerIdempotency, registerResponseHeaders } from './http.js';
@@ -12,6 +13,7 @@ import type { RouteContext } from './route-context.js';
 import { registerCatalogRoutes } from './routes-catalog.js';
 import { BachsDisputes } from './disputes.js';
 import { registerDisputeRoutes } from './routes-disputes.js';
+import { registerAccountRoutes } from './routes-accounts.js';
 import { UPLOAD_MAX_BYTES } from './uploads.js';
 import { registerCheckoutRoutes } from './routes-checkout.js';
 import { registerPaymentRoutes } from './routes-payments.js';
@@ -146,7 +148,7 @@ export const bachsPlugin: FastifyPluginAsync<BachsPluginOptions> = async (fastif
     };
   }
 
-  const treasury = new BachsTreasury({ engine, storage, clock, ids });
+  const treasury = new BachsTreasury({ engine, storage, clock, ids, organizationId: options.organizationId });
   const ctx: RouteContext = {
     engine,
     simulator: options.simulator,
@@ -159,6 +161,10 @@ export const bachsPlugin: FastifyPluginAsync<BachsPluginOptions> = async (fastif
     baseUrl: options.baseUrl,
     basePath: options.basePath,
     authenticate,
+    actor: async (request) => {
+      authenticate(request);
+      return resolveActor(request, state, options.organizationId);
+    },
     paymentContext,
     billing,
     treasury,
@@ -177,6 +183,7 @@ export const bachsPlugin: FastifyPluginAsync<BachsPluginOptions> = async (fastif
   registerBillingRoutes(fastify, ctx);
   registerMoneyOutRoutes(fastify, ctx);
   registerDisputeRoutes(fastify, ctx);
+  registerAccountRoutes(fastify, ctx);
   registerPortalRoutes(fastify, ctx);
   registerWebhookRoutes(fastify, ctx);
 };

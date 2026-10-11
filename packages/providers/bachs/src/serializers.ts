@@ -599,7 +599,8 @@ export function serializeEndpoint(endpoint: WebhookEndpoint, stored: StoredEndpo
     disabled_at: endpoint.enabled ? null : (stored?.disabledAt ?? null),
     disabled_reason: endpoint.enabled ? null : (stored?.disabledReason ?? null),
     event_types: stored ? publicEventTypes(endpoint.eventTypes) : endpoint.eventTypes,
-    event_source: stored?.eventSource ?? 'account',
+    // An endpoint registered with paybox's control API receives everything.
+    event_source: stored?.eventSource ?? 'all',
     created_at: endpoint.createdAt,
     updated_at: endpoint.updatedAt,
   };

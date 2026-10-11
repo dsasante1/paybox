@@ -12,6 +12,7 @@ import { fail } from './errors.js';
 import { everyRow, newestFirst, notFound, readPage } from './http.js';
 import { hexId } from './ids.js';
 import { toMinor } from './money.js';
+import { owns, ownerField, ownsPayment, type Actor } from './actor.js';
 import type { RouteContext } from './route-context.js';
 import type { StoredUpload } from './state.js';
 import { bachsDisputeStatus, BACHS_DISPUTE_STATUSES } from './status.js';
@@ -82,12 +83,14 @@ const networkSchema = z
  * third serves a public upload's bytes at the `url` the API returns.
  */
 export function registerDisputeRoutes(fastify: FastifyInstance, ctx: RouteContext): void {
-  const { storage, clock, ids, state, authenticate, disputes } = ctx;
+  const { storage, clock, ids, state, disputes } = ctx;
   const origin = `${ctx.baseUrl}${ctx.basePath}`;
 
-  async function loadDispute(id: string): Promise<Dispute> {
+  /** connect/disputes: "without it, the calls reach only your platform's disputes". */
+  async function loadDispute(actor: Actor, id: string): Promise<Dispute> {
     const dispute = await disputes.find(id);
-    if (!dispute) throw notFound('Dispute');
+    const payment = dispute ? await storage.payments.byId(dispute.paymentId) : null;
+    if (!dispute || !payment || !ownsPayment(actor, payment)) throw notFound('Dispute');
     return dispute;
   }
 
@@ -99,7 +102,7 @@ export function registerDisputeRoutes(fastify: FastifyInstance, ctx: RouteContex
   /* -------------------------------- disputes ------------------------------- */
 
   fastify.get('/v1/disputes', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const query = listDisputesQuery.parse(request.query);
     const { limit, offset } = readPage(query, 50);
     const from = query.from_date ? Date.parse(query.from_date) : null;
@@ -107,6 +110,8 @@ export function registerDisputeRoutes(fastify: FastifyInstance, ctx: RouteContex
     const rows = [];
     for (const dispute of await everyRow((page) => storage.disputes.list({ provider: PROVIDER, ...page }))) {
       if (query.status && bachsDisputeStatus(dispute) !== query.status) continue;
+      const payment = await storage.payments.byId(dispute.paymentId);
+      if (!payment || !ownsPayment(actor, payment)) continue;
       const created = Date.parse(dispute.createdAt);
       if ((from !== null && created < from) || (to !== null && created > to)) continue;
       rows.push({ dispute, seq: (await disputes.recordOf(dispute)).seq || undefined, createdAt: dispute.createdAt });
@@ -120,14 +125,15 @@ export function registerDisputeRoutes(fastify: FastifyInstance, ctx: RouteContex
   });
 
   fastify.get<{ Params: { dispute_id: string } }>('/v1/disputes/:dispute_id', async (request, reply) => {
-    authenticate(request);
-    return reply.send(await view(await loadDispute(request.params.dispute_id)));
+    const actor = await ctx.actor(request);
+    return reply.send(await view(await loadDispute(actor, request.params.dispute_id)));
   });
 
   fastify.patch<{ Params: { dispute_id: string } }>('/v1/disputes/:dispute_id/evidence', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const patch = evidenceSchema.parse(request.body ?? {});
-    const updated = await disputes.saveEvidence(request.params.dispute_id, patch);
+    const dispute = await loadDispute(actor, request.params.dispute_id);
+    const updated = await disputes.saveEvidence(dispute.id, patch);
     const status = bachsDisputeStatus(updated);
     return reply.send({
       dispute_id: disputeIdOf(updated),
@@ -138,9 +144,10 @@ export function registerDisputeRoutes(fastify: FastifyInstance, ctx: RouteContex
   });
 
   fastify.post<{ Params: { dispute_id: string } }>('/v1/disputes/:dispute_id/submit', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     submitSchema.parse(request.body ?? {});
-    const { dispute, record } = await disputes.submit(request.params.dispute_id);
+    const owned = await loadDispute(actor, request.params.dispute_id);
+    const { dispute, record } = await disputes.submit(owned.id);
     const submission = record.submissions.at(-1)!;
     return reply.send({
       dispute_id: disputeIdOf(dispute),
@@ -157,10 +164,10 @@ export function registerDisputeRoutes(fastify: FastifyInstance, ctx: RouteContex
 
   /** Emulator-only: a chargeback against a charge. */
   fastify.post('/v1/disputes', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const body = openDisputeSchema.parse(request.body);
     const payment = await storage.payments.byProviderTransactionId(PROVIDER, body.charge_id);
-    if (!payment) throw notFound('Charge');
+    if (!payment || !ownsPayment(actor, payment)) throw notFound('Charge');
     const { dispute, created } = await disputes.open({
       payment,
       amount: body.amount === undefined ? null : toMinor(body.amount, payment.currency, 'amount'),
@@ -173,9 +180,10 @@ export function registerDisputeRoutes(fastify: FastifyInstance, ctx: RouteContex
 
   /** Emulator-only: a ruling from the network, or a deadline moved earlier. */
   fastify.post<{ Params: { dispute_id: string } }>('/v1/disputes/:dispute_id/network', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const body = networkSchema.parse(request.body ?? {});
-    const updated = await disputes.networkUpdate(request.params.dispute_id, {
+    const owned = await loadDispute(actor, request.params.dispute_id);
+    const updated = await disputes.networkUpdate(owned.id, {
       ...(body.status ? { status: body.status } : {}),
       ...(body.response_deadline_at ? { deadline: body.response_deadline_at } : {}),
     });
@@ -190,9 +198,11 @@ export function registerDisputeRoutes(fastify: FastifyInstance, ctx: RouteContex
     mimeType: string;
     scope: string;
     private: boolean;
+    owner: Actor;
   }): Promise<StoredUpload> {
     const now = clock.nowISO();
     const upload: StoredUpload = {
+      ...ownerField(input.owner),
       seq: await state.nextSeq(),
       id: hexId(ids, 'upl', 12),
       fileName: input.fileName,
@@ -211,10 +221,10 @@ export function registerDisputeRoutes(fastify: FastifyInstance, ctx: RouteContex
   }
 
   fastify.post('/v1/disputes/uploads', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const file = await readMultipartFile(request, DISPUTE_DOCUMENT_MAX_BYTES);
     const mimeType = disputeDocumentType(file.bytes);
-    const upload = await store({ ...file, mimeType, scope: 'dispute-evidence', private: true });
+    const upload = await store({ ...file, mimeType, scope: 'dispute-evidence', private: true, owner: actor });
     return reply.send({
       document_id: upload.id,
       file_name: upload.fileName,
@@ -225,7 +235,7 @@ export function registerDisputeRoutes(fastify: FastifyInstance, ctx: RouteContex
   });
 
   fastify.post('/v1/utilities/uploads', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const file = await readMultipartFile(request, UPLOAD_MAX_BYTES);
     const scope = file.fields.scope ?? 'general';
     assertScope(scope);
@@ -234,22 +244,23 @@ export function registerDisputeRoutes(fastify: FastifyInstance, ctx: RouteContex
       mimeType: sniffMimeType(file.bytes, file.declaredType),
       scope,
       private: false,
+      owner: actor,
     });
     return reply.status(201).send(serializeUpload(upload, origin));
   });
 
   fastify.get<{ Params: { upload_id: string } }>('/v1/utilities/uploads/:upload_id', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const upload = await state.uploads.get(request.params.upload_id);
-    if (!upload) throw notFound('Upload');
+    if (!upload || !owns(actor, upload.account)) throw notFound('Upload');
     return reply.send(serializeUpload(upload, origin));
   });
 
   /** "Delete an upload that has not yet been linked to any resource." */
   fastify.delete<{ Params: { upload_id: string } }>('/v1/utilities/uploads/:upload_id', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const upload = await state.uploads.get(request.params.upload_id);
-    if (!upload) throw notFound('Upload');
+    if (!upload || !owns(actor, upload.account)) throw notFound('Upload');
     if (upload.linkedResourceId !== null) {
       throw fail(
         'invalid_request',

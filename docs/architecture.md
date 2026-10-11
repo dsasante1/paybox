@@ -628,6 +628,25 @@ currency. The adapter sweeps a GHS or KES net into USD at its fixed rate.
 amounts the adapter quoted, so a crash cannot leave money in neither currency
 or in both. The engine still converts nothing: it records what it was told.
 
+### `FormattedWebhook.endpointIds` — routing by more than event type
+
+Bachs routes a connected account's event to that account's endpoints and to
+its platform's endpoints that asked for connected accounts' events
+(`event_source`). Who that is depends on the adapter's state, which the
+formatter can read and the dispatcher cannot, so the formatter names the
+endpoints and the dispatcher narrows its fan-out to them. Event-type matching
+and disabled endpoints work as before. `deliverTo`, Tingg's per-request URL,
+is the same idea one level coarser.
+
+### Customers per owner (migration 0024)
+
+A Bachs connected account keeps its own customers, and one email can belong
+to the platform and to each account. `Customer.subaccountId` names the owning
+pot (absent for the platform), the unique index is on provider, owner and
+email, and `byEmail` takes the owner, defaulting to the platform. Every other
+provider has one owner, so nothing changes for them. `exchangeBalance` takes an
+owner pot the same way.
+
 ### Dispute `providerStatus` and `resolution` options
 
 Bachs has six dispute statuses where the canonical vocabulary has four, and

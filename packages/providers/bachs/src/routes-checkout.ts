@@ -12,6 +12,8 @@ import { assertNotExpired, cardFacts, factsFromDetails, TEST_CARDS } from './car
 import { checkoutLock, withLock } from './locks.js';
 import { toDecimal, toMinor } from './money.js';
 import { renderCheckoutPage, renderCheckoutResult } from './checkout-page.js';
+import { actorFor, directCharge, owns, ownerField, ownerKey, paymentPot, type Actor } from './actor.js';
+import { corridorCapability, hasCapability } from './accounts.js';
 import type { RouteContext } from './route-context.js';
 import { PRICE_CURRENCIES } from './routes-catalog.js';
 import { createCheckoutSchema } from './schemas.js';
@@ -135,15 +137,19 @@ function corridorsFor(currencies: readonly string[]): Corridor[] {
 }
 
 export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteContext): void {
-  const { engine, storage, state, clock, ids, authenticate } = ctx;
+  const { engine, storage, state, clock, ids } = ctx;
 
   const checkoutUrl = (checkout: StoredCheckout) => `${ctx.baseUrl}${ctx.basePath}/c/${checkout.token}`;
 
-  async function loadCheckout(id: string): Promise<StoredCheckout> {
+  /** "Every later read of it needs `X-Account-Id` too. Without the header the answer is `404`." */
+  async function loadCheckout(actor: Actor, id: string): Promise<StoredCheckout> {
     const checkout = await state.checkouts.get(id);
-    if (!checkout) throw notFound('Checkout session');
+    if (!checkout || !owns(actor, checkout.account)) throw notFound('Checkout session');
     return checkout;
   }
+
+  /** Whoever owns a checkout, for the payer's side, which has no header to read. */
+  const ownerOf = (checkout: StoredCheckout) => actorFor(state, ctx.organizationId, checkout.account);
 
   async function paymentOf(checkout: StoredCheckout): Promise<Payment | null> {
     return checkout.paymentId ? storage.payments.byId(checkout.paymentId) : null;
@@ -152,7 +158,7 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
   /* --------------------------- create a session --------------------------- */
 
   fastify.post('/v1/checkout-sessions', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const body = createCheckoutSchema.parse(request.body ?? {});
 
     if (body.platform_fee || body.transfer_data) throw notImplemented('Connect split payments');
@@ -176,7 +182,7 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
       // http(s) URL is refused; unlike success_url it may be private.
       if (body.cancel_url) assertHttpUrl(body.cancel_url, 'cancel_url');
       assertMetadata(body.metadata, 10_240);
-      if (body.reference && (await state.checkouts.referenceTaken(body.reference))) {
+      if (body.reference && (await state.checkouts.referenceTaken(body.reference, actor.account?.id ?? null))) {
         throw fail(
           'duplicate_reference',
           'CONFLICT',
@@ -188,7 +194,7 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
         ? // "To save without charging, you need a USD card."
           { priceType: 'fixed', currency: 'USD', amount: 0, preset: null, minimum: null, maximum: null, currencyOptions: {}, lines: [], recurring: null }
         : body.product_cart
-          ? await priceCart(body.product_cart)
+          ? await priceCart(body.product_cart, actor)
           : pricePricing(body.pricing!);
       const mode: CheckoutMode = setup ? 'setup' : priced.recurring ? 'subscription' : 'payment';
 
@@ -267,9 +273,10 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
         throw cannotSave();
       }
 
-      const customer = await resolveCustomer(body.customer ?? null);
+      const customer = await resolveCustomer(body.customer ?? null, actor);
       const now = clock.nowISO();
       const checkout: StoredCheckout = {
+        ...ownerField(actor),
         id: hexId(ids, 'chk'),
         mode,
         savePaymentMethod: body.save_payment_method ?? false,
@@ -329,12 +336,12 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
         });
         await state.checkouts.put(checkout);
         await state.checkouts.indexToken(checkout.token, checkout.id);
-        if (checkout.reference) await state.checkouts.indexReference(checkout.reference, checkout.id);
+        if (checkout.reference) await state.checkouts.indexReference(checkout.reference, checkout.id, checkout.account);
       });
       return serializeCheckoutCreated(checkout, checkoutUrl(checkout));
     };
     const created = body.reference
-      ? await withLock(`checkout-reference:${body.reference}`, create)
+      ? await withLock(`checkout-reference:${ownerKey(actor.account?.id ?? null, body.reference)}`, create)
       : await create();
     return reply.status(201).send(created);
   });
@@ -390,6 +397,7 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
 
   async function priceCart(
     cart: NonNullable<ReturnType<typeof createCheckoutSchema.parse>['product_cart']>,
+    actor: Actor,
   ): Promise<Priced> {
     const lines: StoredLine[] = [];
     let currency: string | null = null;
@@ -398,7 +406,8 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
 
     for (const [index, item] of cart.entries()) {
       const stored = await state.products.get(item.product_id);
-      const product = stored ? await storage.products.byId(stored.engineId) : null;
+      // "A direct-charge cart uses the account's product": only the owner's own.
+      const product = stored && owns(actor, stored.account) ? await storage.products.byId(stored.engineId) : null;
       if (!stored || !product) {
         throw fail('validation_failed', 'PRODUCT_NOT_FOUND', `Product ${item.product_id} not found.`);
       }
@@ -606,16 +615,17 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
   /** `customer` on the request: an existing record by id, or created/matched by email. */
   async function resolveCustomer(
     input: { customer_id: string } | { email: string; name?: string | null; phone_number?: string | null } | null,
+    actor: Actor,
   ): Promise<{ customer: Customer; name: string | null } | null> {
     if (!input) return null;
     if ('customer_id' in input) {
       const customer = await storage.customers.byProviderCustomerId(PROVIDER, input.customer_id);
-      if (!customer) throw notFound('Customer');
+      if (!customer || (customer.subaccountId ?? null) !== actor.pot) throw notFound('Customer');
       const stored = await state.customers.get(customer.providerCustomerId);
       return { customer, name: stored?.name ?? null };
     }
     // "Bachs creates or matches a customer for you. The same email is never duplicated."
-    const existing = await storage.customers.byEmail(PROVIDER, input.email);
+    const existing = await storage.customers.byEmail(PROVIDER, input.email, actor.pot);
     if (existing) {
       const stored = await state.customers.get(existing.providerCustomerId);
       return { customer: existing, name: stored?.name ?? null };
@@ -626,6 +636,7 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
       phone: input.phone_number ?? null,
       metadata: {},
       address: null,
+      owner: actor,
     });
     return { customer: created.customer, name: created.stored.name };
   }
@@ -635,8 +646,8 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
   fastify.get<{ Params: { checkout_id: string } }>(
     '/v1/checkout-sessions/:checkout_id',
     async (request, reply) => {
-      authenticate(request);
-      const checkout = await loadCheckout(request.params.checkout_id);
+      const actor = await ctx.actor(request);
+      const checkout = await loadCheckout(actor, request.params.checkout_id);
       const payment = await paymentOf(checkout);
       return reply.send(await renderSession(checkout, payment));
     },
@@ -772,10 +783,11 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
     }
     let customerId = checkout.customerId;
     if (checkout.customerCreation === 'always' && !customerId) {
-      const existing = await storage.customers.byEmail(PROVIDER, email);
+      const owner = await ownerOf(checkout);
+      const existing = await storage.customers.byEmail(PROVIDER, email, owner.pot);
       customerId = existing
         ? existing.id
-        : (await ctx.customers.create({ email, name, phone: null, metadata: {}, address: null })).customer.id;
+        : (await ctx.customers.create({ email, name, phone: null, metadata: {}, address: null, owner })).customer.id;
     }
     await save({ ...checkout, customerId, customerDetails: { email, name } });
   }
@@ -900,6 +912,16 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
       throw fail('validation_failed', 'PAYMENT_METHOD_NOT_ALLOWED', 'Choose one of the payment methods this checkout offers.');
     }
     const info = CORRIDORS[corridor];
+    // A direct charge needs the account's own capability for the method,
+    // checked "when the payer picks a method", not at create.
+    const owner = await ownerOf(checkout);
+    if (!hasCapability(owner.account, corridorCapability(corridor))) {
+      throw fail(
+        'validation_failed',
+        'PAYMENT_METHOD_NOT_ENABLED',
+        `This account cannot take ${info.label} payments: its ${corridorCapability(corridor)} capability is not active.`,
+      );
+    }
     const currency = info.currency!;
     const amount = currency === checkout.currency ? checkout.amount : checkout.currencyOptions[currency];
     if (amount === undefined) {
@@ -957,6 +979,8 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
     if (!payment) {
       payment = await engine.createPayment({
         provider: PROVIDER,
+        // "Create with the header = a direct charge": the account's money.
+        ...directCharge(owner),
         amount,
         currency,
         reference: checkout.id,
@@ -1135,6 +1159,7 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
           amount: received - payment.amount,
           reason: 'overpayment',
           resourceId: payment.id,
+          subaccountId: paymentPot(payment),
         });
         return;
       }
@@ -1156,6 +1181,7 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
             amount: payment.amount - paid,
             reason: 'underpayment_accepted',
             resourceId: payment.id,
+            subaccountId: paymentPot(payment),
           });
         }
         return;

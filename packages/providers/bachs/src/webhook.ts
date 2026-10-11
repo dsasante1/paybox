@@ -35,6 +35,7 @@ import {
 import { bachsSignatureHeaders } from './signature.js';
 import { bachsState, type StoredCheckout, type StoredPaymentMeta } from './state.js';
 import { disputeWebhookData } from './disputes.js';
+import { paymentPot } from './actor.js';
 import { disputeIdOf, eventId } from './ids.js';
 import {
   bachsDisputeStatus,
@@ -86,8 +87,15 @@ export interface StoredBachsEvent {
     | 'payment_method'
     | 'payout'
     | 'conversion'
-    | 'dispute';
+    | 'dispute'
+    | 'account';
   entityId: string;
+  /**
+   * The account the event happened on, its origin (guides/webhooks/overview,
+   * "Connect events"); absent for the platform's own. It decides who receives
+   * it and is the envelope's `organization_id`.
+   */
+  origin?: string;
   payload: Record<string, unknown>;
   createdAt: string;
   seq: number;
@@ -155,18 +163,23 @@ export class BachsWebhookFormatter implements WebhookFormatter {
     if (known) {
       const ids = (JSON.parse(known) as { ids: string[] }).ids;
       const stored = await Promise.all(ids.map((id) => readEvent(context.storage, id)));
-      return stored
-        .filter((entry): entry is StoredBachsEvent => entry !== null)
-        .map((entry) => ({ eventType: entry.type, body: entry.payload }));
+      const out: FormattedWebhook[] = [];
+      for (const entry of stored) {
+        if (!entry) continue;
+        out.push({ eventType: entry.type, body: entry.payload, ...(await this.#recipients(state, context.storage, entry.origin)) });
+      }
+      return out;
     }
 
     const drafts = await this.#build(event, context.storage, state);
     if (drafts.length === 0) return null;
 
     const seq = await this.#reserveSeq(context.storage, drafts.length);
-    const built: StoredBachsEvent[] = drafts.map((draft, index) => {
+    const built: StoredBachsEvent[] = [];
+    for (const [index, draft] of drafts.entries()) {
       const id = eventId(event.id, draft.type);
-      return {
+      const origin = draft.origin === undefined ? await originOf(event, context.storage, state) : draft.origin;
+      built.push({
         id,
         type: draft.type,
         canonicalEventId: event.id,
@@ -174,15 +187,20 @@ export class BachsWebhookFormatter implements WebhookFormatter {
         entityId: draft.entityId,
         createdAt: event.createdAt,
         seq: seq + index,
+        ...(origin ? { origin } : {}),
         payload: {
           id,
           type: draft.type,
           created_at: envelopeTime(event.createdAt),
-          organization_id: this.#organizationId,
+          // "On a connected account's event, organization_id is that
+          // account, not the platform", and `account` repeats it: "present
+          // only when the origin has a parent".
+          organization_id: origin ?? this.#organizationId,
+          ...(origin ? { account: origin } : {}),
           data: draft.data,
         },
-      };
-    });
+      });
+    }
 
     for (const entry of built) {
       await context.storage.providerState.put(
@@ -198,7 +216,40 @@ export class BachsWebhookFormatter implements WebhookFormatter {
       JSON.stringify({ ids: built.map((entry) => entry.id) }),
       event.createdAt,
     );
-    return built.map((entry) => ({ eventType: entry.type, body: entry.payload }));
+    const out: FormattedWebhook[] = [];
+    for (const entry of built) {
+      out.push({ eventType: entry.type, body: entry.payload, ...(await this.#recipients(state, context.storage, entry.origin)) });
+    }
+    return out;
+  }
+
+  /**
+   * Who receives an event (guides/webhooks/overview): "The origin's own
+   * endpoints receive it on `account` or `all`, and the origin's parent
+   * receives it on `connect` or `all`. Delivery walks up one level and no
+   * further." An endpoint registered with paybox's own control API has no
+   * Bachs record and keeps receiving everything, as it always has.
+   */
+  async #recipients(
+    state: ReturnType<typeof bachsState>,
+    storage: Storage,
+    origin: string | undefined,
+  ): Promise<{ endpointIds: string[] }> {
+    const endpointIds: string[] = [];
+    for (const endpoint of await storage.webhooks.listEndpoints()) {
+      if (endpoint.provider !== PROVIDER) continue;
+      const stored = await state.endpoints.get(endpoint.id);
+      if (!stored) {
+        endpointIds.push(endpoint.id);
+        continue;
+      }
+      const owner = stored.account ?? null;
+      const source = stored.eventSource;
+      const own = owner === (origin ?? null) && (source === 'account' || source === 'all');
+      const parent = origin !== undefined && owner === null && (source === 'connect' || source === 'all');
+      if (own || parent) endpointIds.push(endpoint.id);
+    }
+    return { endpointIds };
   }
 
   /**
@@ -244,6 +295,8 @@ export class BachsWebhookFormatter implements WebhookFormatter {
         return this.#conversionEvents(event, state);
       case 'dispute':
         return this.#disputeEvents(event, storage);
+      case 'subaccount':
+        return accountEvents(event);
       default:
         return [];
     }
@@ -428,7 +481,7 @@ export class BachsWebhookFormatter implements WebhookFormatter {
         email: customer.email,
         name: customerName(customer, await state.customers.get(customer.providerCustomerId)),
       },
-      charge: payment ? this.#chargeObject(payment, customer.providerCustomerId, {}) : null,
+      charge: payment ? await this.#chargeObject(payment, customer.providerCustomerId, {}, state) : null,
       metadata: {},
     });
     return [{ type, entityType: 'invoice', entityId: invoiceIdOf(invoice.id), data }];
@@ -476,11 +529,19 @@ export class BachsWebhookFormatter implements WebhookFormatter {
   }
 
   /** The charge object `checkout.completed` carries, reused where Bachs publishes no other. */
-  #chargeObject(payment: Payment, customerId: string | null, metadata: Record<string, unknown>) {
+  async #chargeObject(
+    payment: Payment,
+    customerId: string | null,
+    metadata: Record<string, unknown>,
+    state: ReturnType<typeof bachsState>,
+  ) {
     const fee = feeOf(payment) ?? 0;
+    // A direct charge belongs to its account.
+    const pot = paymentPot(payment);
+    const owner = pot ? (await state.accounts.all()).find((account) => account.engineId === pot)?.id : undefined;
     return {
       id: payment.providerTransactionId,
-      organization_id: this.#organizationId,
+      organization_id: owner ?? this.#organizationId,
       customer_id: customerId,
       amount: toDecimal(payment.amount, payment.currency),
       currency: payment.currency,
@@ -668,7 +729,7 @@ export class BachsWebhookFormatter implements WebhookFormatter {
         reference: checkout.reference,
         customer: await webhookCustomer(customer, state),
         customer_details: checkout.customerDetails,
-        charge: payment ? this.#chargeObject(payment, customer?.providerCustomerId ?? null, checkout.metadata) : null,
+        charge: payment ? await this.#chargeObject(payment, customer?.providerCustomerId ?? null, checkout.metadata, state) : null,
         // "`{ subscription_id }` for a subscription-mode checkout."
         subscription: fulfilment?.subscriptionId ? { subscription_id: fulfilment.subscriptionId } : null,
         success_url: checkout.successUrl,
@@ -858,7 +919,7 @@ export class BachsWebhookFormatter implements WebhookFormatter {
           ...(stored ?? {}),
           id: endpointId,
           name: stored?.name ?? endpoint.description,
-          eventSource: stored?.eventSource ?? 'account',
+          eventSource: stored?.eventSource ?? 'all',
           disabledAt: at,
           disabledReason: 'consecutive_failures',
         });
@@ -875,6 +936,75 @@ interface Draft {
   entityType: StoredBachsEvent['entityType'];
   entityId: string;
   data: Record<string, unknown>;
+  /** Overrides the canonical event's origin; null for the platform. */
+  origin?: string | null;
+}
+
+/**
+ * `account.updated` (`{account, outstanding}`) and `capability.updated`
+ * (`{account, capability, status, requested}`), from the connect event pages.
+ * Their data is fixed when the change is recorded, so a later change cannot
+ * rewrite what an earlier event said.
+ */
+function accountEvents(event: PayboxEvent): Draft[] {
+  if (event.type !== 'account.updated' && event.type !== 'capability.updated') return [];
+  const account = String(event.data.account ?? '');
+  const data =
+    event.type === 'account.updated'
+      ? { account, outstanding: event.data.outstanding ?? [] }
+      : { account, capability: event.data.capability, status: event.data.status, requested: event.data.requested };
+  return [{ type: event.type, entityType: 'account', entityId: account, data }];
+}
+
+/**
+ * The account a canonical event happened on: whoever owns the resource. A
+ * direct charge, its refunds and disputes are the account's; a customer and
+ * everything billed to them are their owner's; a payout leaves its owner's
+ * balance. Undefined for the platform.
+ */
+async function originOf(
+  event: PayboxEvent,
+  storage: Storage,
+  state: ReturnType<typeof bachsState>,
+): Promise<string | undefined> {
+  const accountOfPot = async (pot: string | null | undefined) => {
+    if (!pot) return undefined;
+    return (await state.accounts.all()).find((account) => account.engineId === pot)?.id;
+  };
+  const ofPayment = async (paymentId: string | null | undefined) => {
+    const payment = paymentId ? await storage.payments.byId(paymentId) : null;
+    return payment ? accountOfPot(paymentPot(payment)) : undefined;
+  };
+  const ofCustomer = async (customerId: string | null | undefined) => {
+    const customer = customerId ? await storage.customers.byId(customerId) : null;
+    return accountOfPot(customer?.subaccountId);
+  };
+  switch (event.resourceType) {
+    case 'payment':
+      return ofPayment(event.resourceId);
+    case 'refund':
+      return ofPayment((await storage.refunds.byId(event.resourceId))?.paymentId);
+    case 'dispute':
+      return ofPayment((await storage.disputes.byId(event.resourceId))?.paymentId);
+    case 'customer':
+      return ofCustomer(event.resourceId);
+    case 'subscription':
+      return ofCustomer((await storage.subscriptions.byId(event.resourceId))?.customerId);
+    case 'invoice':
+      return ofCustomer((await storage.invoices.byId(event.resourceId))?.customerId);
+    case 'authorization':
+      return ofCustomer((await storage.authorizations.byId(event.resourceId))?.customerId);
+    case 'transfer':
+      return accountOfPot((await storage.transfers.byId(event.resourceId))?.sourceSubaccountId);
+    case 'subaccount':
+      return accountOfPot(event.resourceId);
+    case 'checkout':
+      return (await state.checkouts.get(event.resourceId))?.account;
+    case 'conversion':
+      return (await state.conversions.get(event.resourceId))?.account;
+    default:
+      return undefined;
+  }
 }
 
 /** `wha_` and 32 hex, stable for a delivery's nth attempt. */

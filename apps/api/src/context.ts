@@ -492,7 +492,7 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
   // other currency, on any path, is swept into USD as soon as it lands
   // (providers/bachs/src/treasury.ts). Payouts advance and schedules run as
   // Bachs' own jobs.
-  const bachsTreasury = new BachsTreasury({ engine, storage, clock, ids });
+  const bachsTreasury = new BachsTreasury({ engine, storage, clock, ids, organizationId: bachsKeys.organizationId });
   bus.on('payment.successful', bachsTreasury.onMoneyMoved);
   bus.on('refund.successful', bachsTreasury.onMoneyMoved);
   bus.on('refund.failed', bachsTreasury.onMoneyMoved);

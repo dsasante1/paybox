@@ -125,3 +125,11 @@ export function disputeIdOf(dispute: { id: string; providerDisputeId: string }):
     ? dispute.providerDisputeId
     : derivedId('dsp', `dispute:${dispute.id}`, 12);
 }
+
+/** A prefix and `length` mixed-case alphanumerics: `acct_3Wq8ZfT1yHnJ5sVe`, `al_kQ2v…`. */
+export function alnumId(ids: IdFactory, prefix: string, length: number): string {
+  const digest = createHash('sha512').update(ids.token(26)).digest();
+  let out = '';
+  for (let i = 0; i < length; i++) out += BASE62[digest[i]! % 62];
+  return `${prefix}_${out}`;
+}

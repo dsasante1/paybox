@@ -6,6 +6,7 @@ import { assertMetadata, everyRow, newestFirst, notFound, readPage } from './htt
 import { emailLock, withLock } from './locks.js';
 import { hexId } from './ids.js';
 import { toMinor } from './money.js';
+import { owns, ownerField, type Actor } from './actor.js';
 import type { RouteContext } from './route-context.js';
 import {
   createCustomerSchema,
@@ -146,13 +147,13 @@ function parseCurrencyOptions(
 }
 
 export function registerCatalogRoutes(fastify: FastifyInstance, ctx: RouteContext): void {
-  const { engine, storage, state, authenticate } = ctx;
+  const { engine, storage, state } = ctx;
 
   /* -------------------------------- products -------------------------------- */
 
-  async function loadProduct(id: string): Promise<{ product: Product; stored: StoredProduct }> {
+  async function loadProduct(actor: Actor, id: string): Promise<{ product: Product; stored: StoredProduct }> {
     const stored = await state.products.get(id);
-    const product = stored ? await storage.products.byId(stored.engineId) : null;
+    const product = stored && owns(actor, stored.account) ? await storage.products.byId(stored.engineId) : null;
     if (!stored || !product) throw notFound('Product');
     return { product, stored };
   }
@@ -177,14 +178,14 @@ export function registerCatalogRoutes(fastify: FastifyInstance, ctx: RouteContex
 
   async function renderProduct(product: Product, stored: StoredProduct) {
     return serializeProduct(product, stored, {
-      organizationId: ctx.organizationId,
+      organizationId: stored.account ?? ctx.organizationId,
       ...(await productTotals(stored.id)),
       media: await mediaOf(state, stored, `${ctx.baseUrl}${ctx.basePath}`),
     });
   }
 
   fastify.post('/v1/products', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const body = createProductSchema.parse(request.body);
     assertMetadata(body.metadata);
     const price = parsePrice(body.price);
@@ -204,6 +205,7 @@ export function registerCatalogRoutes(fastify: FastifyInstance, ctx: RouteContex
       metadata: body.metadata ?? {},
     });
     const stored: StoredProduct = {
+      ...ownerField(actor),
       id,
       engineId: product.id,
       seq: await state.nextSeq(),
@@ -217,15 +219,15 @@ export function registerCatalogRoutes(fastify: FastifyInstance, ctx: RouteContex
   });
 
   fastify.get<{ Params: { product_id: string } }>('/v1/products/:product_id', async (request, reply) => {
-    authenticate(request);
-    const { product, stored } = await loadProduct(request.params.product_id);
+    const actor = await ctx.actor(request);
+    const { product, stored } = await loadProduct(actor, request.params.product_id);
     return reply.send(await renderProduct(product, stored));
   });
 
   fastify.patch<{ Params: { product_id: string } }>('/v1/products/:product_id', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const body = updateProductSchema.parse(request.body ?? {});
-    const { product, stored } = await loadProduct(request.params.product_id);
+    const { product, stored } = await loadProduct(actor, request.params.product_id);
     if (body.metadata) assertMetadata(body.metadata);
 
     let billingCycle = stored.billingCycle;
@@ -288,8 +290,8 @@ export function registerCatalogRoutes(fastify: FastifyInstance, ctx: RouteContex
     fastify.post<{ Params: { product_id: string } }>(
       `/v1/products/:product_id/${action}`,
       async (request, reply) => {
-        authenticate(request);
-        const { product, stored } = await loadProduct(request.params.product_id);
+        const actor = await ctx.actor(request);
+        const { product, stored } = await loadProduct(actor, request.params.product_id);
         // Both are idempotent: archiving an archived product succeeds.
         const archivedAt = action === 'archive' ? (stored.archivedAt ?? ctx.clock.nowISO()) : null;
         const changed = archivedAt !== stored.archivedAt;
@@ -307,7 +309,7 @@ export function registerCatalogRoutes(fastify: FastifyInstance, ctx: RouteContex
   }
 
   fastify.get('/v1/products', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const query = listProductsQuery.parse(request.query);
     const { limit, offset } = readPage(query, 20);
     const includeArchived = query.include_archived === 'true';
@@ -316,7 +318,7 @@ export function registerCatalogRoutes(fastify: FastifyInstance, ctx: RouteContex
     const rows: Array<{ product: Product; stored: StoredProduct }> = [];
     for (const product of all) {
       const stored = await state.products.get(product.providerProductId);
-      if (!stored) continue;
+      if (!stored || !owns(actor, stored.account)) continue;
       if (stored.archivedAt && !includeArchived) continue;
       rows.push({ product, stored });
     }
@@ -332,9 +334,9 @@ export function registerCatalogRoutes(fastify: FastifyInstance, ctx: RouteContex
 
   /* -------------------------------- customers -------------------------------- */
 
-  async function loadCustomer(id: string): Promise<{ customer: Customer; stored: StoredCustomer | null }> {
+  async function loadCustomer(actor: Actor, id: string): Promise<{ customer: Customer; stored: StoredCustomer | null }> {
     const customer = await storage.customers.byProviderCustomerId(PROVIDER, id);
-    if (!customer) throw notFound('Customer');
+    if (!customer || (customer.subaccountId ?? null) !== actor.pot) throw notFound('Customer');
     return { customer, stored: await state.customers.get(id) };
   }
 
@@ -393,7 +395,7 @@ export function registerCatalogRoutes(fastify: FastifyInstance, ctx: RouteContex
    * (guides/webhooks/events/customer-updated).
    */
   fastify.post('/v1/customers', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const body = createCustomerSchema.parse(request.body);
     if (body.metadata) assertMetadata(body.metadata);
     const address = parseAddress(body.billing_address);
@@ -404,6 +406,7 @@ export function registerCatalogRoutes(fastify: FastifyInstance, ctx: RouteContex
         phone: body.phone_number ?? null,
         metadata: body.metadata ?? {},
         address: address ?? null,
+        owner: actor,
       },
       {
         // Only the fields sent are applied to an existing customer.
@@ -417,20 +420,20 @@ export function registerCatalogRoutes(fastify: FastifyInstance, ctx: RouteContex
   });
 
   fastify.get<{ Params: { customer_id: string } }>('/v1/customers/:customer_id', async (request, reply) => {
-    authenticate(request);
-    const { customer, stored } = await loadCustomer(request.params.customer_id);
+    const actor = await ctx.actor(request);
+    const { customer, stored } = await loadCustomer(actor, request.params.customer_id);
     return reply.send(serializeCustomer(customer, stored));
   });
 
   fastify.patch<{ Params: { customer_id: string } }>('/v1/customers/:customer_id', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const body = updateCustomerSchema.parse(request.body ?? {});
     if (body.metadata) assertMetadata(body.metadata);
-    const { customer } = await loadCustomer(request.params.customer_id);
+    const { customer } = await loadCustomer(actor, request.params.customer_id);
     const address = parseAddress(body.billing_address);
     const changingEmail = Boolean(body.email && body.email !== customer.email);
     const apply = async () => {
-      if (changingEmail && (await storage.customers.byEmail(PROVIDER, body.email!))) {
+      if (changingEmail && (await storage.customers.byEmail(PROVIDER, body.email!, actor.pot))) {
         throw fail('duplicate_reference', 'CONFLICT', 'Another customer already uses this email address.');
       }
       return applyCustomerUpdate(customer, {
@@ -442,12 +445,12 @@ export function registerCatalogRoutes(fastify: FastifyInstance, ctx: RouteContex
       });
     };
     // Taking an email is check-then-write; serialise it per email.
-    const updated = changingEmail ? await withLock(emailLock(body.email!), apply) : await apply();
+    const updated = changingEmail ? await withLock(emailLock(body.email!, actor.pot), apply) : await apply();
     return reply.send(serializeCustomer(updated.customer, updated.stored));
   });
 
   fastify.get('/v1/customers', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const query = listCustomersQuery.parse(request.query);
     const { limit, offset } = readPage(query, 50);
     // "Search by customer email or name", where `name` is the full name. The
@@ -458,6 +461,7 @@ export function registerCatalogRoutes(fastify: FastifyInstance, ctx: RouteContex
     const everyone = await everyRow((page) => storage.customers.list({ provider: PROVIDER, ...page }));
     const matches: Array<{ customer: Customer; stored: StoredCustomer | null }> = [];
     for (const customer of everyone) {
+      if ((customer.subaccountId ?? null) !== actor.pot) continue;
       const stored = await state.customers.get(customer.providerCustomerId);
       const name = customerName(customer, stored) ?? '';
       if (!needle || customer.email.toLowerCase().includes(needle) || name.toLowerCase().includes(needle)) {
@@ -495,11 +499,13 @@ export function registerCatalogRoutes(fastify: FastifyInstance, ctx: RouteContex
       phone: string | null;
       metadata: Record<string, unknown>;
       address: Record<string, unknown> | null;
+      /** Whose customer: each owner keeps its own, so one email can be several customers. */
+      owner: Actor;
     },
     update: Parameters<typeof applyCustomerUpdate>[1] | null,
   ): Promise<{ customer: Customer; stored: StoredCustomer }> {
-    return withLock(emailLock(input.email), async () => {
-      const existing = await storage.customers.byEmail(PROVIDER, input.email);
+    return withLock(emailLock(input.email, input.owner.pot), async () => {
+      const existing = await storage.customers.byEmail(PROVIDER, input.email, input.owner.pot);
       if (existing) {
         if (update) return applyCustomerUpdate(existing, update);
         return { customer: existing, stored: (await state.customers.get(existing.providerCustomerId)) ?? orphanRecord(existing) };
@@ -522,6 +528,7 @@ export function registerCatalogRoutes(fastify: FastifyInstance, ctx: RouteContex
           phone: input.phone,
           metadata: input.metadata,
           providerCustomerId: id,
+          subaccountId: input.owner.pot,
         });
       } catch (error) {
         await state.customers.delete(id);

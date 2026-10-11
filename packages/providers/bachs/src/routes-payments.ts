@@ -7,6 +7,7 @@ import { refundId } from './ids.js';
 import { refundRecord } from './refunds.js';
 import { chargeLock, withLock } from './locks.js';
 import { toDecimal, toMinor } from './money.js';
+import { ownerKey, ownsPayment, type Actor } from './actor.js';
 import type { RouteContext } from './route-context.js';
 import { createRefundSchema, listPaymentsQuery, listRefundsQuery } from './schemas.js';
 import {
@@ -32,17 +33,20 @@ const REFUND_KEY_WINDOW_MS = 24 * 3_600_000;
 
 
 export function registerPaymentRoutes(fastify: FastifyInstance, ctx: RouteContext): void {
-  const { engine, storage, state, clock, ids, authenticate } = ctx;
+  const { engine, storage, state, clock, ids } = ctx;
 
-  async function loadPayment(id: string): Promise<Payment> {
+  /** A charge the actor owns: a direct charge is its account's, anything else the platform's. */
+  async function loadPayment(actor: Actor, id: string, what = 'Payment'): Promise<Payment> {
     const payment = await storage.payments.byProviderTransactionId(PROVIDER, id);
-    if (!payment || payment.provider !== PROVIDER) throw notFound('Payment');
+    if (!payment || payment.provider !== PROVIDER || !ownsPayment(actor, payment)) throw notFound(what);
     return payment;
   }
 
-  /** Every Bachs payment, newest first. Small enough locally to filter in memory. */
-  async function allPayments(): Promise<Payment[]> {
-    const payments = await everyRow((page) => storage.payments.list({ provider: PROVIDER, ...page }));
+  /** Every Bachs payment the actor owns, newest first. Small enough locally to filter in memory. */
+  async function allPayments(actor: Actor): Promise<Payment[]> {
+    const payments = (await everyRow((page) => storage.payments.list({ provider: PROVIDER, ...page }))).filter(
+      (payment) => ownsPayment(actor, payment),
+    );
     const rows = await Promise.all(
       payments.map(async (payment) => ({
         payment,
@@ -61,12 +65,12 @@ export function registerPaymentRoutes(fastify: FastifyInstance, ctx: RouteContex
   /* -------------------------------- payments -------------------------------- */
 
   fastify.get('/v1/payments', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const query = listPaymentsQuery.parse(request.query);
     // The spec gives this list a default of 50; the pagination guide says 20.
     // The REST shape wins: 50.
     const { limit, offset } = readPage(query, 50);
-    let payments = await allPayments();
+    let payments = await allPayments(actor);
     if (query.status_filter) {
       payments = payments.filter((payment) => paymentStatusOf(payment) === query.status_filter);
     }
@@ -81,19 +85,19 @@ export function registerPaymentRoutes(fastify: FastifyInstance, ctx: RouteContex
   });
 
   fastify.get<{ Params: { payment_id: string } }>('/v1/payments/:payment_id', async (request, reply) => {
-    authenticate(request);
-    const payment = await loadPayment(request.params.payment_id);
+    const actor = await ctx.actor(request);
+    const payment = await loadPayment(actor, request.params.payment_id);
     return reply.send(serializePayment(payment, await ctx.paymentContext(payment)));
   });
 
   fastify.get<{ Params: { charge_id: string } }>('/v1/payments/charges/:charge_id', async (request, reply) => {
-    authenticate(request);
-    const payment = await loadPayment(request.params.charge_id);
+    const actor = await ctx.actor(request);
+    const payment = await loadPayment(actor, request.params.charge_id);
     const context = await ctx.paymentContext(payment);
     const customer = payment.customerId ? await storage.customers.byId(payment.customerId) : null;
     return reply.send(
       serializeChargeStatus(payment, {
-        organizationId: ctx.organizationId,
+        organizationId: actor.id,
         customerId: customer?.providerCustomerId ?? null,
         checkout: context.checkout,
         meta: context.meta,
@@ -113,16 +117,16 @@ export function registerPaymentRoutes(fastify: FastifyInstance, ctx: RouteContex
   }
 
   fastify.post('/v1/refunds', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const body = createRefundSchema.parse(request.body);
-    const payment = await storage.payments.byProviderTransactionId(PROVIDER, body.charge_id);
-    if (!payment) throw notFound('Charge');
+    // connect/refunds: a refund debits whoever owns the charge, and is made as them.
+    const payment = await loadPayment(actor, body.charge_id, 'Charge');
 
     // One lock per charge across "is there already a refund?" and the create:
     // "A charge carries at most one refund that did not fail".
     // References are unique across the account, charges one refund at a
     // time: both locks, always in this order.
-    return withLock(`refund-reference:${body.reference}`, () => withLock(chargeLock(payment.id), async () => {
+    return withLock(`refund-reference:${ownerKey(actor.account?.id ?? null, body.reference)}`, () => withLock(chargeLock(payment.id), async () => {
       // The body's own idempotency key: "the second request returns the existing refund".
       if (body.idempotency_key) {
         const raw = await storage.providerState.get(PROVIDER, `refund-key:${payment.id}:${body.idempotency_key}`);
@@ -136,7 +140,7 @@ export function registerPaymentRoutes(fastify: FastifyInstance, ctx: RouteContex
         }
       }
 
-      if (await state.refunds.referenceTaken(body.reference)) {
+      if (await state.refunds.referenceTaken(body.reference, actor.account?.id ?? null)) {
         throw fail('duplicate_reference', 'CONFLICT', 'Refund reference already exists');
       }
       const existing = await refundsOf(payment);
@@ -189,7 +193,7 @@ export function registerPaymentRoutes(fastify: FastifyInstance, ctx: RouteContex
       // settles cannot spend the same money.
       const held = settlementCurrency(payment.currency);
       const { refund, draft, now } = await ctx.treasury.exclusive(async () => {
-        const balance = await ctx.treasury.available(held);
+        const balance = await ctx.treasury.available(held, actor.pot);
         if (balance < convertMinor(amount, payment.currency, held)) {
           throw fail('balance_insufficient', 'BAD_REQUEST', 'Insufficient balance to refund');
         }
@@ -228,13 +232,14 @@ export function registerPaymentRoutes(fastify: FastifyInstance, ctx: RouteContex
           refundId: refund.id,
           currency: held,
           amount: convertMinor(amount, payment.currency, held),
+          pot: actor.pot,
         });
         return { refund, draft, now };
       });
       const stored = { ...draft, engineId: refund.id };
       await state.refunds.put(stored);
       await state.refunds.indexEngine(refund.id, stored.id);
-      await state.refunds.indexReference(stored.reference, stored.id);
+      await state.refunds.indexReference(stored.reference, stored.id, actor.account?.id ?? null);
       if (body.idempotency_key) {
         await storage.providerState.put(
           PROVIDER,
@@ -265,9 +270,9 @@ export function registerPaymentRoutes(fastify: FastifyInstance, ctx: RouteContex
   });
 
   /** Every refund on a Bachs charge, with its Bachs record, newest first. */
-  async function allRefunds(): Promise<Array<{ refund: Refund; stored: StoredRefund }>> {
+  async function allRefunds(actor: Actor): Promise<Array<{ refund: Refund; stored: StoredRefund }>> {
     const rows: Array<{ refund: Refund; stored: StoredRefund }> = [];
-    for (const payment of await allPayments()) rows.push(...(await refundsOf(payment)));
+    for (const payment of await allPayments(actor)) rows.push(...(await refundsOf(payment)));
     return rows.sort((a, b) =>
       newestFirst({ seq: a.stored.seq, createdAt: a.refund.createdAt }, { seq: b.stored.seq, createdAt: b.refund.createdAt }),
     );
@@ -275,10 +280,10 @@ export function registerPaymentRoutes(fastify: FastifyInstance, ctx: RouteContex
 
   /** listRefunds: `{ total, items }` -- not the `{ items, pagination }` the guide promises. */
   fastify.get('/v1/refunds', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const query = listRefundsQuery.parse(request.query);
     const { limit, offset } = readPage(query, 50);
-    let rows = await allRefunds();
+    let rows = await allRefunds(actor);
     if (query.status) rows = rows.filter(({ refund }) => toBachsRefundStatus(refund.status) === query.status);
     const page = rows.slice(offset, offset + limit);
     return reply.send({
@@ -288,10 +293,11 @@ export function registerPaymentRoutes(fastify: FastifyInstance, ctx: RouteContex
   });
 
   fastify.get<{ Params: { refund_id: string } }>('/v1/refunds/:refund_id', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const stored = await state.refunds.get(request.params.refund_id);
     const refund = stored?.engineId ? await storage.refunds.byId(stored.engineId) : null;
-    if (!stored || !refund) throw notFound('Refund');
+    const payment = refund ? await storage.payments.byId(refund.paymentId) : null;
+    if (!stored || !refund || !payment || !ownsPayment(actor, payment)) throw notFound('Refund');
     return reply.send(serializeRefund(refund, stored));
   });
 
@@ -299,8 +305,8 @@ export function registerPaymentRoutes(fastify: FastifyInstance, ctx: RouteContex
   fastify.get<{ Params: { payment_id: string } }>(
     '/v1/refunds/by-charge/:payment_id',
     async (request, reply) => {
-      authenticate(request);
-      const payment = await loadPayment(request.params.payment_id);
+      const actor = await ctx.actor(request);
+      const payment = await loadPayment(actor, request.params.payment_id);
       const rows = await refundsOf(payment);
       const chosen =
         rows.find(({ refund }) => refund.status !== 'failed') ??
@@ -326,14 +332,16 @@ export function registerPaymentRoutes(fastify: FastifyInstance, ctx: RouteContex
    * written (treasury.ts).
    */
   fastify.get('/v1/balances', async (request, reply) => {
-    authenticate(request);
-    const usd = await ctx.treasury.available('USD');
+    // connect/balances: with the header, the account's own balance, "from the
+    // moment the account exists, whatever state its capabilities are in".
+    const actor = await ctx.actor(request);
+    const usd = await ctx.treasury.available('USD', actor.pot);
     const balances = [{ currency: 'USD', available_balance: toDecimal(usd, 'USD'), pending_balance: toDecimal(0, 'USD') }];
-    const ngn = await ctx.treasury.available('NGN');
+    const ngn = await ctx.treasury.available('NGN', actor.pot);
     balances.unshift({ currency: 'NGN', available_balance: toDecimal(ngn, 'NGN'), pending_balance: toDecimal(0, 'NGN') });
     const total = usd + convertMinor(ngn, 'NGN', 'USD');
     return reply.send({
-      account_id: ctx.organizationId,
+      account_id: actor.id,
       balances,
       total_balance_usd: toDecimal(total, 'USD'),
       pending_settlements_by_day: [],

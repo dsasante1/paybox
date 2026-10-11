@@ -1,5 +1,7 @@
-import type { Clock, IdFactory, PayboxEvent, Transfer } from '@paybox/shared';
+import type { Clock, IdFactory, LedgerEntry, Payment, PayboxEvent, Transfer } from '@paybox/shared';
 import type { Job, PaymentEngine, Storage } from '@paybox/core';
+import { hasCapability } from './accounts.js';
+import { actorFor, ownerKey, paymentPot, platformActor, type Actor } from './actor.js';
 import { fail } from './errors.js';
 import { everyRow } from './http.js';
 import { derivedId, disputeIdOf, hexId } from './ids.js';
@@ -10,6 +12,7 @@ import { bachsDisputeStatus, isOpenDispute } from './status.js';
 import {
   bachsState,
   type BachsState,
+  type StoredAccount,
   type StoredConversion,
   type StoredDestination,
   type StoredQuote,
@@ -60,6 +63,8 @@ interface DisputeMovement {
   amount: number;
   reason: 'dispute_fee' | 'dispute_warning_fee' | 'dispute_hold' | 'dispute_hold_release';
   resourceId: string;
+  /** The pot of whoever owns the disputed charge. */
+  pot: string | null;
 }
 
 /** Every currency movement serialises on this one key: the sweep, payouts and conversions all read and move balances. */
@@ -103,6 +108,8 @@ export interface TreasuryDeps {
   storage: Storage;
   clock: Clock;
   ids: IdFactory;
+  /** The platform's own account id, for jobs that act for whoever owns a schedule. */
+  organizationId: string;
 }
 
 /** What a payout's core transfer carries beyond the engine's own columns. */
@@ -134,6 +141,7 @@ export class BachsTreasury {
   readonly #storage: Storage;
   readonly #clock: Clock;
   readonly #ids: IdFactory;
+  readonly #organizationId: string;
   readonly state: BachsState;
 
   constructor(deps: TreasuryDeps) {
@@ -141,7 +149,24 @@ export class BachsTreasury {
     this.#storage = deps.storage;
     this.#clock = deps.clock;
     this.#ids = deps.ids;
+    this.#organizationId = deps.organizationId;
     this.state = bachsState(deps.storage, () => deps.clock.nowISO());
+  }
+
+  /**
+   * Every pot that holds money: the platform's, and each connected
+   * account's (connect/balances: an account's balance is its own, from the
+   * moment it exists). Each is settled, read and spent on its own.
+   */
+  async #pots(): Promise<Array<string | null>> {
+    return [null, ...(await this.state.accounts.all()).map((account) => account.engineId)];
+  }
+
+  /** The owner of a pot, as an actor, for jobs and listeners that have only the pot. */
+  async #actorOfPot(pot: string | null): Promise<Actor> {
+    if (pot === null) return platformActor(this.#organizationId);
+    const account = (await this.state.accounts.all()).find((candidate) => candidate.engineId === pot);
+    return actorFor(this.state, this.#organizationId, account?.id ?? null);
   }
 
   /* ------------------------------ settlement ------------------------------ */
@@ -169,12 +194,16 @@ export class BachsTreasury {
     // A hold whose refund has finished comes back here too, not only from the
     // refund's own event: that event lives in memory, and a crash or a failing
     // handler must not leave the hold taken for good.
-    for (const refundId of await this.#finishedHolds()) await this.#releaseRefundHold(refundId);
-    for (const currency of await this.#storage.ledger.currencies(PROVIDER, null)) {
+    for (const hold of await this.#finishedHolds()) await this.#releaseRefundHold(hold.resourceId!);
+    for (const pot of await this.#pots()) await this.#sweepPot(pot);
+  }
+
+  async #sweepPot(pot: string | null): Promise<void> {
+    for (const currency of await this.#storage.ledger.currencies(PROVIDER, pot)) {
       if (isHeld(currency)) continue;
-      const net = await this.#storage.ledger.net(PROVIDER, currency, null);
+      const net = await this.#storage.ledger.net(PROVIDER, currency, pot);
       if (net === 0) continue;
-      const { foreign, usd } = await this.#swept(currency);
+      const { foreign, usd } = await this.#swept(currency, pot);
       // Rounded on the running total, not per sweep, so a hundred small
       // collections settle to what their sum is worth.
       const delta = convertMinor(foreign + net, currency, 'USD') - usd;
@@ -188,16 +217,17 @@ export class BachsTreasury {
         to: net > 0 ? dollars : other,
         reason: 'settlement',
         resourceId: `settlement:${currency}`,
+        subaccountId: pot,
       });
     }
   }
 
   /** What every sweep of `currency` has moved so far: foreign out (+) and dollars in (+). */
-  async #swept(currency: string): Promise<{ foreign: number; usd: number }> {
+  async #swept(currency: string, pot: string | null): Promise<{ foreign: number; usd: number }> {
     const tag = `settlement:${currency}`;
     let foreign = 0;
     let usd = 0;
-    for (const entry of await this.#ledger()) {
+    for (const entry of await this.#ledger(pot)) {
       if (entry.reason !== 'settlement' || entry.resourceId !== tag) continue;
       const signed = entry.direction === 'credit' ? entry.amount : -entry.amount;
       if (entry.currency === currency) foreign -= signed;
@@ -210,24 +240,42 @@ export class BachsTreasury {
     return everyRow((page) => this.#storage.payments.list({ provider: PROVIDER, ...page }));
   }
 
-  async #ledger() {
-    return (
-      await everyRow((page) => this.#storage.ledger.list({ provider: PROVIDER, subaccountId: null, ...page }))
+  /** One pot's ledger, or, with no pot named, every pot's. */
+  async #ledger(pot?: string | null) {
+    return everyRow((page) =>
+      this.#storage.ledger.list({ provider: PROVIDER, ...(pot === undefined ? {} : { subaccountId: pot }), ...page }),
     );
   }
 
   /** Collections owed their processing fee: successful once, whatever has happened since. */
-  async #feesOwed(): Promise<Array<{ paymentId: string; currency: string; fee: number }>> {
+  async #feesOwed(): Promise<Array<{ paymentId: string; currency: string; fee: number; pot: string | null }>> {
     const charged = new Set(
       (await this.#ledger()).filter((entry) => entry.reason === 'processing_fee').map((entry) => entry.resourceId),
     );
     const owed = [];
+    const accounts = new Map((await this.state.accounts.all()).map((account) => [account.engineId, account]));
     for (const payment of await this.#payments()) {
       if (charged.has(payment.id) || !COLLECTED.includes(payment.status)) continue;
       const fee = feeOf(payment) ?? 0;
-      if (fee > 0) owed.push({ paymentId: payment.id, currency: payment.currency, fee });
+      if (fee > 0) owed.push({ paymentId: payment.id, currency: payment.currency, fee, pot: await this.#feePayer(payment, fee, accounts) });
     }
     return owed;
+  }
+
+  /**
+   * Whose balance pays a collection's processing fee. Normally the charge's
+   * owner. On a direct charge for an account whose fees are collected by the
+   * platform (`responsibilities.fees.collector: "platform"`, connect/
+   * processing-fees), the platform pays it and the account settles gross --
+   * unless the platform cannot cover it, when it "silently falls back" to the
+   * charge.
+   */
+  async #feePayer(payment: Payment, fee: number, accounts: Map<string, StoredAccount>): Promise<string | null> {
+    const pot = paymentPot(payment);
+    if (pot === null || accounts.get(pot)?.collector !== 'platform') return pot;
+    const held = settlementCurrency(payment.currency);
+    const platform = await this.#engine.getBalance(PROVIDER, held, null);
+    return platform >= convertMinor(fee, payment.currency, held) ? null : pot;
   }
 
   /**
@@ -243,6 +291,7 @@ export class BachsTreasury {
         amount: owed.fee,
         reason: 'processing_fee',
         resourceId: owed.paymentId,
+        subaccountId: owed.pot,
       });
     }
   }
@@ -272,6 +321,9 @@ export class BachsTreasury {
     for (const dispute of disputes) {
       const record = await this.state.disputes.get(disputeIdOf(dispute));
       const currency = settlementCurrency(dispute.currency);
+      // connect/disputes: "A dispute debits whoever owns the charge".
+      const payment = await this.#storage.payments.byId(dispute.paymentId);
+      const pot = payment ? paymentPot(payment) : null;
       const status = bachsDisputeStatus(dispute);
       const warningOnly = record !== null && record.warning && record.escalatedAt === null;
       const owe = (movement: DisputeMovement) => {
@@ -287,6 +339,7 @@ export class BachsTreasury {
           amount: convertMinor(WARNING_FEE_USD, 'USD', currency),
           reason: 'dispute_warning_fee',
           resourceId: `warning:${dispute.paymentId}`,
+          pot,
         });
       }
       if (warningOnly) continue;
@@ -296,6 +349,7 @@ export class BachsTreasury {
         amount: convertMinor(DISPUTE_FEE_USD, 'USD', currency),
         reason: 'dispute_fee',
         resourceId: dispute.id,
+        pot,
       });
       // Kept while undecided and on a loss. A loss recorded by the generic
       // tooling raised a real refund, which took the money itself.
@@ -304,9 +358,9 @@ export class BachsTreasury {
       if (!seen.has(`dispute_hold:${dispute.id}`)) {
         // A dispute ruled on before its hold was written never needs one,
         // unless it was lost.
-        if (keep) owe({ direction: 'debit', currency, amount, reason: 'dispute_hold', resourceId: dispute.id });
+        if (keep) owe({ direction: 'debit', currency, amount, reason: 'dispute_hold', resourceId: dispute.id, pot });
       } else if (!keep) {
-        owe({ direction: 'credit', currency, amount, reason: 'dispute_hold_release', resourceId: dispute.id });
+        owe({ direction: 'credit', currency, amount, reason: 'dispute_hold_release', resourceId: dispute.id, pot });
       }
     }
     return owed;
@@ -320,6 +374,7 @@ export class BachsTreasury {
         amount: movement.amount,
         reason: movement.reason,
         resourceId: movement.resourceId,
+        subaccountId: movement.pot,
       };
       if (movement.direction === 'debit') await this.#engine.debitBalance(input);
       else await this.#engine.creditBalance(input);
@@ -331,33 +386,38 @@ export class BachsTreasury {
    * non-held currency has netted that no sweep has moved yet. Pure: a read
    * neither writes nor draws an id.
    */
-  async available(currency: 'USD' | 'NGN'): Promise<number> {
-    let balance = await this.#engine.getBalance(PROVIDER, currency);
+  async available(currency: 'USD' | 'NGN', pot: string | null = null): Promise<number> {
+    let balance = await this.#engine.getBalance(PROVIDER, currency, pot);
     // Fees not yet taken off, and foreign money not yet swept, are reported
     // as the sweep will leave them -- without writing.
     const pending = new Map<string, number>();
     for (const owed of await this.#feesOwed()) {
+      if (owed.pot !== pot) continue;
       pending.set(owed.currency, (pending.get(owed.currency) ?? 0) - owed.fee);
     }
-    for (const refundId of await this.#finishedHolds()) {
-      const hold = (await this.#ledger()).find((entry) => entry.reason === 'refund_hold' && entry.resourceId === refundId);
-      if (hold && hold.currency === currency) balance += hold.amount;
+    for (const hold of await this.#finishedHolds()) {
+      if ((hold.subaccountId ?? null) === pot && hold.currency === currency) balance += hold.amount;
     }
     for (const movement of await this.#disputeMovements()) {
-      if (movement.currency !== currency) continue;
+      if (movement.currency !== currency || movement.pot !== pot) continue;
       balance += movement.direction === 'credit' ? movement.amount : -movement.amount;
     }
     balance += pending.get(currency) ?? 0;
     if (currency !== 'USD') return balance;
-    const currencies = new Set([...(await this.#storage.ledger.currencies(PROVIDER, null)), ...pending.keys()]);
+    const currencies = new Set([...(await this.#storage.ledger.currencies(PROVIDER, pot)), ...pending.keys()]);
     for (const other of currencies) {
       if (isHeld(other)) continue;
-      const net = (await this.#storage.ledger.net(PROVIDER, other, null)) + (pending.get(other) ?? 0);
+      const net = (await this.#storage.ledger.net(PROVIDER, other, pot)) + (pending.get(other) ?? 0);
       if (net === 0) continue;
-      const { foreign, usd } = await this.#swept(other);
+      const { foreign, usd } = await this.#swept(other, pot);
       balance += convertMinor(foreign + net, other, 'USD') - usd;
     }
     return balance;
+  }
+
+  /** "A negative balance in any one currency freezes every transfer and every withdrawal" for that party. */
+  async inDebt(pot: string | null): Promise<boolean> {
+    return (await this.available('USD', pot)) < 0 || (await this.available('NGN', pot)) < 0;
   }
 
   /** React to money arriving or leaving through any path: settle it into a held currency. */
@@ -381,27 +441,28 @@ export class BachsTreasury {
    * amount, in the charge's currency, and the hold comes back; when it fails,
    * the hold just comes back. Call inside `exclusive`.
    */
-  async holdForRefund(input: { refundId: string; currency: string; amount: number }): Promise<void> {
+  async holdForRefund(input: { refundId: string; currency: string; amount: number; pot: string | null }): Promise<void> {
     await this.#engine.debitBalance({
       provider: PROVIDER,
       currency: input.currency,
       amount: input.amount,
       reason: 'refund_hold',
       resourceId: input.refundId,
+      subaccountId: input.pot,
     });
   }
 
-  /** Refunds still holding their amount although they have succeeded or failed. */
-  async #finishedHolds(): Promise<string[]> {
+  /** Refund holds, in every pot, still taken although their refund has succeeded or failed. */
+  async #finishedHolds(): Promise<LedgerEntry[]> {
     const ledger = await this.#ledger();
     const released = new Set(
       ledger.filter((entry) => entry.reason === 'refund_hold_release').map((entry) => entry.resourceId),
     );
-    const finished: string[] = [];
+    const finished: LedgerEntry[] = [];
     for (const entry of ledger) {
       if (entry.reason !== 'refund_hold' || !entry.resourceId || released.has(entry.resourceId)) continue;
       const refund = await this.#storage.refunds.byId(entry.resourceId);
-      if (!refund || refund.status === 'successful' || refund.status === 'failed') finished.push(entry.resourceId);
+      if (!refund || refund.status === 'successful' || refund.status === 'failed') finished.push(entry);
     }
     return finished;
   }
@@ -416,6 +477,7 @@ export class BachsTreasury {
       amount: hold.amount,
       reason: 'refund_hold_release',
       resourceId: refundId,
+      subaccountId: hold.subaccountId,
     });
   }
 
@@ -432,8 +494,8 @@ export class BachsTreasury {
     if (event.provider !== PROVIDER || event.resourceType !== 'transfer') return;
     const transfer = await this.#storage.transfers.byId(event.resourceId);
     const facts = transfer?.metadata.bachs_payout as PayoutFacts | undefined;
-    if (!facts?.schedule) return;
-    await this.#queueInstant(facts.schedule);
+    if (!transfer || !facts?.schedule) return;
+    await this.#queueInstant(facts.schedule, (await this.#actorOfPot(transfer.sourceSubaccountId ?? null)).account?.id ?? null);
   };
 
   /* -------------------------------- quotes -------------------------------- */
@@ -445,6 +507,7 @@ export class BachsTreasury {
     fromAmount: number;
     fee: number;
     rail?: StoredDestination['type'] | null;
+    owner: Actor;
   }): Promise<StoredQuote> {
     const now = this.#clock.nowISO();
     const toAmount = convertMinor(input.fromAmount - input.fee, input.from, input.to);
@@ -456,6 +519,7 @@ export class BachsTreasury {
       );
     }
     const quote: StoredQuote = {
+      ...(input.owner.account ? { account: input.owner.account.id } : {}),
       kind: input.kind,
       id: hexId(this.#ids, input.kind === 'payout' ? 'pqt' : 'cqt', 12),
       fromCurrency: input.from,
@@ -474,11 +538,11 @@ export class BachsTreasury {
   }
 
   /** A quote that can still be used, or the documented refusal. Call under the treasury lock. */
-  async #usableQuote(id: string, kind: StoredQuote['kind']): Promise<StoredQuote> {
+  async #usableQuote(id: string, kind: StoredQuote['kind'], owner: Actor): Promise<StoredQuote> {
     const quote = await this.state.quotes.get(id);
     // "Also covers a quote that belongs to another organisation", and a quote
     // of the other kind. 400, not 404.
-    if (!quote || quote.kind !== kind || quote.usedBy) {
+    if (!quote || quote.kind !== kind || quote.usedBy || (quote.account ?? null) !== (owner.account?.id ?? null)) {
       throw fail('validation_failed', 'QUOTE_NOT_FOUND', `Quote ${id} was not found or has already been used.`);
     }
     if (this.#clock.now() >= Date.parse(quote.expiresAt)) {
@@ -501,11 +565,17 @@ export class BachsTreasury {
     reference: string | null;
     metadata: Record<string, unknown>;
     schedule?: string | null;
+    owner: Actor;
   }): Promise<Transfer> {
     return withLock(TREASURY_LOCK, async () => {
       await this.#sweep();
+      // connect/payouts: an account withdraws only while its `payouts`
+      // capability is active, and is refused with 403 FORBIDDEN otherwise.
+      if (!hasCapability(input.owner.account, 'payouts')) {
+        throw fail('authentication_failed', 'FORBIDDEN', "This account's payouts capability is not active.");
+      }
       // "Any currency is negative ... blocks every payout."
-      if ((await this.available('USD')) < 0 || (await this.available('NGN')) < 0) {
+      if (await this.inDebt(input.owner.pot)) {
         throw fail(
           'validation_failed',
           'ORGANIZATION_IN_DEBT',
@@ -538,7 +608,7 @@ export class BachsTreasury {
         } else if (sameCurrency) {
           throw fail('validation_failed', 'QUOTE_NOT_APPLICABLE', 'A same-currency payout takes amount, not quote_id.');
         }
-        quote = await this.#usableQuote(input.quoteId, 'payout');
+        quote = await this.#usableQuote(input.quoteId, 'payout', input.owner);
         if (quote.toCurrency !== destCurrency || (quote.rail !== null && quote.rail !== destination.type)) {
           throw fail(
             'validation_failed',
@@ -587,7 +657,9 @@ export class BachsTreasury {
       const routing = destination.routing;
       // The engine's reference is unique per provider; Bachs' own is
       // optional, so one is minted when none is given.
-      const reference = input.reference ?? hexId(this.#ids, 'ref', 24);
+      // A reference is unique per owner, and the core transfer's per provider,
+      // so an account's is namespaced there (facts keep the one it was given).
+      const reference = payoutReference(input.owner, input.reference ?? hexId(this.#ids, 'ref', 24));
       // Everything that must follow the transfer is arranged before it, keyed
       // by its reference, so a crash right after it commits leaves nothing
       // undone: the advance job finds the transfer, and the quote is spent.
@@ -597,6 +669,8 @@ export class BachsTreasury {
       try {
         transfer = await this.#engine.createTransfer({
           provider: PROVIDER,
+          // Out of the owner's own balance (connect/payouts).
+          sourceSubaccountId: input.owner.pot,
           amount: totalDebited - fee,
           currency: source,
           reference,
@@ -625,7 +699,7 @@ export class BachsTreasury {
       }
       const id = payoutIdOf(transfer.id);
       await this.state.payouts.index(id, transfer.id);
-      if (input.reference) await this.state.payouts.indexReference(input.reference, id);
+      if (input.reference) await this.state.payouts.indexReference(input.reference, id, input.owner.account?.id ?? null);
       return transfer;
     });
   }
@@ -666,16 +740,17 @@ export class BachsTreasury {
   /* ------------------------------ conversions ------------------------------ */
 
   /** `POST /v1/conversions`: synchronous, `completed`, the balance moved at the quoted amounts. */
-  async executeConversion(input: { quoteId: string; from: string; to: string; amount: number }) {
+  async executeConversion(input: { quoteId: string; from: string; to: string; amount: number; owner: Actor }) {
     return withLock(TREASURY_LOCK, async () => {
       await this.#sweep();
-      const quote = await this.#usableQuote(input.quoteId, 'conversion');
+      const quote = await this.#usableQuote(input.quoteId, 'conversion', input.owner);
       if (quote.fromCurrency !== input.from || quote.toCurrency !== input.to || quote.fromAmount !== input.amount) {
         throw fail('validation_failed', 'QUOTE_ERROR', 'The currencies and amount must match the quote.');
       }
       const id = hexId(this.#ids, 'cvt', 12);
       const now = this.#clock.nowISO();
       const conversion: StoredConversion = {
+        ...(input.owner.account ? { account: input.owner.account.id } : {}),
         seq: await this.state.nextSeq(),
         id,
         quoteId: quote.id,
@@ -701,6 +776,7 @@ export class BachsTreasury {
           reason: 'conversion',
           resourceId: id,
           checkFunds: true,
+          subaccountId: input.owner.pot,
         });
       } catch (error) {
         // Refused before anything moved: the quote can be used again.
@@ -754,23 +830,24 @@ export class BachsTreasury {
 
   /** Write a schedule and queue its next run. */
   async saveSchedule(schedule: StoredSchedule, options: { fromRun?: boolean } = {}): Promise<StoredSchedule> {
-    const prior = await this.state.schedules.get(schedule.currency);
+    const prior = await this.state.schedules.get(schedule.currency, schedule.account);
     const next: StoredSchedule = {
       ...schedule,
       nextRunAt: this.nextRun(schedule, this.#clock.now()),
       version: (prior?.version ?? 0) + 1,
     };
     await this.state.schedules.put(next);
-    await this.#storage.jobs.cancelGroup(`bachs-schedule:${schedule.currency}`);
+    const group = scheduleGroup(next.currency, next.account);
+    await this.#storage.jobs.cancelGroup(group);
     // Switching to instant takes in what has already settled.
     // A run does not queue another: instant runs follow money settling.
-    if (next.interval === 'instant' && !options.fromRun) await this.#queueInstant(next.currency);
+    if (next.interval === 'instant' && !options.fromRun) await this.#queueInstant(next.currency, next.account ?? null);
     if (next.nextRunAt) {
       await this.#enqueue(
         BACHS_PAYOUT_SCHEDULE_JOB,
-        { currency: next.currency, version: next.version },
+        { currency: next.currency, version: next.version, ...(next.account ? { account: next.account } : {}) },
         Date.parse(next.nextRunAt) - this.#clock.now(),
-        `bachs-schedule:${next.currency}`,
+        group,
       );
     }
     return next;
@@ -780,22 +857,22 @@ export class BachsTreasury {
   async #triggerInstant(paymentId: string): Promise<void> {
     const payment = await this.#storage.payments.byId(paymentId);
     if (!payment) return;
-    await this.#queueInstant(settlementCurrency(payment.currency));
+    const owner = await this.#actorOfPot(paymentPot(payment));
+    await this.#queueInstant(settlementCurrency(payment.currency), owner.account?.id ?? null);
   }
 
-  async #queueInstant(balance: string): Promise<void> {
-    const schedule = await this.state.schedules.get(balance);
+  async #queueInstant(balance: string, account: string | null): Promise<void> {
+    const schedule = await this.state.schedules.get(balance, account);
     if (!schedule || schedule.interval !== 'instant') return;
+    const group = scheduleGroup(balance, account);
     const pending = await everyRow((page) => this.#storage.jobs.list({ status: 'ready', ...page }));
-    const queued = pending.some(
-      (job) => job.kind === BACHS_PAYOUT_SCHEDULE_JOB && job.groupKey === `bachs-schedule:${balance}`,
-    );
+    const queued = pending.some((job) => job.kind === BACHS_PAYOUT_SCHEDULE_JOB && job.groupKey === group);
     if (queued) return;
     await this.#enqueue(
       BACHS_PAYOUT_SCHEDULE_JOB,
-      { currency: balance, version: schedule.version },
+      { currency: balance, version: schedule.version, ...(account ? { account } : {}) },
       INSTANT_DELAY_MS,
-      `bachs-schedule:${balance}`,
+      group,
     );
   }
 
@@ -809,7 +886,8 @@ export class BachsTreasury {
   handleScheduleJob = async (job: Job): Promise<void> => {
     const currency = String(job.payload.currency ?? '');
     const version = Number(job.payload.version ?? 0);
-    let schedule = await this.state.schedules.get(currency);
+    const account = typeof job.payload.account === 'string' ? job.payload.account : null;
+    let schedule = await this.state.schedules.get(currency, account);
     if (!schedule || schedule.version !== version || schedule.interval === 'manual') return;
     const now = this.#clock.nowISO();
 
@@ -820,7 +898,7 @@ export class BachsTreasury {
     } catch (thrown) {
       error = thrown instanceof Error ? thrown.message : String(thrown);
     }
-    schedule = (await this.state.schedules.get(currency)) ?? schedule;
+    schedule = (await this.state.schedules.get(currency, account)) ?? schedule;
     const failures = error ? schedule.failures + 1 : 0;
     const disabled = failures >= 3;
     const next: StoredSchedule = {
@@ -846,19 +924,25 @@ export class BachsTreasury {
   /** Pay what is eligible. Returns the payout's id, or null when nothing was due. Throws when it cannot pay. */
   async #runSchedule(schedule: StoredSchedule): Promise<string | null> {
     await this.sweep();
-    const available = await this.available(schedule.currency as 'USD' | 'NGN');
+    const owner = await actorFor(this.state, this.#organizationId, schedule.account);
+    const available = await this.available(schedule.currency as 'USD' | 'NGN', owner.pot);
     const claimed = await this.#liveClaims();
     // "Only settled customer collections are eligible", each for what it
     // actually left in the balance: what arrived, less its fee and anything
     // refunded or being refunded.
     const collections = [];
+    // A fee the platform paid (it collects this account's fees) never left the owner's balance.
+    const feesPaid = new Set(
+      (await this.#ledger(owner.pot)).filter((entry) => entry.reason === 'processing_fee').map((entry) => entry.resourceId),
+    );
     for (const payment of await this.#payments()) {
       if (payment.status !== 'successful' && payment.status !== 'partially_refunded') continue;
+      if (paymentPot(payment) !== owner.pot) continue;
       if (settlementCurrency(payment.currency) !== schedule.currency || claimed.has(payment.id)) continue;
       const refunds = (await this.#storage.refunds.listByPayment(payment.id))
         .filter((refund) => refund.status !== 'failed')
         .reduce((sum, refund) => sum + refund.amount, 0);
-      const kept = amountPaidOf(payment) - (feeOf(payment) ?? 0) - refunds;
+      const kept = amountPaidOf(payment) - (feesPaid.has(payment.id) ? (feeOf(payment) ?? 0) : 0) - refunds;
       if (kept <= 0) continue;
       collections.push({
         payment,
@@ -867,7 +951,7 @@ export class BachsTreasury {
     }
     // Nothing to pay is not a failed run, whatever the destination.
     if (collections.length === 0) return null;
-    const destination = await this.state.destinations.defaultFor(schedule.payoutCurrency);
+    const destination = await this.state.destinations.defaultFor(schedule.payoutCurrency, schedule.account);
     if (!destination || destination.deleted || destination.status !== 'approved') {
       throw new Error(`no approved default destination for ${schedule.payoutCurrency}`);
     }
@@ -897,7 +981,7 @@ export class BachsTreasury {
     const reference = `auto_${hexId(this.#ids, 'run', 16).slice(4)}`;
     // Claimed first, by the payout's reference, so a crash after the payout
     // cannot leave its collections free for the next run to pay again.
-    for (const paymentId of taken) await this.state.schedules.claim(paymentId, reference);
+    for (const paymentId of taken) await this.state.schedules.claim(paymentId, payoutReference(owner, reference));
     try {
       let transfer: Transfer;
       if (!quoted) {
@@ -908,6 +992,7 @@ export class BachsTreasury {
           reference,
           metadata: {},
           schedule: schedule.currency,
+          owner,
         });
       } else {
         // "Each run is quoted at that day's rate."
@@ -918,6 +1003,7 @@ export class BachsTreasury {
           fromAmount: total,
           fee: quoteFee,
           rail: destination.type,
+          owner,
         });
         transfer = await this.createPayout({
           destination,
@@ -926,6 +1012,7 @@ export class BachsTreasury {
           reference,
           metadata: {},
           schedule: schedule.currency,
+          owner,
         });
       }
       return payoutIdOf(transfer.id);
@@ -974,6 +1061,16 @@ export class BachsTreasury {
       updatedAt: now,
     });
   }
+}
+
+/** A payout's core transfer reference: the owner's own, namespaced for an account. */
+export function payoutReference(owner: Actor, reference: string): string {
+  return ownerKey(owner.account?.id ?? null, reference);
+}
+
+/** One owner's schedule for one balance: its jobs' group. The platform's is unchanged. */
+function scheduleGroup(currency: string, account: string | null | undefined): string {
+  return `bachs-schedule:${ownerKey(account, currency)}`;
 }
 
 const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];

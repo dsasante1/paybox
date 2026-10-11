@@ -20,7 +20,7 @@ so paybox follows one rule throughout:
 Base path: `/bachs`. Bachs' own paths begin `/v1/`, so set your client's base
 URL to `http://localhost:8080/bachs` and every path works unchanged.
 
-Four of Bachs' phases are here.
+Four of Bachs' phases are here, and the first part of a fifth.
 
 - **Collection**: checkout sessions, the hosted page, payments, products,
   customers, refunds, balances and the webhook-endpoint API.
@@ -30,6 +30,10 @@ Four of Bachs' phases are here.
   conversions, the virtual account, and balances held in USD and NGN.
 - **Disputes**: disputes, evidence and submission, file uploads and product
   media.
+- **Connect, part one**: connected accounts, persons, documents,
+  capabilities, requirements, onboarding links, and `X-Account-Id`, which
+  runs any request as a connected account and keeps everything it creates its
+  own.
 
 [Not implemented](#not-implemented) lists what comes later.
 
@@ -129,6 +133,30 @@ connected accounts, so they arrive with Connect.
 | `GET /v1/utilities/uploads/{upload_id}` | **Compatible** | `url` is served by paybox; `null` for a dispute document. |
 | `DELETE /v1/utilities/uploads/{upload_id}` | **Compatible** | `409` once the upload is attached to something. |
 
+### Connect: accounts
+
+| Endpoint | Status | Notes |
+| --- | --- | --- |
+| `POST /v1/accounts` | **Compatible** | `201`; requested capabilities are granted at once, as in the sandbox. |
+| `GET /v1/accounts` | **Compatible** | `{ items, total, limit, offset }`, newest first; default page 20. |
+| `GET /v1/accounts/me` | **Compatible** | The platform, or the account acted as. |
+| `GET /v1/accounts/{account_id}` | **Compatible** | `include=requirements.values`. |
+| `POST /v1/accounts/{account_id}` | **Partially compatible** | Requirements follow paybox's own catalogue, because Bachs publishes none. See [Requirements](#requirements). |
+| `GET /v1/accounts/{account_id}/capabilities` | **Compatible** | Every applicable capability, `unrequested` included. |
+| `POST /v1/accounts/{account_id}/account-links` | **Compatible** | `200`; single use; expires in 30 days. |
+| `POST /v1/accounts/{account_id}/documents` | **Compatible** | `201`; a certificate of incorporation goes to review. |
+| `GET /v1/accounts/{account_id}/persons` | **Compatible** | Oldest first; default page 50; a limit outside 1–100 is `422`. |
+| `POST /v1/accounts/{account_id}/persons` | **Compatible** | `201`. |
+| `GET /v1/accounts/{account_id}/persons/{person_id}` | **Compatible** | |
+| `POST /v1/accounts/{account_id}/persons/{person_id}` | **Compatible** | Omitted keys kept; `null` clears. |
+| `DELETE /v1/accounts/{account_id}/persons/{person_id}` | **Compatible** | `204`; the representative cannot be removed. |
+| `POST /v1/accounts/{account_id}/persons/{person_id}/documents` | **Compatible** | `201`; a primary ID puts the person in review. |
+| `GET /v1/reference/business-structures` | **Partially compatible** | Nigeria's three, the only ones published. |
+| `GET /v1/reference/product-categories` | **Partially compatible** | The two published categories. |
+
+Split payments, platform fees and transfers come with the next part of
+Connect; checkout settings and the payment-method listings after that.
+
 ### Webhook endpoints and events
 
 | Endpoint | Status | Notes |
@@ -197,6 +225,18 @@ its own from `cdn.bachs.io`.
 | Endpoint | Status | Notes |
 | --- | --- | --- |
 | `GET /files/{upload_id}/{file_name}` | **Emulator-only** | A public upload's bytes. A dispute document is never served. |
+
+Bachs hosts onboarding at `connect.bachs.io` and never describes the page.
+Its sandbox also reviews nothing ("Sandbox grants do not exercise the
+complete live requirements and review flow"). The page an account link opens,
+and the reviewer's decisions, are paybox's own, **not Bachs API**:
+
+| Endpoint | Status | Notes |
+| --- | --- | --- |
+| `GET /connect/setup/c/{account_id}/{token}` | **Emulator-only** | The onboarding page: a form for what is currently due. |
+| `POST /connect/setup/c/{account_id}/{token}` | **Emulator-only** | Submits it, then redirects to `return_url`. |
+| `POST /v1/accounts/{account_id}/requirements/review` | **Emulator-only** | A reviewer's decision: `{ field, outcome: "accept" \| "reject", code?, reason? }`. |
+| `POST /v1/accounts/{account_id}/capabilities/{capability}` | **Emulator-only** | An administrator enabling or restricting a capability: `{ status: "active" \| "restricted" }`. |
 
 ## How a checkout behaves
 
@@ -744,6 +784,114 @@ Both upload endpoints take `multipart/form-data` with a `file` part.
   upload cannot be deleted. Replacing a product's `media`, or clearing an
   evidence attachment, frees the upload again.
 
+## How Connect behaves
+
+Sources: the pinned OpenAPI document and connect/{accounts, capabilities,
+requirements, onboarding, testing, acting-as-an-account, balances, guides/*},
+with the account-updated and capability-updated event pages, read 2026-10-10.
+
+### Acting as an account
+
+Send `X-Account-Id: acct_…` with the platform's key and the request runs as
+that account, on any endpoint. Only the platform's own accounts can be named;
+any other id, whether it exists or not, is `403 FORBIDDEN`. A header under
+another name is ignored and the request runs as the platform.
+
+What an owner creates is its own. A resource made under the header is
+`404` without it, and the platform's are `404` with it. That covers:
+- products and product groups, customers, checkouts and the payments they
+  make, refunds, disputes, subscriptions and saved cards;
+- payout destinations, quotes, payouts, schedules and conversions;
+- the virtual account, uploads, webhook endpoints and the events list;
+- balances.
+
+One email can be a customer of the platform and, separately, of each account.
+References are unique per owner too: checkout, refund and payout references.
+
+A checkout created as an account is a **direct charge**: the payment is the
+account's, its money lands in the account's balance, and its events happen on
+the account. So is an off-session charge of an account's customer, and a
+deposit into an account's virtual account. Accounts are addressed by path in
+`/v1/accounts/{account_id}`, not by the header.
+
+### Accounts and capabilities
+
+An account is created with personas (`merchant`, `recipient`), and personas
+only accumulate. A persona whose `capabilities` are left out requests its whole
+set on create. Every requested capability is `active` at once, as in the
+sandbox, and `conversions` comes with `recipient`. A capability cannot be
+withdrawn (`capability_unrequest_unsupported`). paybox's capability control
+restricts one (`status_details` `platform_disabled`) or enables it again.
+
+Capabilities gate what an account does, "on `active` only":
+- **Payouts** need `payouts` (`403 FORBIDDEN`).
+- **Payment methods.** A direct charge needs the capability for the method the
+  payer picks (`PAYMENT_METHOD_NOT_ENABLED` on the hosted page): card,
+  NGN card, bank transfer, mobile money or crypto. So does an off-session card
+  charge.
+- **The virtual account** needs `virtual_accounts`.
+
+The review and capability controls are the platform's: an account cannot use
+them on itself (`403`).
+
+**Processing fees.** On a direct charge the account pays the processing fee,
+unless it was created with `responsibilities.fees.collector: "platform"`. Then
+the platform pays the fee and the account settles gross. If the platform's
+balance cannot cover the fee, the account pays it after all ("silently falls
+back").
+
+An account's balance starts at zero; the opening float is the platform's alone.
+That has one visible consequence for an account's automatic payout schedule. A
+same-currency payout's fee is "on top", and a run "stops at the first
+collection it cannot cover". So with nothing else in its balance, the newest
+collection waits for the next one to cover its fee.
+
+`settlement_amount` on a charge always reports the amount net of the fee. When
+the platform pays an account's fee, the account in fact settles gross;
+`fee_paid_by`, which says who paid, comes with the next part of Connect.
+Its balance, payouts and schedules work exactly as the platform's do, on its
+own money. Any negative balance blocks its payouts with `ORGANIZATION_IN_DEBT`.
+
+### Requirements
+
+Bachs publishes no catalogue of requirement keys, so paybox uses the keys its
+pages use, owed as its pages describe:
+
+| Owed by | Fields |
+| --- | --- |
+| Every persona | `persons` (until there is one), `persons.<id>.first_name`, `persons.<id>.last_name` |
+| `recipient` | `payout_destination` |
+| `merchant` | `persons.<id>.dob`, `.id_number`, `.id_document`; `business_profile.product_description`, `.support_email`, `.product_category` |
+| A company | `company.registered_name`, `.registration_number`, `.structure`, `company.documents.registration` |
+
+- **Submitting.** Values arrive in `fields` on `POST /v1/accounts/{id}`
+  (`persons`, `business_profile`, `company`, `payout_destination`,
+  `tos_acceptance`). Everything else in the request is applied first and kept.
+  Then every field is validated together; one bad value is `400
+  INVALID_REQUIREMENT_FIELD`, with `errors[]` coded, and none of them is saved.
+- **Incomplete values.** An incomplete payout destination is not a refusal: it
+  stays due, with an error coded `required`. The documented rejection codes for
+  a payout destination are all returned: `currency_required`,
+  `currency_not_supported`, `type_required`, `bank_code_unknown`,
+  `mobile_provider_unknown`, `asset_not_supported`.
+- **Payout destination.** An accepted one becomes the account's own payout
+  destination, its default for that currency.
+- **Review.** Values are accepted at once, as the sandbox does. Two things go
+  to review and wait for paybox's review control:
+  - a person's identity, once a `primary_verification` document is attached;
+  - a certificate of incorporation.
+- **Events.** `account.updated` fires when what is outstanding changes;
+  `capability.updated` fires whenever a capability's status is written.
+
+### Onboarding links
+
+An account link is single use and expires in 30 days. A new link of the same
+type supersedes an open one (`previous_link_superseded: true`). Its `url` opens
+paybox's onboarding page, which asks for what is currently due. Submitting it
+goes through the same path as `fields`, then redirects to `return_url`. A used,
+superseded or expired link redirects to `refresh_url`, where your handler mints
+a new one. Documents are attached through the API: the page has no upload.
+
 ## Webhooks
 
 Every delivery carries the three documented headers:
@@ -766,7 +914,7 @@ instant, so a retry an hour later passes a 300-second tolerance check.
 | A changed URL | Queued retries go to the new URL. |
 | 72 hours of unbroken failure | The endpoint is turned off: `enabled: false`, `disabled_reason: "consecutive_failures"`, at least 48 hours after a warning at 24 hours. paybox sends no email, so the warning is only recorded. |
 | Rotation | The old secret keeps signing for 24 hours. V2 carries a `v1=` for each valid secret, newest first, and `X-Bachs-Signature` uses the new one. |
-| `event_source: "connect"` | Receives nothing: paybox has no connected accounts yet. |
+| Connected accounts | An event happens on one account, its origin. That account's own endpoints receive it on `event_source` `account` or `all`; the platform's receive it on `connect` or `all`. The envelope's `organization_id` is the origin, and a top-level `account` repeats it on an account's event. An endpoint registered with paybox's control API receives everything and reads as `all`. The platform's events list, read and replay cover its accounts' events too; an account sees its own. |
 
 Events emitted:
 - **Checkout and collection:** `checkout.completed`, `checkout.expired`,
@@ -780,6 +928,7 @@ Events emitted:
 - **Payouts:** `payout.created`, `payout.paid`, `payout.failed`.
 - **Conversions:** `conversion.completed`.
 - **Disputes:** `dispute.created`, `dispute.updated`.
+- **Connect:** `account.updated`, `capability.updated`.
 
 `payment_method.saved` is not in the subscribable `event_types` enum (see
 [contradictions](#contradictions-in-bachs-documentation)). An endpoint created
@@ -840,6 +989,9 @@ says `"org"`. Both are as published.
   - `POST /v1/refunds` also honours its own body field, `idempotency_key`.
 - **`x-request-id`** is on every response, and **`X-RateLimit-*`** headers
   report the sandbox budget of 100 requests a minute.
+- **`X-Account-Id`** runs a request as a connected account (see
+  [Acting as an account](#acting-as-an-account)). Idempotency keys are per key
+  and acting account.
 
 ## Differences from Bachs
 
@@ -894,6 +1046,12 @@ impossible, not to save work.
   the case and releases any amount set aside. It is not released
   automatically". That review has no sandbox trigger, so paybox releases the
   amount with the closure.
+- **A requirement catalogue of paybox's own.** Bachs publishes none; see
+  [Requirements](#requirements). Its review has no sandbox trigger, so
+  paybox's review control decides.
+- **The onboarding page takes no documents.** Bachs' hosted flow "collects
+  document uploads too"; paybox's page asks for fields only, and documents are
+  attached through the API.
 - **Every card is domestic.** Bachs adds 1.5% to an international USD card. A
   test card number carries no country, so that surcharge never applies.
 
@@ -935,14 +1093,21 @@ cause. Where a choice was needed, the rule at the top of this file decided it.
 | `DISPUTE_NOT_EDITABLE`, `DEADLINE_PASSED` | Disputes guide | Missing from the error reference | Returned, with no `doc_url` |
 | `is_response_editable` while `under_review` | Guide: `false` | `dispute.updated` example: `true` | `false` |
 | Dispute id length | REST examples: `dsp_` and 12 hex | Event examples: `dsp_` and 10 | 12 |
+| A requested capability's status | Spec: lands `pending` | Capabilities page: `restricted`; testing: sandbox grants `active` at once | `active`, as the sandbox does |
+| Person `verification.status` | Spec: `unverified`, `pending`, `verified`, `failed` | Guides: `pending`, `passed`, `failed` | Spec |
+| Person id | Spec: `per_` and 8 hex | Guides: `per_` and 20 | 8, which the requirement keys use |
+| Account link lifetime | Spec example: 30 days | Guide examples: one hour | 30 days |
+| `balance_currencies` | Examples: `["NGN"]` on an account, `["NGN","USD"]` on `/me` | Guide: USD "does not appear"; a new account `[]` | USD left out; `[]` until NGN is added |
+| Capability names | `listCapabilities` enum: `payouts`, `transfers`, `conversions`, `connect` | Examples list merchant capabilities too | Every applicable capability |
+| Connect events | Endpoint `event_types` enum: none of them | Guides subscribe endpoints to `account.updated`, `capability.updated` | Accepted |
+| `VALIDATION_ERROR` on accounts | Accounts pages: `422` | Error reference: `400` | `422` for `configuration: {}`, a person's email and the persons page size; `400` elsewhere |
 
 ## Not implemented
 
 These are later phases of Bachs. They are not shortcuts.
 
-- **Connect**: accounts, persons, capabilities, platform fees, `X-Account-Id`,
-  and **transfers**, which move money only to connected accounts.
-- Payment-method, rail and collection-currency listings, business structures
-  and product categories, and checkout settings.
+- **The rest of Connect**: split payments (`platform_fee`, `transfer_data`),
+  platform fees and transfers, which come next.
+- Checkout settings, and the payment-method, rail and currency listings.
 - Offering a product group at checkout (`SELECTION` sessions): the request has
   no field for it.

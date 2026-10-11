@@ -9,6 +9,8 @@ import { withLock } from './locks.js';
 import { toDecimal, toMinor } from './money.js';
 import { decimalCurrency, hasRate, isHeld, isStablecoin, STABLECOINS } from './rates.js';
 import { BANKS, MOMO_COUNTRIES, PAYOUT_SUPPORTED, resolveAccountName } from './reference.js';
+import { directCharge, owns, ownerField, ownerKey, ownsTransfer, type Actor } from './actor.js';
+import { hasCapability } from './accounts.js';
 import type { RouteContext } from './route-context.js';
 import { serializePayment } from './serializers.js';
 import type { StoredDestination, StoredSchedule, StoredVirtualAccount } from './state.js';
@@ -160,13 +162,17 @@ const depositSchema = z.object({
 const BANK_CURRENCIES = ['NGN', 'GHS', 'KES', 'UGX', 'TZS', 'GBP', 'EUR', 'USD', 'CAD'];
 const MOMO_CURRENCIES = Object.keys(MOMO_PROVIDERS);
 
+/** One owner's default destination for one currency is set under this. */
+const defaultLock = (destination: StoredDestination) =>
+  `destination-default:${ownerKey(destination.account, destination.currency)}`;
+
 export function registerMoneyOutRoutes(fastify: FastifyInstance, ctx: RouteContext): void {
-  const { engine, storage, state, clock, ids, authenticate, treasury } = ctx;
+  const { engine, storage, state, clock, ids, treasury } = ctx;
 
   /* ------------------------------ destinations ------------------------------ */
 
   async function serializeDestination(destination: StoredDestination) {
-    const isDefault = (await state.destinations.defaultFor(destination.currency))?.id === destination.id;
+    const isDefault = (await state.destinations.defaultFor(destination.currency, destination.account))?.id === destination.id;
     const r = destination.routing;
     const field = (key: string) => (r[key] as string | undefined) ?? null;
     return {
@@ -285,14 +291,14 @@ export function registerMoneyOutRoutes(fastify: FastifyInstance, ctx: RouteConte
     return routing;
   }
 
-  async function loadDestination(id: string): Promise<StoredDestination> {
+  async function loadDestination(actor: Actor, id: string): Promise<StoredDestination> {
     const destination = await state.destinations.get(id);
-    if (!destination) throw notFound('Payout destination');
+    if (!destination || !owns(actor, destination.account)) throw notFound('Payout destination');
     return destination;
   }
 
   fastify.post('/v1/payouts/destinations', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const body = createDestinationSchema.parse(request.body);
     assertMetadata(body.metadata);
     const currency = body.currency.toUpperCase();
@@ -300,6 +306,7 @@ export function registerMoneyOutRoutes(fastify: FastifyInstance, ctx: RouteConte
     const routing = validateRouting(currency, type, body);
     const now = clock.nowISO();
     const destination: StoredDestination = {
+      ...ownerField(actor),
       seq: await state.nextSeq(),
       id: hexId(ids, 'pd', 16),
       name: body.name ?? body.label ?? null,
@@ -315,20 +322,23 @@ export function registerMoneyOutRoutes(fastify: FastifyInstance, ctx: RouteConte
       createdAt: now,
       updatedAt: now,
     };
-    await withLock(`destination-default:${currency}`, async () => {
+    await withLock(defaultLock(destination), async () => {
       await state.destinations.put(destination);
       // "The first destination an account registers for a currency becomes
       // that currency's default once it is usable."
-      if (!(await state.destinations.defaultFor(currency))) await state.destinations.setDefault(currency, destination.id);
+      if (!(await state.destinations.defaultFor(currency, destination.account))) {
+        await state.destinations.setDefault(currency, destination.id, destination.account);
+      }
     });
     return reply.status(201).send(await serializeDestination(destination));
   });
 
   fastify.get('/v1/payouts/destinations', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const query = listDestinationsQuery.parse(request.query);
     const { limit, offset } = readPage(query, 20);
     const matches = (await state.destinations.all())
+      .filter((entry) => owns(actor, entry.account))
       .filter((entry) => !query.currency || entry.currency === query.currency.toUpperCase())
       .filter((entry) => !query.status || entry.status === query.status)
       .sort(newestFirst);
@@ -342,15 +352,15 @@ export function registerMoneyOutRoutes(fastify: FastifyInstance, ctx: RouteConte
   });
 
   fastify.get<{ Params: { destination_id: string } }>('/v1/payouts/destinations/:destination_id', async (request, reply) => {
-    authenticate(request);
-    return reply.send(await serializeDestination(await loadDestination(request.params.destination_id)));
+    const actor = await ctx.actor(request);
+    return reply.send(await serializeDestination(await loadDestination(actor, request.params.destination_id)));
   });
 
   fastify.patch<{ Params: { destination_id: string } }>('/v1/payouts/destinations/:destination_id', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const body = updateDestinationSchema.parse(request.body ?? {});
     assertMetadata(body.metadata);
-    const current = await loadDestination(request.params.destination_id);
+    const current = await loadDestination(actor, request.params.destination_id);
     if (current.deleted) throw notFound('Payout destination');
     const type = body.type ?? body.destination_type;
     if ((body.currency !== undefined && body.currency.toUpperCase() !== current.currency) || (type !== undefined && type !== current.type)) {
@@ -384,14 +394,14 @@ export function registerMoneyOutRoutes(fastify: FastifyInstance, ctx: RouteConte
       // Back to review, which the sandbox approves at once.
       next = { ...next, routing, ...(reviewed ? { status: 'approved' as const, reviewedAt: now } : {}) };
     }
-    await withLock(`destination-default:${current.currency}`, async () => {
+    await withLock(defaultLock(current), async () => {
       await state.destinations.put(next);
       // `is_default` "is ignored when the same request also sends the
       // destination back for review".
       if (body.is_default !== undefined && !reviewed) {
-        if (body.is_default) await state.destinations.setDefault(current.currency, current.id);
-        else if ((await state.destinations.defaultFor(current.currency))?.id === current.id) {
-          await state.destinations.clearDefault(current.currency);
+        if (body.is_default) await state.destinations.setDefault(current.currency, current.id, current.account);
+        else if ((await state.destinations.defaultFor(current.currency, current.account))?.id === current.id) {
+          await state.destinations.clearDefault(current.currency, current.account);
         }
       }
     });
@@ -399,14 +409,14 @@ export function registerMoneyOutRoutes(fastify: FastifyInstance, ctx: RouteConte
   });
 
   fastify.delete<{ Params: { destination_id: string } }>('/v1/payouts/destinations/:destination_id', async (request, reply) => {
-    authenticate(request);
-    const current = await loadDestination(request.params.destination_id);
+    const actor = await ctx.actor(request);
+    const current = await loadDestination(actor, request.params.destination_id);
     // Deactivated already: there is nothing left to delete.
     if (current.deleted) throw notFound('Payout destination');
-    await withLock(`destination-default:${current.currency}`, async () => {
+    await withLock(defaultLock(current), async () => {
       await state.destinations.put({ ...current, deleted: true, updatedAt: clock.nowISO() });
-      if ((await state.destinations.defaultFor(current.currency))?.id === current.id) {
-        await state.destinations.clearDefault(current.currency);
+      if ((await state.destinations.defaultFor(current.currency, current.account))?.id === current.id) {
+        await state.destinations.clearDefault(current.currency, current.account);
       }
     });
     return reply.send({ id: current.id, deleted: true });
@@ -415,7 +425,7 @@ export function registerMoneyOutRoutes(fastify: FastifyInstance, ctx: RouteConte
   /* -------------------------------- payouts -------------------------------- */
 
   fastify.post('/v1/payouts/quotes', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const body = payoutQuoteSchema.parse(request.body);
     const from = body.from_currency.toUpperCase();
     const to = body.to_currency.toUpperCase();
@@ -438,7 +448,7 @@ export function registerMoneyOutRoutes(fastify: FastifyInstance, ctx: RouteConte
     if (fee >= fromAmount) throw fail('validation_failed', 'VALIDATION_ERROR', 'amount: must be more than the withdrawal fee.');
     // The fee depends on the rail; a payout to a destination of another rail
     // is refused rather than charged the wrong fee.
-    const quote = await treasury.createQuote({ kind: 'payout', from, to, fromAmount, fee, rail });
+    const quote = await treasury.createQuote({ kind: 'payout', from, to, fromAmount, fee, rail, owner: actor });
     return reply.status(201).send({
       quote_id: quote.id,
       from_currency: quote.fromCurrency,
@@ -451,11 +461,11 @@ export function registerMoneyOutRoutes(fastify: FastifyInstance, ctx: RouteConte
   });
 
   fastify.post('/v1/payouts', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const body = createPayoutSchema.parse(request.body);
     assertMetadata(body.metadata);
     const destination = await state.destinations.get(body.destination);
-    if (!destination || destination.deleted) {
+    if (!destination || destination.deleted || !owns(actor, destination.account)) {
       throw fail('not_found', 'DESTINATION_NOT_FOUND', `No payout destination ${body.destination} on this account.`);
     }
     if (destination.status === 'pending_review') {
@@ -463,7 +473,7 @@ export function registerMoneyOutRoutes(fastify: FastifyInstance, ctx: RouteConte
     }
     if (destination.status === 'rejected') throw fail('validation_failed', 'DESTINATION_REJECTED', 'This destination was rejected.');
     const create = async () => {
-      if (body.reference && (await state.payouts.referenceTaken(body.reference))) {
+      if (body.reference && (await state.payouts.referenceTaken(body.reference, actor.account?.id ?? null))) {
         throw fail('duplicate_reference', 'CONFLICT', `A payout with reference "${body.reference}" already exists.`);
       }
       const amountCurrency = isStablecoin(destination.currency) ? 'USD' : destination.currency;
@@ -473,25 +483,28 @@ export function registerMoneyOutRoutes(fastify: FastifyInstance, ctx: RouteConte
         quoteId: body.quote_id ?? null,
         reference: body.reference ?? null,
         metadata: body.metadata ?? {},
+        owner: actor,
       });
     };
-    const transfer = body.reference ? await withLock(`payout-reference:${body.reference}`, create) : await create();
+    const transfer = body.reference
+      ? await withLock(`payout-reference:${ownerKey(actor.account?.id ?? null, body.reference)}`, create)
+      : await create();
     // `200`, not `201`, as published.
     return reply.status(200).send(serializePayout(transfer));
   });
 
-  async function bachsPayouts(): Promise<Transfer[]> {
+  async function bachsPayouts(actor: Actor): Promise<Transfer[]> {
     const transfers = await everyRow((page) => storage.transfers.list(page));
     return transfers
-      .filter((transfer) => transfer.provider === PROVIDER && transfer.metadata.bachs_payout)
+      .filter((transfer) => transfer.provider === PROVIDER && transfer.metadata.bachs_payout && ownsTransfer(actor, transfer))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
   }
 
   fastify.get('/v1/payouts', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const query = listPayoutsQuery.parse(request.query);
     const { limit, offset } = readPage(query, 50);
-    let payouts = await bachsPayouts();
+    let payouts = await bachsPayouts(actor);
     if (query.status_filter) payouts = payouts.filter((transfer) => payoutStatus(transfer) === query.status_filter);
     return reply.send({ total: payouts.length, items: payouts.slice(offset, offset + limit).map(serializePayout) });
   });
@@ -499,20 +512,20 @@ export function registerMoneyOutRoutes(fastify: FastifyInstance, ctx: RouteConte
   // Registered before `/v1/payouts/:withdrawal_id` matters only for
   // readability: Fastify prefers a static segment over a parameter anyway.
   fastify.get('/v1/payouts/mobile-money-providers', async (request, reply) => {
-    authenticate(request);
+    await ctx.actor(request);
     const query = z.object({ country_code: z.string().optional() }).parse(request.query);
     return reply.send(momoProviders(query.country_code ?? 'GH'));
   });
 
   fastify.get<{ Params: { withdrawal_id: string } }>('/v1/payouts/:withdrawal_id', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const engineId = await state.payouts.engineIdOf(request.params.withdrawal_id);
     // The index is written just after the payout; a payout that outlived it
     // (a crash in between) is still found by its id.
     const transfer = engineId
       ? await storage.transfers.byId(engineId)
-      : ((await bachsPayouts()).find((entry) => payoutIdOf(entry.id) === request.params.withdrawal_id) ?? null);
-    if (!transfer) throw notFound('Payout');
+      : ((await bachsPayouts(actor)).find((entry) => payoutIdOf(entry.id) === request.params.withdrawal_id) ?? null);
+    if (!transfer || !ownsTransfer(actor, transfer)) throw notFound('Payout');
     return reply.send(serializePayout(transfer));
   });
 
@@ -534,18 +547,20 @@ export function registerMoneyOutRoutes(fastify: FastifyInstance, ctx: RouteConte
     };
   }
 
-  async function settings() {
-    const all = (await state.schedules.all()).sort((a, b) => a.currency.localeCompare(b.currency));
+  async function settings(actor: Actor) {
+    const all = (await state.schedules.all())
+      .filter((entry) => owns(actor, entry.account))
+      .sort((a, b) => a.currency.localeCompare(b.currency));
     return { schedule_by_currency: Object.fromEntries(all.map((entry) => [entry.currency, serializeSchedule(entry)])) };
   }
 
   fastify.get('/v1/balance_settings', async (request, reply) => {
-    authenticate(request);
-    return reply.send(await settings());
+    const actor = await ctx.actor(request);
+    return reply.send(await settings(actor));
   });
 
   fastify.post('/v1/balance_settings', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const body = settingsSchema.parse(request.body ?? {});
     const entries = Object.entries(body.schedule_by_currency ?? {});
     const prepared: StoredSchedule[] = [];
@@ -574,9 +589,10 @@ export function registerMoneyOutRoutes(fastify: FastifyInstance, ctx: RouteConte
           throw invalid(`${field('payout_currency')}: there is no payout route to ${payoutCurrency}.`);
         }
       }
-      const prior = await state.schedules.get(currency);
+      const prior = await state.schedules.get(currency, actor.account?.id ?? null);
       const automatic = input.interval !== 'manual' && input.interval !== 'instant';
       prepared.push({
+        ...ownerField(actor),
         currency,
         payoutCurrency,
         interval: input.interval,
@@ -594,7 +610,7 @@ export function registerMoneyOutRoutes(fastify: FastifyInstance, ctx: RouteConte
       });
     }
     for (const schedule of prepared) await treasury.saveSchedule(schedule);
-    return reply.send(await settings());
+    return reply.send(await settings(actor));
   });
 
   /* ------------------------------- conversions ------------------------------ */
@@ -606,12 +622,19 @@ export function registerMoneyOutRoutes(fastify: FastifyInstance, ctx: RouteConte
   }
 
   fastify.post('/v1/conversions/quotes', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const body = conversionQuoteSchema.parse(request.body);
     const from = body.from_currency.toUpperCase();
     const to = body.to_currency.toUpperCase();
     assertSettlementPair(from, to);
-    const quote = await treasury.createQuote({ kind: 'conversion', from, to, fromAmount: toMinor(body.amount, from), fee: 0 });
+    const quote = await treasury.createQuote({
+      kind: 'conversion',
+      from,
+      to,
+      fromAmount: toMinor(body.amount, from),
+      fee: 0,
+      owner: actor,
+    });
     return reply.status(201).send({
       quote_id: quote.id,
       from_currency: from,
@@ -639,20 +662,27 @@ export function registerMoneyOutRoutes(fastify: FastifyInstance, ctx: RouteConte
   }
 
   fastify.post('/v1/conversions', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const body = conversionSchema.parse(request.body);
     const from = body.from_currency.toUpperCase();
     const to = body.to_currency.toUpperCase();
     assertSettlementPair(from, to);
-    const conversion = await treasury.executeConversion({ quoteId: body.quote_id, from, to, amount: toMinor(body.amount, from) });
+    const conversion = await treasury.executeConversion({
+      quoteId: body.quote_id,
+      from,
+      to,
+      amount: toMinor(body.amount, from),
+      owner: actor,
+    });
     return reply.status(201).send(serializeConversion(conversion));
   });
 
   fastify.get('/v1/conversions', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const query = listConversionsQuery.parse(request.query);
     const { limit, offset } = readPage(query, 50);
     const matches = (await state.conversions.all())
+      .filter((entry) => owns(actor, entry.account))
       .filter((entry) => !query.from_currency || entry.fromCurrency === query.from_currency.toUpperCase())
       .filter((entry) => !query.to_currency || entry.toCurrency === query.to_currency.toUpperCase())
       .filter((entry) => !query.status || entry.status === query.status)
@@ -663,9 +693,9 @@ export function registerMoneyOutRoutes(fastify: FastifyInstance, ctx: RouteConte
   });
 
   fastify.get<{ Params: { conversion_id: string } }>('/v1/conversions/:conversion_id', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const conversion = await state.conversions.get(request.params.conversion_id);
-    if (!conversion) throw notFound('Conversion');
+    if (!conversion || !owns(actor, conversion.account)) throw notFound('Conversion');
     return reply.send(serializeConversion(conversion));
   });
 
@@ -682,19 +712,25 @@ export function registerMoneyOutRoutes(fastify: FastifyInstance, ctx: RouteConte
   });
 
   fastify.post('/v1/virtual-accounts', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
+    const owner = actor.account?.id ?? null;
     const body = virtualAccountSchema.parse(request.body);
     const currency = body.currency.toUpperCase();
     if (currency !== 'NGN') {
       throw fail('validation_failed', 'VIRTUAL_ACCOUNT_CURRENCY_NOT_SUPPORTED', `Virtual accounts are NGN only, not ${currency}.`);
     }
+    // The VA guide: issued for an account only with its `virtual_accounts` capability.
+    if (!hasCapability(actor.account, 'virtual_accounts')) {
+      throw fail('authentication_failed', 'FORBIDDEN', 'This account cannot hold a virtual account: virtual_accounts is not active.');
+    }
     // "Calling it again returns the same number with 200."
-    const account = await withLock(`virtual-account:${currency}`, async () => {
-      const existing = await state.virtualAccounts.get(currency);
+    const account = await withLock(`virtual-account:${ownerKey(owner, currency)}`, async () => {
+      const existing = await state.virtualAccounts.get(currency, owner);
       if (existing) return existing;
       const id = hexId(ids, 'va', 12);
       const digits = createHash('sha256').update(`va:${id}`).digest('hex').replace(/\D/g, '').padEnd(8, '0');
       const created: StoredVirtualAccount = {
+        ...ownerField(actor),
         id,
         currency,
         // "A sandbox number ... starts with 90 and its bank is Sandbox Test Bank."
@@ -705,16 +741,16 @@ export function registerMoneyOutRoutes(fastify: FastifyInstance, ctx: RouteConte
         createdAt: clock.nowISO(),
       };
       await state.virtualAccounts.put(created);
-      await state.virtualAccounts.indexId(id, currency);
+      await state.virtualAccounts.indexId(id, currency, owner);
       return created;
     });
     return reply.status(200).send(serializeVirtualAccount(account));
   });
 
   fastify.get('/v1/virtual-accounts', async (request, reply) => {
-    authenticate(request);
+    const actor = await ctx.actor(request);
     const query = z.object({ currency: z.string().length(3).optional() }).parse(request.query);
-    const account = await state.virtualAccounts.get((query.currency ?? 'NGN').toUpperCase());
+    const account = await state.virtualAccounts.get((query.currency ?? 'NGN').toUpperCase(), actor.account?.id ?? null);
     if (!account) throw notFound('Virtual account');
     return reply.send(serializeVirtualAccount(account));
   });
@@ -729,15 +765,17 @@ export function registerMoneyOutRoutes(fastify: FastifyInstance, ctx: RouteConte
   fastify.post<{ Params: { virtual_account_id: string } }>(
     '/v1/virtual-accounts/:virtual_account_id/deposits',
     async (request, reply) => {
-      authenticate(request);
+      const actor = await ctx.actor(request);
       const body = depositSchema.parse(request.body);
       const account = await state.virtualAccounts.byId(request.params.virtual_account_id);
-      if (!account) throw notFound('Virtual account');
+      if (!account || !owns(actor, account.account)) throw notFound('Virtual account');
       const amount = toMinor(body.amount, account.currency, 'amount');
       const chargeId = hexId(ids, 'ch');
       const sender = createHash('sha256').update(`deposit:${chargeId}`).digest('hex').replace(/\D/g, '').padEnd(30, '0');
       let payment = await engine.createPayment({
         provider: PROVIDER,
+        // A deposit into an account's virtual account is that account's money.
+        ...directCharge(actor),
         amount,
         currency: account.currency,
         reference: chargeId,
@@ -783,12 +821,12 @@ export function registerMoneyOutRoutes(fastify: FastifyInstance, ctx: RouteConte
   /* -------------------------------- reference -------------------------------- */
 
   fastify.get('/v1/currencies/payout-supported', async (request, reply) => {
-    authenticate(request);
+    await ctx.actor(request);
     return reply.send({ fiat: PAYOUT_SUPPORTED, crypto: [...STABLECOINS] });
   });
 
   fastify.get('/v1/reference/banks', async (request, reply) => {
-    authenticate(request);
+    await ctx.actor(request);
     const query = z.object({ country: z.string().length(2).optional() }).parse(request.query);
     // "Falls back to the platform's country": a sandbox account here is Nigerian.
     const country = (query.country ?? 'NG').toUpperCase();
@@ -796,13 +834,13 @@ export function registerMoneyOutRoutes(fastify: FastifyInstance, ctx: RouteConte
   });
 
   fastify.get('/v1/reference/momo', async (request, reply) => {
-    authenticate(request);
+    await ctx.actor(request);
     const query = z.object({ country: z.string().optional(), country_code: z.string().optional() }).parse(request.query);
     return reply.send(momoProviders(query.country ?? query.country_code ?? 'GH'));
   });
 
   fastify.post('/v1/misc/bank-accounts/resolve', async (request, reply) => {
-    authenticate(request);
+    await ctx.actor(request);
     const body = z
       .object({ account_number: z.string(), bank_code: z.string(), country: z.string().length(2).optional() })
       .parse(request.body);

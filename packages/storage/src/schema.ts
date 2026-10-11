@@ -81,6 +81,7 @@ export interface CustomerRow {
   last_name: string | null;
   phone: string | null;
   metadata: string;
+  subaccount_id: string | null;
   created_at: string;
   updated_at: string;
 }

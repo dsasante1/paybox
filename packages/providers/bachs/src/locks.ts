@@ -48,7 +48,9 @@ export const subscriptionLock = (subscriptionId: string) => `subscription:${subs
  * so the read, the invoice it discounts and the ledger entry run under this.
  */
 export const creditLock = (customerId: string, currency: string) => `credit:${customerId}:${currency}`;
-export const emailLock = (email: string) => `customer-email:${email.toLowerCase()}`;
+/** One owner's customer email: each owner keeps its own customers. */
+export const emailLock = (email: string, pot: string | null = null) =>
+  `customer-email:${pot ?? ''}:${email.toLowerCase()}`;
 /**
  * One dispute's evidence, submission and ruling. Opening a dispute takes the
  * charge lock first (one open dispute per charge); balance movements come

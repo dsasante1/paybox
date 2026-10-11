@@ -928,4 +928,18 @@ export const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    id: '0024_customer_owner',
+    sql: `
+      -- Whose customer this is. A Bachs connected account keeps its own
+      -- customers ("a resource made under X-Account-Id is invisible without
+      -- it"), so one email can belong to a platform and to each of its
+      -- accounts. NULL is the platform, which is every other provider's only
+      -- owner, so their rows and their uniqueness are unchanged.
+      ALTER TABLE customers ADD COLUMN subaccount_id TEXT;
+      DROP INDEX idx_customers_provider_email;
+      CREATE UNIQUE INDEX idx_customers_provider_owner_email
+        ON customers (provider, COALESCE(subaccount_id, ''), email);
+    `,
+  },
 ];
