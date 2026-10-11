@@ -32,6 +32,7 @@ import type {
   TransferStatus,
 } from '@paybox/shared';
 import type {
+  ClockRecord,
   DeliveryStatus,
   Job,
   JobStatus,
@@ -42,6 +43,7 @@ import type {
 } from '@paybox/core';
 import type {
   AuthorizationRow,
+  ClockStateRow,
   DedicatedAccountRow,
   DisputeRow,
   InstrumentSetupRow,
@@ -1139,6 +1141,9 @@ export function deliveryPatch(patch: Partial<WebhookDelivery>): Partial<WebhookD
   if (patch.status !== undefined) out.status = patch.status;
   if (patch.url !== undefined) out.url = patch.url;
   if (patch.attempt !== undefined) out.attempt = patch.attempt;
+  // retryNow grants an attempt by raising this; dropping it left the log
+  // reading "attempt 3 of 2".
+  if (patch.maxAttempts !== undefined) out.max_attempts = patch.maxAttempts;
   if (patch.responseStatus !== undefined) out.response_status = patch.responseStatus;
   if (patch.responseBody !== undefined) out.response_body = patch.responseBody;
   if (patch.errorMessage !== undefined) out.error_message = patch.errorMessage;
@@ -1215,4 +1220,27 @@ export const fromRecipient = (r: TransferRecipient): TransferRecipientRow => ({
   metadata: writeJson(r.metadata),
   created_at: r.createdAt,
   updated_at: r.updatedAt,
+});
+
+/**
+ * The clock row. Tolerant like every other read here: an unknown mode reads
+ * as `system`, the clock's own default.
+ */
+export const toClockRecord = (row: ClockStateRow): ClockRecord => ({
+  state: {
+    mode: row.mode === 'frozen' ? 'frozen' : 'system',
+    now: Number(row.now_ms),
+    offsetMs: Number(row.offset_ms),
+  },
+  configuredStartAt: row.configured_start_at,
+  updatedAt: row.updated_at,
+});
+
+export const fromClockRecord = (record: ClockRecord): ClockStateRow => ({
+  id: 1,
+  mode: record.state.mode,
+  now_ms: record.state.now,
+  offset_ms: record.state.offsetMs,
+  configured_start_at: record.configuredStartAt,
+  updated_at: record.updatedAt,
 });

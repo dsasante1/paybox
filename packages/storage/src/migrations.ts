@@ -884,4 +884,27 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE webhook_endpoints ADD COLUMN previous_secrets TEXT NOT NULL DEFAULT '[]';
     `,
   },
+  {
+    id: '0022_clock_state',
+    sql: `
+      -- The virtual clock, recorded on every change so a restart resumes it.
+      -- Until now virtual time lived only in memory: restarting on the same
+      -- database rewound it to PAYBOX_START_AT, earlier than events and jobs
+      -- already written, and jobs that were due stopped being due.
+      --
+      -- One row. configured_start_at is the PAYBOX_START_AT the process
+      -- booted with; a restart resumes only while it is unchanged, so moving
+      -- to another date by changing it still works (docs/time.md). Not
+      -- emptied by \`paybox reset\`, which clears data and leaves the clock
+      -- where it is.
+      CREATE TABLE clock_state (
+        id                  INTEGER PRIMARY KEY CHECK (id = 1),
+        mode                TEXT NOT NULL,
+        now_ms              INTEGER NOT NULL,
+        offset_ms           INTEGER NOT NULL,
+        configured_start_at TEXT,
+        updated_at          TEXT NOT NULL
+      );
+    `,
+  },
 ];

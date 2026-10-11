@@ -1,11 +1,5 @@
 import { VERSION, type CoverageEntry, type CoverageManifest } from '@paybox/shared';
-import { PAYSTACK_COVERAGE } from '@paybox/paystack';
-import { STRIPE_COVERAGE } from '@paybox/stripe';
-import { FLUTTERWAVE_V3_COVERAGE, FLUTTERWAVE_V4_COVERAGE } from '@paybox/flutterwave';
-import { KORA_COVERAGE } from '@paybox/kora';
-import { WEWIRE_COVERAGE } from '@paybox/wewire';
-import { WISE_COVERAGE } from '@paybox/wise';
-import { BACHS_COVERAGE } from '@paybox/bachs';
+import { COVERAGE_MANIFESTS } from './coverage-manifests.js';
 import type { PayboxContext } from './context.js';
 
 /**
@@ -21,16 +15,7 @@ import type { PayboxContext } from './context.js';
  * one would be worse. A generated entry names the docs/<provider>.md file
  * that is authoritative instead of pretending.
  */
-const MANIFESTS: readonly CoverageManifest[] = [
-  PAYSTACK_COVERAGE,
-  STRIPE_COVERAGE,
-  FLUTTERWAVE_V3_COVERAGE,
-  FLUTTERWAVE_V4_COVERAGE,
-  KORA_COVERAGE,
-  WEWIRE_COVERAGE,
-  WISE_COVERAGE,
-  BACHS_COVERAGE,
-];
+const MANIFESTS = COVERAGE_MANIFESTS;
 
 /** `/paystack` + `/transaction/verify/:reference` → `/paystack/transaction/verify/{reference}`. */
 function publicPath(manifest: CoverageManifest, entry: CoverageEntry): string {

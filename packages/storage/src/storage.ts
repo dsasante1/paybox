@@ -24,6 +24,8 @@ import type {
   ListOptions,
   Page,
   ProviderStateRepository,
+  ClockRecord,
+  ClockRepository,
   PaymentFilter,
   PaymentRepository,
   RecipientRepository,
@@ -1987,6 +1989,34 @@ class SqliteStorage implements Storage {
           response_body: record.responseBody,
           created_at: record.createdAt,
         })
+        .execute();
+    },
+  };
+
+  /** The virtual clock's single row (migration 0022); see the port. */
+  readonly clock: ClockRepository = {
+    get: async () => {
+      const row = await this.#db
+        .selectFrom('clock_state')
+        .selectAll()
+        .where('id', '=', 1)
+        .executeTakeFirst();
+      return row ? map.toClockRecord(row) : null;
+    },
+    put: async (record: ClockRecord) => {
+      const row = map.fromClockRecord(record);
+      await this.#db
+        .insertInto('clock_state')
+        .values(row)
+        .onConflict((oc) =>
+          oc.column('id').doUpdateSet({
+            mode: row.mode,
+            now_ms: row.now_ms,
+            offset_ms: row.offset_ms,
+            configured_start_at: row.configured_start_at,
+            updated_at: row.updated_at,
+          }),
+        )
         .execute();
     },
   };

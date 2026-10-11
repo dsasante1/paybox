@@ -30,8 +30,27 @@ runtime pins the clock at now (or at a later instant you pass to the API);
 back.
 
 **Virtual time only moves forward.** `set` or `freeze` to an earlier instant is
-refused with HTTP 400. If you need an earlier date, restart with
+refused with HTTP 400. If you need an earlier date, restart with a **different**
 `PAYBOX_START_AT`.
+
+**Virtual time survives a restart.** With a database file (the default), the
+clock is recorded on every change, and a restart resumes where it was. A
+frozen clock resumes at its instant. A flowing clock keeps its offset, so time
+that passed while the server was down has passed virtually too. Three
+exceptions:
+
+- **`PAYBOX_START_AT` changed since the last start:** the new value is used, as
+  above. Restarting with the *same* value resumes; it no longer rewinds.
+- **A fresh database, or `:memory:`:** the clock starts at `PAYBOX_START_AT`
+  (or now), as it always has. To start over at the same instant, use a fresh
+  database.
+- **`paybox reset`:** empties the data but leaves the clock where it is, now
+  and after a restart.
+
+Whether the clock is frozen or flowing always follows `PAYBOX_FREEZE_CLOCK` at
+start. Releases up to 0.3.0 rewound to `PAYBOX_START_AT` on every restart, which could
+put the clock earlier than events and jobs already in the database, so jobs
+that had been due stopped being due.
 
 ## What an advance does
 

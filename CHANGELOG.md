@@ -7,6 +7,32 @@ out with the next tag — see [docs/releasing.md](docs/releasing.md).
 
 ## Unreleased
 
+- **Behaviour change: virtual time survives a restart.** With a database
+  file, a restart used to rewind the clock to `PAYBOX_START_AT`, or to the wall
+  clock if it was unset. That could put the clock earlier than events and jobs
+  already in the database, so jobs that had been due stopped being due, and any
+  `time advance` was lost.
+  - The clock is now recorded on every change (migration 0022), and a restart
+    resumes it: frozen at its instant, or flowing with its offset.
+  - **If you relied on a restart to go back to `PAYBOX_START_AT`:** change the
+    value, or start from a fresh database. A changed `PAYBOX_START_AT` is still
+    honoured, so the documented way to reach an earlier date works as before.
+  - `:memory:` (the usual choice for test suites) is unaffected.
+  - An older paybox opening the same database ignores the recorded clock and
+    rewinds as it always did. Upgrading again then resumes from the last
+    clock this version recorded, which may be earlier than what the older one
+    wrote. Change `PAYBOX_START_AT` (or start fresh) after a downgrade.
+- **The API reference at `/docs` lists Quid Payments and Tingg.** Their routes
+  were missing from `/openapi.json` since each was added: the document
+  iterated a hand-kept copy of the provider list that nobody updated. Every
+  place that enumerates the served surface — the OpenAPI document, `paybox
+  coverage`, the generated README block — now reads one list
+  (`@paybox/api/coverage`), and a test fails if a provider is missing from it.
+- **A manual webhook retry records the attempt it grants.** `paybox webhook
+  retry`, the dashboard's Retry button and `POST /api/webhooks/deliveries/:id/retry`
+  always sent one more attempt, but the delivery row kept its old
+  `maxAttempts`, so the log read "attempt 3 of 2". The row now says what was
+  allowed.
 - **A ninth provider: Bachs** — `/bachs`, the first phase of its API:
   [contract](docs/bachs.md).
   - **Endpoints.** Checkout sessions with paybox's hosted page, payments,

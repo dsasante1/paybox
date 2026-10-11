@@ -79,7 +79,9 @@ that deliberately, and read [SECURITY.md](../SECURITY.md) first.
 
 ## Persistence
 
-`/app/data` is a volume. Removing it is equivalent to `paybox reset`.
+`/app/data` is a volume. Removing it empties everything, like `paybox reset`,
+and also starts the virtual clock afresh, which `paybox reset` does not
+([time.md](time.md)).
 
 ```bash
 docker compose -f docker/docker-compose.yml down -v

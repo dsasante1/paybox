@@ -2,14 +2,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp, buildContext, loadConfig, type PayboxContext } from '@paybox/api';
 import { RecordingTransport } from '@paybox/webhooks';
-import type { CoverageEntry, CoverageManifest } from '@paybox/shared';
-import { PAYSTACK_COVERAGE } from '@paybox/paystack';
-import { STRIPE_COVERAGE } from '@paybox/stripe';
-import { FLUTTERWAVE_V3_COVERAGE, FLUTTERWAVE_V4_COVERAGE } from '@paybox/flutterwave';
-import { KORA_COVERAGE } from '@paybox/kora';
-import { WEWIRE_COVERAGE } from '@paybox/wewire';
-import { WISE_COVERAGE } from '@paybox/wise';
-import { BACHS_COVERAGE } from '@paybox/bachs';
+import { PROVIDERS, type CoverageEntry, type CoverageManifest } from '@paybox/shared';
+import { COVERAGE_MANIFESTS } from '@paybox/api/coverage';
 
 /**
  * The OpenAPI document lists the whole served surface (spec §44).
@@ -20,16 +14,7 @@ import { BACHS_COVERAGE } from '@paybox/bachs';
  * or omit one it does. The hand-curated entries stay as overrides where a
  * shape has actually been transcribed.
  */
-const MANIFESTS: readonly CoverageManifest[] = [
-  PAYSTACK_COVERAGE,
-  STRIPE_COVERAGE,
-  FLUTTERWAVE_V3_COVERAGE,
-  FLUTTERWAVE_V4_COVERAGE,
-  KORA_COVERAGE,
-  WEWIRE_COVERAGE,
-  WISE_COVERAGE,
-  BACHS_COVERAGE,
-];
+const MANIFESTS = COVERAGE_MANIFESTS;
 
 const publicPath = (manifest: CoverageManifest, entry: CoverageEntry) =>
   `${manifest.basePath}${entry.path}`.replace(/:([A-Za-z_][A-Za-z0-9_]*)/g, '{$1}');
@@ -95,5 +80,18 @@ describe('GET /openapi.json', () => {
     expect(stripe).toBeDefined();
     expect(stripe!.description).toContain('docs/stripe.md');
     expect(stripe!.requestBody).toBeUndefined();
+  });
+});
+
+describe('the manifest list', () => {
+  it('names every provider, so a new adapter cannot be left out of the document', () => {
+    // The OpenAPI document once missed Quid Payments and Tingg for two
+    // releases because the list it iterated was a hand-kept copy. A provider
+    // with no manifest here would be invisible at /docs.
+    const ids = MANIFESTS.map((manifest) => manifest.id);
+    const missing = PROVIDERS.filter(
+      (provider) => !ids.some((id) => id === provider || id.startsWith(`${provider}-`)),
+    );
+    expect(missing).toEqual([]);
   });
 });

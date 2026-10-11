@@ -159,6 +159,8 @@ Nothing outside `core/src/time/`, `core/src/random.ts`, `shared/src/ids.ts`, and
 
 `PAYBOX_SEED` is wired through `apps/api/src/config.ts`, along with `PAYBOX_FREEZE_CLOCK` and `PAYBOX_START_AT`. A frozen clock plus a fixed seed makes ids, timestamps and retry jitter reproducible, which is what the integration suite relies on.
 
+**Virtual time survives a restart** on a database file. The clock is recorded on every change (migration 0022, `storage.clock`), and `buildContext` resumes from it unless `PAYBOX_START_AT` differs from the value recorded at the last start, in which case the new value wins: that is the documented way to move to an earlier date. A fresh database and `:memory:` start as before, and `paybox reset` leaves the clock alone. Resuming happens inside `VirtualClock` (its `resume` option), the one place allowed to read the wall clock.
+
 **`VirtualClock#at` is load-bearing.** The scheduler runs each due job at the instant it was *scheduled for*, not at the time the clock has since reached. Without it, `time advance 2h` would fire a retry due at T+4s but stamp it T+2h and compute the next attempt from there — so a five-attempt ladder would need five separate advances, and event-log timestamps would be wrong.
 
 ### Storage conventions

@@ -26,8 +26,30 @@ export class VirtualClock implements Clock {
   #override: number | null = null;
   readonly #listeners = new Set<ClockListener>();
 
-  constructor(options: { startAt?: number | string; frozen?: boolean } = {}) {
-    if (options.startAt !== undefined) {
+  constructor(
+    options: {
+      startAt?: number | string;
+      frozen?: boolean;
+      /**
+       * A state recorded by an earlier process, to carry on from. Wins over
+       * `startAt`. A frozen record resumes at its instant; a flowing one at
+       * real time plus its offset, so time that passed while the server was
+       * down has passed virtually too. `frozen` still decides the mode.
+       */
+      resume?: ClockState;
+    } = {},
+  ) {
+    if (options.resume) {
+      const at =
+        options.resume.mode === 'frozen'
+          ? options.resume.now
+          : Date.now() + options.resume.offsetMs;
+      if (!Number.isFinite(at)) {
+        throw new TypeError(`VirtualClock: unusable recorded state ${JSON.stringify(options.resume)}`);
+      }
+      this.#offsetMs = at - Date.now();
+      this.#frozenAt = at;
+    } else if (options.startAt !== undefined) {
       const at =
         typeof options.startAt === 'string'
           ? Date.parse(options.startAt)

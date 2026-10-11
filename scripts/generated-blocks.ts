@@ -19,28 +19,9 @@
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { renderReadmeTable, renderSiteTable, type CoverageManifest } from '@paybox/shared';
-import { PAYSTACK_COVERAGE } from '@paybox/paystack';
-import { STRIPE_COVERAGE } from '@paybox/stripe';
-import { FLUTTERWAVE_V3_COVERAGE, FLUTTERWAVE_V4_COVERAGE } from '@paybox/flutterwave';
-import { KORA_COVERAGE } from '@paybox/kora';
-import { QUIDDPAY_COVERAGE } from '@paybox/quiddpay';
-import { TINGG_COVERAGE } from '@paybox/tingg';
-import { WEWIRE_COVERAGE } from '@paybox/wewire';
-import { WISE_COVERAGE } from '@paybox/wise';
-import { BACHS_COVERAGE } from '@paybox/bachs';
+import { COVERAGE_MANIFESTS } from '@paybox/api/coverage';
 
-export const MANIFESTS: readonly CoverageManifest[] = [
-  PAYSTACK_COVERAGE,
-  STRIPE_COVERAGE,
-  FLUTTERWAVE_V3_COVERAGE,
-  FLUTTERWAVE_V4_COVERAGE,
-  KORA_COVERAGE,
-  QUIDDPAY_COVERAGE,
-  TINGG_COVERAGE,
-  WEWIRE_COVERAGE,
-  WISE_COVERAGE,
-  BACHS_COVERAGE,
-];
+export const MANIFESTS: readonly CoverageManifest[] = COVERAGE_MANIFESTS;
 
 /** The markers the generated block sits between. */
 export const START = '<!-- coverage:start -->';
