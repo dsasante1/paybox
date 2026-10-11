@@ -13,6 +13,8 @@ import type {
 import { createHash } from 'node:crypto';
 import { eventId } from './ids.js';
 import { invoiceIdOf } from './billing.js';
+import { decimalCurrency } from './rates.js';
+import { payoutFacts, payoutIdOf } from './treasury.js';
 import { refundRecord } from './refunds.js';
 import { toDecimal } from './money.js';
 import {
@@ -21,6 +23,7 @@ import {
   referenceOf,
   serializeInvoiceData,
   serializeWebhookSubscription,
+  settlementOf,
   corridorOf,
   dataTime,
   envelopeTime,
@@ -66,7 +69,16 @@ export interface StoredBachsEvent {
   id: string;
   type: string;
   canonicalEventId: string;
-  entityType: 'charge' | 'checkout' | 'customer' | 'refund' | 'subscription' | 'invoice' | 'payment_method';
+  entityType:
+    | 'charge'
+    | 'checkout'
+    | 'customer'
+    | 'refund'
+    | 'subscription'
+    | 'invoice'
+    | 'payment_method'
+    | 'payout'
+    | 'conversion';
   entityId: string;
   payload: Record<string, unknown>;
   createdAt: string;
@@ -218,9 +230,83 @@ export class BachsWebhookFormatter implements WebhookFormatter {
         return this.#invoiceEvents(event, storage, state);
       case 'authorization':
         return this.#paymentMethodEvents(event, storage, state);
+      case 'transfer':
+        return this.#payoutEvents(event, storage);
+      case 'conversion':
+        return this.#conversionEvents(event, state);
       default:
         return [];
     }
+  }
+
+  /**
+   * `payout.created`, `payout.paid` (with `status: "completed"`, not "paid"),
+   * `payout.failed`. There is no `payout.processing`. The event pages give a
+   * different view from REST: `withdrawal_id` rather than `id`, and `amount`
+   * and `currency` on the *source* side, with the destination in `to_*`. No
+   * `failure_reason` -- the event page has none.
+   */
+  async #payoutEvents(event: PayboxEvent, storage: Storage): Promise<Draft[]> {
+    const type =
+      event.type === 'transfer.pending'
+        ? 'payout.created'
+        : event.type === 'transfer.successful'
+          ? 'payout.paid'
+          : event.type === 'transfer.failed'
+            ? 'payout.failed'
+            : null;
+    if (!type) return [];
+    const transfer = await storage.transfers.byId(event.resourceId);
+    if (!transfer?.metadata.bachs_payout) return [];
+    const facts = payoutFacts(transfer);
+    const source = facts.sourceCurrency;
+    const destinationCurrency = decimalCurrency(facts.destinationCurrency);
+    const id = payoutIdOf(transfer.id);
+    return [
+      {
+        type,
+        entityType: 'payout',
+        entityId: id,
+        data: {
+          withdrawal_id: id,
+          reference: facts.reference,
+          status: type === 'payout.created' ? 'pending' : type === 'payout.paid' ? 'completed' : 'failed',
+          amount: toDecimal(facts.totalDebited, source),
+          currency: source,
+          from_currency: source,
+          to_currency: facts.destinationCurrency,
+          exchange_rate: facts.rate,
+          to_amount: toDecimal(facts.destinationAmount, destinationCurrency),
+          withdrawal_fee: toDecimal(facts.fee, source),
+          net_from_amount: toDecimal(facts.totalDebited - facts.fee, source),
+        },
+      },
+    ];
+  }
+
+  /** `conversion.completed` (and `conversion.failed`, which nothing produces). */
+  async #conversionEvents(event: PayboxEvent, state: ReturnType<typeof bachsState>): Promise<Draft[]> {
+    if (event.type !== 'conversion.completed' && event.type !== 'conversion.failed') return [];
+    const conversion = await state.conversions.get(event.resourceId);
+    if (!conversion) return [];
+    return [
+      {
+        type: event.type,
+        entityType: 'conversion',
+        entityId: conversion.id,
+        data: {
+          conversion_id: conversion.id,
+          quote_id: conversion.quoteId,
+          from_currency: conversion.fromCurrency,
+          to_currency: conversion.toCurrency,
+          from_amount: toDecimal(conversion.fromAmount, conversion.fromCurrency),
+          to_amount: toDecimal(conversion.toAmount, conversion.toCurrency),
+          exchange_rate: conversion.rate,
+          status: conversion.status,
+          created_at: dataTime(conversion.createdAt),
+        },
+      },
+    ];
   }
 
   /**
@@ -348,8 +434,8 @@ export class BachsWebhookFormatter implements WebhookFormatter {
       customer_id: customerId,
       amount: toDecimal(payment.amount, payment.currency),
       currency: payment.currency,
-      settlement_currency: payment.currency,
-      settlement_amount: toDecimal(payment.amount - fee, payment.currency),
+      settlement_currency: settlementOf(payment).currency,
+      settlement_amount: toDecimal(settlementOf(payment).amount, settlementOf(payment).currency),
       status: paymentStatusOf(payment),
       metadata,
       created_at: dataTime(payment.createdAt),
@@ -428,8 +514,8 @@ export class BachsWebhookFormatter implements WebhookFormatter {
         status: webhookStatus(status),
         amount: toDecimal(payment.amount, c),
         currency: c,
-        settlement_amount: toDecimal(payment.amount - fee, c),
-        settlement_currency: c,
+        settlement_amount: toDecimal(settlementOf(payment).amount, settlementOf(payment).currency),
+        settlement_currency: settlementOf(payment).currency,
         processing_fee: toDecimal(fee, c),
         processing_fee_currency: c,
         fee_bearer: 'merchant',
@@ -469,8 +555,8 @@ export class BachsWebhookFormatter implements WebhookFormatter {
         status,
         amount: toDecimal(payment.amount, c),
         currency: c,
-        settlement_amount: toDecimal(payment.amount - fee, c),
-        settlement_currency: c,
+        settlement_amount: toDecimal(settlementOf(payment).amount, settlementOf(payment).currency),
+        settlement_currency: settlementOf(payment).currency,
         processing_fee: null,
         processing_fee_currency: null,
         fee_bearer: 'merchant',

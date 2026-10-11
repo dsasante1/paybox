@@ -49,6 +49,14 @@ function ruleFor(corridor: Corridor): FeeRule {
   return RULES.momo;
 }
 
+/**
+ * A deposit into the account's permanent virtual account: "1% capped at
+ * NGN 300" (guides/virtual-accounts/overview), not the checkout transfer rate.
+ */
+export function virtualAccountFee(amount: number): number {
+  return Math.min(Math.floor((amount * 100 + 5_000) / 10_000), 30_000);
+}
+
 /** The processing fee on `amount` minor units collected through `corridor`. */
 export function processingFee(amount: number, corridor: Corridor): number {
   const rule = ruleFor(corridor);

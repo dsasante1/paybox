@@ -318,6 +318,91 @@ export interface StoredPortalSession {
   createdAt: string;
 }
 
+/** A payout destination (`pd_…`). Bachs-owned: the engine has no saved-destination model that fits. */
+export interface StoredDestination {
+  seq?: number;
+  id: string;
+  name: string | null;
+  type: 'bank_account' | 'mobile_money' | 'crypto_wallet';
+  currency: string;
+  /** Sandbox destinations "are approved automatically". */
+  status: 'pending_review' | 'approved' | 'rejected';
+  statusReason: string | null;
+  /** DELETE deactivates: the record stays, unusable. */
+  deleted: boolean;
+  routing: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  reviewedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A payout quote (`pqt_…`) or a conversion quote (`cqt_…`): single-use, 30 s. */
+export interface StoredQuote {
+  kind: 'payout' | 'conversion';
+  id: string;
+  fromCurrency: string;
+  toCurrency: string;
+  /** Minor units of `fromCurrency`: what leaves the balance. */
+  fromAmount: number;
+  /** Minor units of `toCurrency`: what arrives. */
+  toAmount: number;
+  /** Payout quotes only: the withdrawal fee, taken from `fromAmount` before converting. */
+  fee: number;
+  rate: string;
+  expiresAt: string;
+  usedBy: string | null;
+  /** Payout quotes: the rail the fee was priced for; the payout's destination must match. */
+  rail?: StoredDestination['type'] | null;
+  createdAt: string;
+}
+
+/** A conversion (`cvt_…`). */
+export interface StoredConversion {
+  seq?: number;
+  id: string;
+  quoteId: string;
+  fromCurrency: string;
+  toCurrency: string;
+  fromAmount: number;
+  toAmount: number;
+  rate: string;
+  status: 'pending' | 'completed' | 'failed';
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+/** One balance currency's payout schedule (`/v1/balance_settings`). */
+export interface StoredSchedule {
+  currency: string;
+  payoutCurrency: string;
+  interval: 'manual' | 'instant' | 'daily' | 'weekly' | 'monthly';
+  weeklyDays: string[] | null;
+  monthlyDays: number[] | null;
+  anchorHour: number | null;
+  /** Minor units of the balance currency; null for no floor. */
+  minimum: number | null;
+  nextRunAt: string | null;
+  lastRunAt: string | null;
+  lastWithdrawalId: string | null;
+  disabledReason: string | null;
+  /** Consecutive runs that could not create a payout. Three turn the schedule off. */
+  failures: number;
+  /** Bumped on every write, so a job queued for an older schedule does nothing. */
+  version: number;
+}
+
+/** The account's virtual account in one currency (`va_…`). */
+export interface StoredVirtualAccount {
+  id: string;
+  currency: string;
+  accountNumber: string;
+  bankName: string;
+  bankCode: string | null;
+  status: 'active' | 'inactive';
+  createdAt: string;
+}
+
 export interface StoredIdempotency {
   fingerprint: string;
   state: 'in_progress' | 'done';
@@ -466,6 +551,56 @@ export function bachsState(storage: Storage, now: () => string) {
         return index ? read<StoredPortalSession>(`portal:${index.id}`) : null;
       },
       indexToken: (token: string, id: string) => write(`portal-token:${token}`, { id }),
+    },
+    destinations: {
+      get: (id: string) => read<StoredDestination>(`destination:${id}`),
+      put: (destination: StoredDestination) => write(`destination:${destination.id}`, destination),
+      all: () => all<StoredDestination>('destination:'),
+      /** "The first destination an account registers for a currency becomes that currency's default". */
+      async defaultFor(currency: string): Promise<StoredDestination | null> {
+        const index = await read<{ id: string }>(`destination-default:${currency}`);
+        return index ? read<StoredDestination>(`destination:${index.id}`) : null;
+      },
+      setDefault: (currency: string, id: string) => write(`destination-default:${currency}`, { id }),
+      clearDefault: (currency: string) => storage.providerState.delete(PROVIDER, `destination-default:${currency}`),
+    },
+    quotes: {
+      get: (id: string) => read<StoredQuote>(`quote:${id}`),
+      put: (quote: StoredQuote) => write(`quote:${quote.id}`, quote),
+    },
+    conversions: {
+      get: (id: string) => read<StoredConversion>(`conversion:${id}`),
+      put: (conversion: StoredConversion) => write(`conversion:${conversion.id}`, conversion),
+      delete: (id: string) => storage.providerState.delete(PROVIDER, `conversion:${id}`),
+      all: () => all<StoredConversion>('conversion:'),
+    },
+    payouts: {
+      /** A payout's core transfer id, by its Bachs `pay_` id. */
+      async engineIdOf(id: string): Promise<string | null> {
+        return (await read<{ engineId: string }>(`payout-id:${id}`))?.engineId ?? null;
+      },
+      index: (id: string, engineId: string) => write(`payout-id:${id}`, { engineId }),
+      referenceTaken: async (reference: string) => (await read(`payout-ref:${reference}`)) !== null,
+      indexReference: (reference: string, id: string) => write(`payout-ref:${reference}`, { id }),
+    },
+    schedules: {
+      get: (currency: string) => read<StoredSchedule>(`schedule:${currency}`),
+      put: (schedule: StoredSchedule) => write(`schedule:${schedule.currency}`, schedule),
+      all: () => all<StoredSchedule>('schedule:'),
+      /** Which scheduled payout a collection went out in, so a run takes each collection once. */
+      claimOf: (paymentId: string) => read<{ transferId: string }>(`schedule-claim:${paymentId}`),
+      claim: (paymentId: string, transferId: string) => write(`schedule-claim:${paymentId}`, { transferId }),
+      release: (paymentId: string) => storage.providerState.delete(PROVIDER, `schedule-claim:${paymentId}`),
+      claims: () => storage.providerState.listByPrefix(PROVIDER, 'schedule-claim:'),
+    },
+    virtualAccounts: {
+      get: (currency: string) => read<StoredVirtualAccount>(`va:${currency}`),
+      put: (account: StoredVirtualAccount) => write(`va:${account.currency}`, account),
+      async byId(id: string): Promise<StoredVirtualAccount | null> {
+        const index = await read<{ currency: string }>(`va-id:${id}`);
+        return index ? read<StoredVirtualAccount>(`va:${index.currency}`) : null;
+      },
+      indexId: (id: string, currency: string) => write(`va-id:${id}`, { currency }),
     },
     idempotency: {
       get: (scope: string) => read<StoredIdempotency>(`idem:${scope}`),

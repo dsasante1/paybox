@@ -178,7 +178,9 @@ describe('money that did not arrive is never refunded', () => {
     const before = await context.engine.getBalance('bachs', 'USD');
     const s = await cryptoUnderpaid();
     await pagePost(`${s.path}/simulate`, { action: 'accept_underpayment' });
-    expect((await context.engine.getBalance('bachs', 'USD')) - before).toBe(5000);
+    // $50.00 arrived; Bachs' 1.5% crypto fee on the $100.00 charge comes off
+    // at settlement (money out phase).
+    expect((await context.engine.getBalance('bachs', 'USD')) - before).toBe(4850);
 
     const charge = (await get(`/v1/checkout-sessions/${s.checkout_id}`)).json().charge;
     expect(charge.status).toBe('accepted');
@@ -208,7 +210,8 @@ describe('money that did not arrive is never refunded', () => {
     const s = await session(usd('100.00'));
     await pagePost(`${s.path}/pay`, { corridor: 'CRYPTO', asset: 'USDT_TRC20' });
     await pagePost(`${s.path}/simulate`, { action: 'overpaid' });
-    expect((await context.engine.getBalance('bachs', 'USD')) - before).toBe(11000);
+    // $110.00 arrived, less the $1.50 fee settled off it.
+    expect((await context.engine.getBalance('bachs', 'USD')) - before).toBe(10850);
     const charge = (await get(`/v1/checkout-sessions/${s.checkout_id}`)).json().charge;
     const refund = await post('/v1/refunds', { charge_id: charge.payment_id, reference: 'RF-over' });
     expect(refund.statusCode).toBe(400);

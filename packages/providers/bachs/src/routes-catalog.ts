@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { Customer, Product } from '@paybox/shared';
 import { fail } from './errors.js';
-import { assertMetadata, newestFirst, notFound, readPage } from './http.js';
+import { assertMetadata, everyRow, newestFirst, notFound, readPage } from './http.js';
 import { emailLock, withLock } from './locks.js';
 import { hexId } from './ids.js';
 import { toMinor } from './money.js';
@@ -307,9 +307,9 @@ export function registerCatalogRoutes(fastify: FastifyInstance, ctx: RouteContex
     const { limit, offset } = readPage(query, 20);
     const includeArchived = query.include_archived === 'true';
     // Newest first; archived ones hidden unless asked for.
-    const all = await storage.products.list({ provider: PROVIDER, limit: 10_000, offset: 0 });
+    const all = await everyRow((page) => storage.products.list({ provider: PROVIDER, ...page }));
     const rows: Array<{ product: Product; stored: StoredProduct }> = [];
-    for (const product of all.items) {
+    for (const product of all) {
       const stored = await state.products.get(product.providerProductId);
       if (!stored) continue;
       if (stored.archivedAt && !includeArchived) continue;
@@ -450,9 +450,9 @@ export function registerCatalogRoutes(fastify: FastifyInstance, ctx: RouteContex
     // time, so "Jane Doe" would match neither; filter on the name Bachs was
     // actually given. Listed newest first by creation order.
     const needle = query.search?.toLowerCase() ?? null;
-    const everyone = await storage.customers.list({ provider: PROVIDER, limit: 10_000, offset: 0 });
+    const everyone = await everyRow((page) => storage.customers.list({ provider: PROVIDER, ...page }));
     const matches: Array<{ customer: Customer; stored: StoredCustomer | null }> = [];
-    for (const customer of everyone.items) {
+    for (const customer of everyone) {
       const stored = await state.customers.get(customer.providerCustomerId);
       const name = customerName(customer, stored) ?? '';
       if (!needle || customer.email.toLowerCase().includes(needle) || name.toLowerCase().includes(needle)) {

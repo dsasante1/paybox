@@ -54,6 +54,9 @@ import {
   BACHS_SUBSCRIPTION_RENEW_JOB,
   BACHS_SUBSCRIPTION_RETRY_JOB,
   BachsBilling,
+  BachsTreasury,
+  BACHS_PAYOUT_ADVANCE_JOB,
+  BACHS_PAYOUT_SCHEDULE_JOB,
   BachsWebhookFormatter,
   createBachsExpiryHandler,
   generateBachsKeys,
@@ -482,6 +485,17 @@ export async function buildContext(options: BuildContextOptions): Promise<Paybox
   scheduler.register(BACHS_SUBSCRIPTION_RENEW_JOB, bachsBilling.handleRenewJob);
   scheduler.register(BACHS_SUBSCRIPTION_RETRY_JOB, bachsBilling.handleRetryJob);
   bus.on('payment.successful', bachsBilling.onPaymentSuccessful);
+  // Bachs holds USD and NGN only: whatever a payment or refund moved in any
+  // other currency, on any path, is swept into USD as soon as it lands
+  // (providers/bachs/src/treasury.ts). Payouts advance and schedules run as
+  // Bachs' own jobs.
+  const bachsTreasury = new BachsTreasury({ engine, storage, clock, ids });
+  bus.on('payment.successful', bachsTreasury.onMoneyMoved);
+  bus.on('refund.successful', bachsTreasury.onMoneyMoved);
+  bus.on('refund.failed', bachsTreasury.onMoneyMoved);
+  bus.on('transfer.failed', bachsTreasury.onPayoutFailed);
+  scheduler.register(BACHS_PAYOUT_ADVANCE_JOB, bachsTreasury.handleAdvanceJob);
+  scheduler.register(BACHS_PAYOUT_SCHEDULE_JOB, bachsTreasury.handleScheduleJob);
   scheduler.register(
     BACHS_CHECKOUT_EXPIRE_JOB,
     createBachsExpiryHandler({ engine, simulator, storage, clock, ids, billing: bachsBilling }),

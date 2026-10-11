@@ -15,6 +15,8 @@ import { registerWebhookRoutes } from './routes-webhooks.js';
 import { BachsBilling, invoiceIdOf, type RecoveryMode } from './billing.js';
 import { refundRecord } from './refunds.js';
 import { registerBillingRoutes } from './routes-billing.js';
+import { registerMoneyOutRoutes } from './routes-money-out.js';
+import { BachsTreasury } from './treasury.js';
 import { registerPortalRoutes } from './routes-portal.js';
 import { customerName, type PaymentContext, type PaymentInvoiceInfo } from './serializers.js';
 import { bachsState, type StoredRefund } from './state.js';
@@ -151,6 +153,7 @@ export const bachsPlugin: FastifyPluginAsync<BachsPluginOptions> = async (fastif
     authenticate,
     paymentContext,
     billing,
+    treasury: new BachsTreasury({ engine, storage, clock, ids }),
     productTotals: () => Promise.reject(new Error('catalog routes not registered')),
     // Replaced by the catalog routes, which own customer creation.
     customers: {
@@ -163,6 +166,7 @@ export const bachsPlugin: FastifyPluginAsync<BachsPluginOptions> = async (fastif
   registerCheckoutRoutes(fastify, ctx);
   registerPaymentRoutes(fastify, ctx);
   registerBillingRoutes(fastify, ctx);
+  registerMoneyOutRoutes(fastify, ctx);
   registerPortalRoutes(fastify, ctx);
   registerWebhookRoutes(fastify, ctx);
 };

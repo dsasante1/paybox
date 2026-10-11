@@ -219,6 +219,23 @@ export function newestFirst(
   return (b.seq ?? 0) - (a.seq ?? 0);
 }
 
+/**
+ * Every row a paged repository holds. Storage caps one page at 500 rows, so
+ * asking for a large `limit` silently returns only the first 500; this reads
+ * page after page until one comes back short.
+ */
+export async function everyRow<T>(
+  fetch: (page: { limit: number; offset: number }) => Promise<{ items: T[] }>,
+): Promise<T[]> {
+  const limit = 500;
+  const rows: T[] = [];
+  for (let offset = 0; ; offset += limit) {
+    const { items } = await fetch({ limit, offset });
+    rows.push(...items);
+    if (items.length < limit) return rows;
+  }
+}
+
 export function notFound(what: string): PayboxError {
   return fail('not_found', 'NOT_FOUND', `${what} not found`);
 }

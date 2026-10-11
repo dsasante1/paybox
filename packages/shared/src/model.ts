@@ -642,7 +642,9 @@ export interface PayboxEvent {
      * free checkout completes, and an unpaid one expires, with no payment
      * behind it at all.
      */
-    | 'checkout';
+    | 'checkout'
+    /** A Bachs currency conversion: a ledger movement with a lifecycle of its own. */
+    | 'conversion';
   /** Monotonic per-resource, so replay ordering is total and stable. */
   sequence: number;
   data: Metadata;

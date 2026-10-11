@@ -20,12 +20,14 @@ so paybox follows one rule throughout:
 Base path: `/bachs`. Bachs' own paths begin `/v1/`, so set your client's base
 URL to `http://localhost:8080/bachs` and every path works unchanged.
 
-Two of Bachs' phases are here.
+Three of Bachs' phases are here.
 
 - **Collection**: checkout sessions, the hosted page, payments, products,
   customers, refunds, balances and the webhook-endpoint API.
 - **Billing**: subscriptions, saved cards, off-session charges, product groups
   and the customer portal.
+- **Money out**: payouts, payout destinations, quotes and schedules,
+  conversions, the virtual account, and balances held in USD and NGN.
 
 [Not implemented](#not-implemented) lists what comes later.
 
@@ -80,7 +82,37 @@ Two of Bachs' phases are here.
 | `GET /v1/refunds` | **Compatible** | `{ total, items }`, as the spec has it. |
 | `GET /v1/refunds/{refund_id}` | **Compatible** | |
 | `GET /v1/refunds/by-charge/{payment_id}` | **Compatible** | The live refund, else the latest. |
-| `GET /v1/balances` | **Partially compatible** | One balance per collected currency; see [differences](#differences-from-bachs). |
+| `GET /v1/balances` | **Partially compatible** | USD and NGN, as Bachs holds them; other currencies settle into USD at fixed rates. Nothing is ever pending. |
+
+### Money out
+
+| Endpoint | Status | Notes |
+| --- | --- | --- |
+| `POST /v1/payouts/destinations` | **Compatible** | Bank, mobile money or crypto wallet; approved at once, as in the sandbox. |
+| `GET /v1/payouts/destinations` | **Compatible** | `{ destinations, total, limit, offset }`; default page 20. |
+| `GET /v1/payouts/destinations/{destination_id}` | **Compatible** | |
+| `PATCH /v1/payouts/destinations/{destination_id}` | **Compatible** | `name`, `is_default`, or the routing restated. |
+| `DELETE /v1/payouts/destinations/{destination_id}` | **Compatible** | Deactivates: `{ id, deleted: true }`. |
+| `POST /v1/payouts/quotes` | **Compatible** | Cross-currency only; 30 seconds; single use. |
+| `POST /v1/payouts` | **Partially compatible** | `200`. No first-payout review hold and no withdrawal limits. |
+| `GET /v1/payouts` | **Compatible** | `{ total, items }`; `status_filter`; default page 50. |
+| `GET /v1/payouts/{withdrawal_id}` | **Compatible** | |
+| `GET /v1/payouts/mobile-money-providers` | **Partially compatible** | Not in the pinned spec; shape from the payouts guide. |
+| `GET /v1/balance_settings` | **Compatible** | Payout schedules, per currency. |
+| `POST /v1/balance_settings` | **Compatible** | A named currency is replaced in full; others are kept. |
+| `POST /v1/conversions/quotes` | **Compatible** | USD <-> NGN; 30 seconds; single use. |
+| `POST /v1/conversions` | **Compatible** | Completes at once. |
+| `GET /v1/conversions` | **Compatible** | `{ total, limit, offset, items }`; default page 50. |
+| `GET /v1/conversions/{conversion_id}` | **Compatible** | |
+| `POST /v1/virtual-accounts` | **Compatible** | NGN only; `200`, and the same account again on a repeat. |
+| `GET /v1/virtual-accounts` | **Compatible** | `?currency=NGN`. |
+| `GET /v1/currencies/payout-supported` | **Compatible** | |
+| `GET /v1/reference/banks` | **Partially compatible** | A representative list of banks, with Bachs' sandbox test codes. |
+| `GET /v1/reference/momo` | **Partially compatible** | Not in the pinned spec; same shape as the payouts guide's list. |
+| `POST /v1/misc/bank-accounts/resolve` | **Partially compatible** | Names are synthetic; a failed lookup is `200` with `resolved: false`. |
+
+Transfers are not here. They move money only between a platform and its
+connected accounts, so they arrive with Connect.
 
 ### Webhook endpoints and events
 
@@ -125,6 +157,14 @@ Bachs hosts its customer portal at `portal.bachs.io/s/{token}`; paybox's is at
 | `POST /portal/s/{token}/subscriptions/{subscription_id}/cancel` | **Emulator-only** | Cancels at the end of the period. |
 | `POST /portal/s/{token}/subscriptions/{subscription_id}/resume` | **Emulator-only** | Undoes a scheduled cancellation. |
 | `POST /portal/s/{token}/subscriptions/{subscription_id}/pay` | **Emulator-only** | A recovery payment for a `past_due` or `unpaid` subscription. |
+
+Bachs says of its virtual accounts that "there is no way to simulate a deposit
+into it today". paybox has one, and it is paybox's test control, **not Bachs
+API**:
+
+| Endpoint | Status | Notes |
+| --- | --- | --- |
+| `POST /v1/virtual-accounts/{virtual_account_id}/deposits` | **Emulator-only** | A bank transfer into the account: `{ amount, sender_name?, sender_bank?, sender_account_number?, narration? }`. |
 
 ## How a checkout behaves
 
@@ -405,6 +445,167 @@ Product groups are stored and returned as published. `CreateCheckoutSessionReque
 has no field that names a group, so a group cannot yet be offered at
 checkout, and `session_mode` is always `CART`.
 
+## How money out behaves
+
+Sources: the pinned OpenAPI document, guides/payouts/{overview,
+payout-using-api, global-payouts, payout-schedules}, connect/{payouts,
+testing, balances}, for-you/{fees, supported-currencies} and
+guides/virtual-accounts/overview, read 2026-10-10.
+
+### Balances
+
+Bachs holds money in USD and NGN only. An NGN collection stays NGN, and a
+collection in any other currency "is converted when it settles" into USD. The
+sandbox settles at once, so nothing is ever pending.
+
+paybox does this whatever moved the money: the hosted page, `paybox simulate`,
+a scenario, the dashboard, or a refund made with paybox's own tools. Whatever
+a GHS, KES or other collection (or its refund) leaves in its own currency is
+swept into USD before anything reads or moves a balance. A balance read
+reports anything not yet swept, without writing.
+
+What lands is the amount net of Bachs' processing fee, the collection's
+`settlement_amount`; the fee comes off as the collection settles.
+
+Both balances are always listed, each holding paybox's opening float.
+`total_balance_usd` is both in dollars at the fixed rate, "display only".
+
+A refund made through `POST /v1/refunds` holds its amount the moment it is
+created, so a payout made before it settles cannot spend the same money. It
+needs that amount available in the balance it settled into, which is net of
+fees: a full refund of the only collection in an empty balance is refused,
+because the fee did not come back. While
+any balance is negative, for example after a refund made with paybox's own
+tools, every payout is refused with `ORGANIZATION_IN_DEBT`.
+
+### Rates
+
+Every conversion uses one fixed rate per currency, against the US dollar:
+
+| Currency | Per US dollar |
+| --- | --- |
+| NGN | 1,500 |
+| GHS | 15 |
+| KES | 130 |
+| TZS | 2,600 |
+| UGX | 3,700 |
+| XAF, XOF | 600 |
+| RWF | 1,400 |
+| MWK | 1,750 |
+| ZMW | 26 |
+| GBP | 0.79 |
+| EUR | 0.92 |
+| CAD | 1.37 |
+| USDT, USDC (every network) | 1 |
+
+1,500 NGN is the figure Bachs' own examples use most often. The others are
+round figures of the right size, chosen for paybox, not taken from Bachs.
+
+### Payouts
+
+A payout goes to a saved destination and debits the balance the moment it is
+created, fee included.
+
+- **Same currency** (NGN to an NGN bank, USD to a USD bank): send `amount`,
+  which is what arrives; "the fee is charged on top". `total_debited` is
+  `amount` plus `fee`.
+- **Stablecoins** are paid from USD one to one: send `amount`, and the fee
+  goes on top.
+- **Any other currency** is funded from USD through a quote.
+  - `POST /v1/payouts/quotes` sets `from_amount`, what leaves the balance.
+  - The withdrawal fee comes out of that before converting, as the spec's
+    example shows (`to_amount` = (100.00 − 1.00) × 1,500).
+  - A quote lasts 30 seconds and pays one payout.
+  - The fee depends on the rail, so a quote is priced for one: send
+    `payout_method` (`MOBILE_MONEY` for mobile money; anything else is
+    bank). Paying a destination of the other rail with it is
+    `QUOTE_DESTINATION_MISMATCH`.
+  - NGN cannot fund another currency (`PAYOUT_SOURCE_CURRENCY_UNSUPPORTED`).
+
+Fees follow the published schedule:
+
+| Paid from | Rail | Fee |
+| --- | --- | --- |
+| NGN | bank | NGN 50 flat |
+| USD | bank | 1%, min $1, cap $15 |
+| USD | mobile money, crypto | 1%, min $1 |
+
+A payout is `pending`, then `processing` a second later, then `completed` or
+`failed` a second after that. A failure gives back the amount and the fee.
+Bachs' test destinations decide the outcome:
+
+| Destination | Outcome |
+| --- | --- |
+| Bank `999` / `0001112223` | completed |
+| Bank `998` / `0001112224` | failed |
+| Wallet `0x1111111111111111111111111111111111111111` | completed |
+| Wallet `0x2222222222222222222222222222222222222222` | failed |
+| Mobile money on a listed network | completed |
+| Mobile money on any other network | failed ("accepted when you save the destination, but the payout fails when it is sent") |
+| Anything else | completed |
+
+A `reference` is unique for the account (`409 CONFLICT`). The documented
+refusals each have their code:
+- `DESTINATION_NOT_FOUND`, which a deleted destination also gets;
+- `QUOTE_REQUIRED` and `QUOTE_NOT_APPLICABLE`;
+- `QUOTE_NOT_FOUND`, which a quote already used also gets (`400`, not `404`);
+- `QUOTE_EXPIRED` and `QUOTE_DESTINATION_MISMATCH`;
+- `AMOUNT_REQUIRED` and `AMOUNT_NOT_ALLOWED_WITH_QUOTE`;
+- `INSUFFICIENT_BALANCE`, checked against `total_debited`.
+
+### Destinations
+
+Destinations are approved at once, as Bachs' sandbox does it. The type is
+inferred from the currency. GHS, KES and TZS have both bank and mobile money,
+so they need `type` (`DESTINATION_TYPE_REQUIRED`).
+
+Each route's required fields are checked (`BANK_ROUTING_DETAILS_INVALID`). An
+NGN bank resolves the account name itself, and a supplied one is ignored.
+
+The first destination in a currency is its default; `is_default` moves it.
+DELETE deactivates: the destination can still be read, is no longer usable,
+and a second DELETE is `404`.
+
+### Conversions
+
+USD <-> NGN only. A quote lasts 30 seconds and converts once. The conversion
+completes at once, with no fee ("no hidden markup"), and sends
+`conversion.completed`.
+
+### Payout schedules
+
+`/v1/balance_settings` holds one schedule per held balance:
+- `manual`, `instant` (a minute after money settles), `daily`, `weekly` or
+  `monthly`, at `anchor_hour_utc` (default 10);
+- days 29 to 31 land on the last day of a shorter month;
+- day arrays on the wrong interval, and the legacy `cadence`, `enabled` and
+  `anchor_day`, are `400`;
+- only a USD balance can pay out in another currency.
+
+A run pays the default destination for the payout currency.
+- It takes settled collections whole, oldest first, each for what it actually
+  left: what arrived, less its fee and anything refunded or being refunded.
+- It stops at the first collection the balance cannot cover with the fee.
+- Each collection is paid only once. A payout that fails, by any path,
+  releases its collections, and an `instant` schedule then looks again.
+- Its payout's `reference` begins `auto_`.
+
+A run below `minimum_amount` pays nothing, and so does a run with nothing to
+pay; neither counts as a failure. Three runs in a row that have money to pay
+but cannot pay it, for example with no default destination, return the
+schedule to `manual` with a `disabled_reason`. An `instant` schedule runs once
+for each settlement, not on a timer.
+
+### The virtual account
+
+One permanent NGN number for the account, starting `90`, at "Sandbox Test
+Bank". Asking again returns the same account with `200`.
+
+A deposit, made with paybox's test control, is a collection like any other:
+- `collection.succeeded` with no checkout;
+- the virtual-account fee, 1% capped at NGN 300, so 250,000 settles 249,700;
+- available at once.
+
 ## Webhooks
 
 Every delivery carries the three documented headers:
@@ -438,6 +639,8 @@ Events emitted:
   `customer.subscription.updated`, `customer.subscription.deleted`.
 - **Invoices:** `invoice.created`, `invoice.paid`, `invoice.payment_failed`.
 - **Saved cards:** `payment_method.saved`.
+- **Payouts:** `payout.created`, `payout.paid`, `payout.failed`.
+- **Conversions:** `conversion.completed`.
 
 `payment_method.saved` is not in the subscribable `event_types` enum (see
 [contradictions](#contradictions-in-bachs-documentation)). An endpoint created
@@ -509,21 +712,20 @@ impossible, not to save work.
   over, so refusing requests would lock a test suite out for good after its
   hundredth. To exercise Bachs' `429 TOO_MANY_REQUESTS`, use paybox's network
   simulation, which answers in Bachs' envelope.
-- **One fixed exchange rate: 1 USD = 1,500 NGN.** Bachs converts at "the
-  prevailing rate", and a moving rate would break determinism. 1,500 is the
-  figure Bachs' own examples use most often. Today the only conversion is an
-  off-session charge in the other currency than the card's.
-- **No conversion at checkout.**
-  - Bachs converts: a USD price can be paid in NGN at a live rate, and every
-    collection settles into a USD or NGN balance. paybox does not do this
-    yet.
-  - So a checkout offers only the corridors that can charge one of its
-    currencies, meaning the base currency or one given in `currency_options`.
-    Crypto is offered on USD checkouts.
-  - Balances are folded per collected currency, so a GHS mobile-money
-    collection shows as a GHS balance, and `total_balance_usd` counts USD
-    balances alone.
+- **Fixed exchange rates.** Bachs converts at "the prevailing rate", and a
+  moving rate would break determinism, so every rate is a constant (see
+  [Rates](#rates)).
+- **No conversion at checkout.** Bachs lets a USD price be paid in NGN at a
+  live rate.
+  - paybox offers only the corridors that can charge one of the checkout's
+    currencies: the base currency, or one given in `currency_options`.
+  - Crypto is offered on USD checkouts.
   - `fee_usd` is set only on USD payments.
+- **No review holds and no withdrawal limits on payouts.** Bachs holds a first
+  payout for review and enforces per-account limits. Neither has a sandbox
+  trigger, so neither happens here.
+- **A deposit over the limits is not held.** Bachs silently holds a virtual
+  account deposit over its NGN 5,000,000 limits. paybox credits it.
 - **An underpaid charge cannot be refunded.** Bachs allows it. paybox's engine
   refunds only payments it has collected in full, so this answers `501
   NOT_IMPLEMENTED`, and `is_refundable` reads `false` on such a charge so the
@@ -578,15 +780,22 @@ cause. Where a choice was needed, the rule at the top of this file decided it.
 | `next_billed_at` on a canceled subscription | Manage guide: cleared | `customer.subscription.deleted` example: still set | Cleared |
 | Invoice retrieval | Changelog: invoices "you can retrieve" | No invoice endpoint or schema in the spec | Webhooks only |
 | Product group size | Description: "two or more" | Schema: `minItems: 1` | One or more |
+| Payout quote fee | Spec example: taken from `from_amount` before converting | Fees page: added on top; quote description: no fee; webhook example: both | Spec example |
+| Payout `amount` | REST: what arrives, in the destination's currency | Webhooks: the source amount | Each on its own surface |
+| `payout.paid` status | Event name says paid | `data.status` is `completed` | `completed` |
+| Payout id field | REST: `id` | Webhooks: `withdrawal_id` | Each on its own surface |
+| Conversion id prefixes | REST: `cqt_`, `cvt_` | Webhooks: `cq_`, `cnv_` | REST's |
+| Mobile-money providers | Reference page: `GET /v1/reference/momo` | Payouts guide: `GET /v1/payouts/mobile-money-providers` | Both served |
+| Automatic payouts | Fees page: "There is no automatic withdrawal" | Payout schedules guide | Schedules |
 
 ## Not implemented
 
 These are later phases of Bachs. They are not shortcuts.
 
-- **Payouts**: destinations, quotes, schedules.
-- **Conversions**, **transfers**, **virtual accounts** and **disputes**.
-- **Connect**: accounts, persons, capabilities, platform fees, `X-Account-Id`.
-- Uploads and media, reference data, payment-method and currency listings,
-  and checkout settings.
+- **Disputes**, and uploads and media.
+- **Connect**: accounts, persons, capabilities, platform fees, `X-Account-Id`,
+  and **transfers**, which move money only to connected accounts.
+- Payment-method, rail and collection-currency listings, business structures
+  and product categories, and checkout settings.
 - Offering a product group at checkout (`SELECTION` sessions): the request has
   no field for it.
