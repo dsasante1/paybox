@@ -5,7 +5,7 @@ What each published version of `paybox-emulator` (npm) and `dsasante1/paybox`
 merging to `main` publishes nothing, and everything under **Unreleased** goes
 out with the next tag — see [docs/releasing.md](docs/releasing.md).
 
-## Unreleased
+## 0.4.0 — 2026-10-11
 
 - **Behaviour change: virtual time survives a restart.** With a database
   file, a restart used to rewind the clock to `PAYBOX_START_AT`, or to the wall
