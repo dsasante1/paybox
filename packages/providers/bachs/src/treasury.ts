@@ -1,10 +1,12 @@
 import type { Clock, IdFactory, LedgerEntry, Payment, PayboxEvent, Transfer } from '@paybox/shared';
 import type { Job, PaymentEngine, Storage } from '@paybox/core';
 import { hasCapability } from './accounts.js';
+import { keptBy, splitParts } from './split.js';
 import { actorFor, ownerKey, paymentPot, platformActor, type Actor } from './actor.js';
 import { fail } from './errors.js';
 import { everyRow } from './http.js';
 import { derivedId, disputeIdOf, hexId } from './ids.js';
+import { toDecimal } from './money.js';
 import { withLock } from './locks.js';
 import { convertMinor, exchangeRate, isHeld, isStablecoin } from './rates.js';
 import { amountPaidOf, feeOf } from './serializers.js';
@@ -257,7 +259,10 @@ export class BachsTreasury {
     for (const payment of await this.#payments()) {
       if (charged.has(payment.id) || !COLLECTED.includes(payment.status)) continue;
       const fee = feeOf(payment) ?? 0;
-      if (fee > 0) owed.push({ paymentId: payment.id, currency: payment.currency, fee, pot: await this.#feePayer(payment, fee, accounts) });
+      if (fee <= 0) continue;
+      for (const part of await this.#feePayers(payment, fee, accounts)) {
+        owed.push({ paymentId: payment.id, currency: payment.currency, fee: part.fee, pot: part.pot });
+      }
     }
     return owed;
   }
@@ -270,12 +275,32 @@ export class BachsTreasury {
    * unless the platform cannot cover it, when it "silently falls back" to the
    * charge.
    */
-  async #feePayer(payment: Payment, fee: number, accounts: Map<string, StoredAccount>): Promise<string | null> {
-    const pot = paymentPot(payment);
-    if (pot === null || accounts.get(pot)?.collector !== 'platform') return pot;
+  async #feePayers(
+    payment: Payment,
+    fee: number,
+    accounts: Map<string, StoredAccount>,
+  ): Promise<Array<{ pot: string | null; fee: number }>> {
     const held = settlementCurrency(payment.currency);
-    const platform = await this.#engine.getBalance(PROVIDER, held, null);
-    return platform >= convertMinor(fee, payment.currency, held) ? null : pot;
+    const platformBalance = () => this.#engine.getBalance(PROVIDER, held, null);
+    // A destination charge: "(1) the platform's cut on this sale, (2) the
+    // platform's available balance -- all or nothing, (3) the account's
+    // share", the last only for the remainder (connect/processing-fees).
+    if (payment.settlementMode === 'forwarded' && payment.subaccountId) {
+      const cut = Math.min(payment.platformFee, fee);
+      if (cut >= fee) return [{ pot: null, fee }];
+      const remainder = fee - cut;
+      // The platform's balance besides this sale's cut, which a held
+      // currency's balance already counts.
+      const besides = (await platformBalance()) - (isHeld(payment.currency) ? cut : 0);
+      if (besides >= convertMinor(remainder, payment.currency, held)) return [{ pot: null, fee }];
+      return [
+        ...(cut > 0 ? [{ pot: null, fee: cut }] : []),
+        { pot: payment.subaccountId, fee: remainder },
+      ];
+    }
+    const pot = paymentPot(payment);
+    if (pot === null || accounts.get(pot)?.collector !== 'platform') return [{ pot, fee }];
+    return (await platformBalance()) >= convertMinor(fee, payment.currency, held) ? [{ pot: null, fee }] : [{ pot, fee }];
   }
 
   /**
@@ -497,6 +522,68 @@ export class BachsTreasury {
     if (!transfer || !facts?.schedule) return;
     await this.#queueInstant(facts.schedule, (await this.#actorOfPot(transfer.sourceSubaccountId ?? null)).account?.id ?? null);
   };
+
+  /* ------------------------------- transfers ------------------------------- */
+
+  /**
+   * `POST /v1/transfers`: a manual transfer between a platform and one of its
+   * own accounts, "paid on creation (instant both sides)". There is no source
+   * field: whoever is authenticated is debited -- the platform sending a share
+   * out, or an account sending money back (`destination: "self"`).
+   */
+  async createTransfer(input: {
+    source: Actor;
+    destination: StoredAccount | null;
+    amount: number;
+    currency: string;
+    description: string | null;
+    metadata: Record<string, unknown>;
+    transferGroup: string | null;
+  }): Promise<Transfer> {
+    return withLock(TREASURY_LOCK, async () => {
+      await this.#sweep();
+      // "Account `transfers` active (both directions)."
+      const account = input.source.account ?? input.destination;
+      if (account && !hasCapability(account, 'transfers')) {
+        throw fail('authentication_failed', 'FORBIDDEN', "The account's transfers capability is not active.");
+      }
+      const pot = input.source.pot;
+      if (await this.inDebt(pot)) {
+        throw fail(
+          'validation_failed',
+          'ORGANIZATION_IN_DEBT',
+          'A balance is negative. Transfers are blocked until it is brought back to zero.',
+        );
+      }
+      const available = await this.available(input.currency as 'USD' | 'NGN', pot);
+      if (available < input.amount) {
+        throw fail(
+          'balance_insufficient',
+          'INSUFFICIENT_BALANCE',
+          `Insufficient ${input.currency} balance: ${toDecimal(available, input.currency)} available, ` +
+            `${toDecimal(input.amount - available, input.currency)} short.`,
+        );
+      }
+      return this.#engine.createTransfer({
+        provider: PROVIDER,
+        amount: input.amount,
+        currency: input.currency,
+        reason: 'transfer',
+        status: 'successful',
+        sourceSubaccountId: pot,
+        destinationSubaccountId: input.destination?.engineId ?? null,
+        destinationPlatform: input.destination === null,
+        transferGroup: input.transferGroup,
+        metadata: {
+          bachs_transfer: {
+            kind: 'manual',
+            description: input.description,
+            metadata: input.metadata,
+          },
+        },
+      });
+    });
+  }
 
   /* -------------------------------- quotes -------------------------------- */
 
@@ -931,10 +1018,14 @@ export class BachsTreasury {
     // actually left in the balance: what arrived, less its fee and anything
     // refunded or being refunded.
     const collections = [];
-    // A fee the platform paid (it collects this account's fees) never left the owner's balance.
-    const feesPaid = new Set(
-      (await this.#ledger(owner.pot)).filter((entry) => entry.reason === 'processing_fee').map((entry) => entry.resourceId),
-    );
+    // What of each collection's fee the owner's own balance paid: a fee the
+    // platform paid, or a destination fee it shared with the seller, did not
+    // all leave it.
+    const feesPaid = new Map<string, number>();
+    for (const entry of await this.#ledger(owner.pot)) {
+      if (entry.reason !== 'processing_fee' || !entry.resourceId) continue;
+      feesPaid.set(entry.resourceId, (feesPaid.get(entry.resourceId) ?? 0) + entry.amount);
+    }
     for (const payment of await this.#payments()) {
       if (payment.status !== 'successful' && payment.status !== 'partially_refunded') continue;
       if (paymentPot(payment) !== owner.pot) continue;
@@ -942,7 +1033,11 @@ export class BachsTreasury {
       const refunds = (await this.#storage.refunds.listByPayment(payment.id))
         .filter((refund) => refund.status !== 'failed')
         .reduce((sum, refund) => sum + refund.amount, 0);
-      const kept = amountPaidOf(payment) - (feesPaid.has(payment.id) ? (feeOf(payment) ?? 0) : 0) - refunds;
+      // A split sale leaves the owner its own part of what arrived: the fixed
+      // part or the rest (split.ts), never the other party's.
+      const parts = splitParts(payment, (await this.state.checkouts.byPayment(payment.id))?.split);
+      const paid = amountPaidOf(payment);
+      const kept = (parts ? keptBy(owner.pot, paid, parts) : paid) - (feesPaid.get(payment.id) ?? 0) - refunds;
       if (kept <= 0) continue;
       collections.push({
         payment,

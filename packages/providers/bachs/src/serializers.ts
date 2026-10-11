@@ -2,6 +2,7 @@ import type { Customer, Invoice, InvoiceItem, Payment, PayboxEvent, Product, Ref
 import type { WebhookEndpoint } from '@paybox/core';
 import { processingFee, virtualAccountFee, type Corridor } from './fees.js';
 import { convertMinor } from './rates.js';
+import { splitView } from './split.js';
 import { toDecimal, toDecimalOrNull } from './money.js';
 import type {
   StoredCheckout,
@@ -221,9 +222,14 @@ export function feeOf(payment: Payment): number | null {
  * Where a collection settles: NGN stays NGN, every other currency "is
  * converted when it settles" into USD, at the fixed rate (rates.ts).
  */
-export function settlementOf(payment: Payment): { currency: string; amount: number } {
+export function settlementOf(
+  payment: Payment,
+  feePaidBy: 'merchant' | 'platform' | null = null,
+): { currency: string; amount: number } {
   const currency = payment.currency === 'NGN' ? 'NGN' : 'USD';
-  const net = Math.max(0, payment.amount - (feeOf(payment) ?? 0));
+  // When the platform's balance paid the fee, the account settles gross.
+  const fee = feePaidBy === 'platform' ? 0 : (feeOf(payment) ?? 0);
+  const net = Math.max(0, payment.amount - fee);
   return { currency, amount: convertMinor(net, payment.currency, currency) };
 }
 
@@ -275,6 +281,8 @@ export interface PaymentContext {
   refunds: StoredRefund[];
   history: PayboxEvent[];
   hasLiveRefund: boolean;
+  /** Who paid the processing fee, read from its ledger posting; null until posted. */
+  feePaidBy: 'merchant' | 'platform' | null;
 }
 
 /** `status_history`: one entry per status change, from the event log. */
@@ -357,9 +365,8 @@ export function serializePayment(payment: Payment, context: PaymentContext) {
     fee_usd: settled && fee !== null && c === 'USD' ? toDecimal(fee, c) : null,
     fees: fee !== null ? { amount: toDecimal(fee, c), currency: c } : null,
     merchant_bears_cost: true,
-    platform_fee: null,
-    destination_amount: null,
-    fee_paid_by: settled ? 'merchant' : null,
+    ...splitView(context.checkout?.split),
+    fee_paid_by: context.feePaidBy,
     payment_method: corridorOf(payment),
     channel: context.meta?.channel ?? 'checkout',
     narration: context.meta?.description ?? null,
@@ -401,18 +408,19 @@ export function serializeChargeStatus(
     checkout: StoredCheckout | null;
     meta: StoredPaymentMeta | null;
     history: PayboxEvent[];
+    feePaidBy: 'merchant' | 'platform' | null;
   },
 ) {
   const c = payment.currency;
-  const fee = feeOf(payment) ?? 0;
+  const settlement = settlementOf(payment, context.feePaidBy);
   return {
     charge_id: payment.providerTransactionId,
     organization_id: context.organizationId,
     customer_id: context.customerId,
     amount: toDecimal(payment.amount, c),
     currency: c,
-    settlement_currency: settlementOf(payment).currency,
-    settlement_amount: toDecimal(settlementOf(payment).amount, settlementOf(payment).currency),
+    settlement_currency: settlement.currency,
+    settlement_amount: toDecimal(settlement.amount, settlement.currency),
     status: paymentStatusOf(payment),
     metadata: metadataOf(context),
     status_history: statusHistory(payment, context.history),
@@ -429,11 +437,13 @@ export function serializePaymentListItem(
     meta: StoredPaymentMeta | null;
     customer: { email: string; name: string | null } | null;
     hasLiveRefund: boolean;
+    feePaidBy: 'merchant' | 'platform' | null;
   },
 ) {
   const c = payment.currency;
   const status = paymentStatusOf(payment);
   const fee = feeOf(payment);
+  const settlement = settlementOf(payment, context.feePaidBy);
   const settled = ['succeeded', 'accepted', 'overpaid', 'refunded', 'partially_refunded'].includes(status);
   const paid = amountPaidOf(payment);
   const corridor = corridorOf(payment);
@@ -448,16 +458,15 @@ export function serializePaymentListItem(
     customer_email: context.customer?.email ?? '',
     amount_paid: toDecimal(paid, c),
     amount_remaining: toDecimal(Math.max(0, payment.amount - paid), c),
-    settlement_amount: settled && fee !== null ? toDecimal(settlementOf(payment).amount, settlementOf(payment).currency) : null,
-    settlement_currency: settled ? settlementOf(payment).currency : null,
+    settlement_amount: settled && fee !== null ? toDecimal(settlement.amount, settlement.currency) : null,
+    settlement_currency: settled ? settlement.currency : null,
     fee: settled && fee !== null ? toDecimal(fee, c) : null,
     vat: null,
     currency: c,
     meta: metadataOf(context),
     transaction_date: payment.createdAt,
     completed_at: completedAtOf(payment),
-    platform_fee: null,
-    destination_amount: null,
+    ...splitView(context.checkout?.split),
     payment_method: corridor
       ? {
           type: corridor.toLowerCase(),
@@ -471,7 +480,7 @@ export function serializePaymentListItem(
       ? { type: 'CHECKOUT_SESSION', checkout_id: context.checkout.id, reference: context.checkout.reference }
       : { type: context.meta?.channel === 'api' ? 'API' : 'SUBSCRIPTION', checkout_id: null, reference: referenceOf(context) },
     description: context.meta?.description ?? null,
-    fee_paid_by: settled ? 'merchant' : null,
+    fee_paid_by: context.feePaidBy,
   };
 }
 
@@ -491,8 +500,7 @@ export function serializeCheckoutCreated(checkout: StoredCheckout, checkoutUrl: 
     expires_at: checkout.expiresAt,
     created_at: checkout.createdAt,
     reference: checkout.reference,
-    platform_fee: null,
-    destination_amount: null,
+    ...splitView(checkout.split),
   };
 }
 
@@ -551,8 +559,7 @@ export function serializeCheckout(
     cancel_url: checkout.cancelUrl,
     products: checkout.source === 'cart' ? sessionLines(checkout) : null,
     billing_currency: checkout.billingCurrency,
-    platform_fee: null,
-    destination_amount: null,
+    ...splitView(checkout.split),
     session_mode: checkout.sessionMode,
     metadata: checkout.metadata,
     created_at: checkout.createdAt,

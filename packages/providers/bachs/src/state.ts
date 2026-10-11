@@ -1,5 +1,6 @@
 import type { Storage } from '@paybox/core';
 import { ownerKey } from './actor.js';
+import type { StoredSplit } from './split.js';
 import type { Corridor } from './fees.js';
 
 /**
@@ -110,6 +111,8 @@ export interface StoredRecurring {
 }
 
 export interface StoredCheckout {
+  /** connect/split-payments: a direct or destination charge's terms; absent when none were sent. */
+  split?: StoredSplit | null;
   /** The connected account that owns it; absent for the platform (actor.ts). */
   account?: string;
   /** `chk_…`. */

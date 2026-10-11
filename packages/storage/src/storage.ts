@@ -1451,6 +1451,10 @@ class SqliteStorage implements Storage {
         query = query.where('currency', '=', filter.currency);
         count = count.where('currency', '=', filter.currency);
       }
+      if (filter?.resourceId) {
+        query = query.where('resource_id', '=', filter.resourceId);
+        count = count.where('resource_id', '=', filter.resourceId);
+      }
       // Undefined means every owner; null means the platform's own pot.
       if (filter && 'subaccountId' in filter) {
         if (filter.subaccountId === null) {

@@ -7,6 +7,18 @@ out with the next tag — see [docs/releasing.md](docs/releasing.md).
 
 ## Unreleased
 
+- **Bachs: Connect, part two**
+  ([contract](docs/bachs.md#split-payments)).
+  - **Split payments:** a direct charge with a `platform_fee`, and destination
+    charges (`transfer_data`), fee-first or share-first. The seller's share is
+    sent as a `kind: payout` transfer when the sale settles.
+  - **Platform fees:** `/v1/platform_fees`, readable by either party.
+  - **Transfers:** `/v1/transfers` between a platform and its accounts,
+    including `destination: "self"` for an account sending money back.
+  - **Fees:** `fee_paid_by` and `settlement_amount` follow who actually paid
+    the processing fee.
+  - **New webhook:** `transfer.created`, on the account involved.
+
 - **Bachs: Connect, part one**
   ([contract](docs/bachs.md#how-connect-behaves)).
   - **Accounts:** connected accounts, persons, company and person documents,

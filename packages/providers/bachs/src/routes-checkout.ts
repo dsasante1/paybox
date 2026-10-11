@@ -4,7 +4,6 @@ import type { Job, PaymentEngine, Storage } from '@paybox/core';
 import { PAYMENT_SIMULATE_JOB, type PaymentSimulator } from '@paybox/simulator';
 import { createHash } from 'node:crypto';
 import { fail } from './errors.js';
-import type { Corridor } from './fees.js';
 import { assertMetadata, notFound } from './http.js';
 import { derivedId, hexId, urlToken } from './ids.js';
 import type { BachsBilling } from './billing.js';
@@ -14,6 +13,9 @@ import { toDecimal, toMinor } from './money.js';
 import { renderCheckoutPage, renderCheckoutResult } from './checkout-page.js';
 import { actorFor, directCharge, owns, ownerField, ownerKey, paymentPot, type Actor } from './actor.js';
 import { corridorCapability, hasCapability } from './accounts.js';
+import { assertWithinGross, splitAmount, splitParts, type StoredSplit } from './split.js';
+import { convertMinor } from './rates.js';
+import { processingFee, type Corridor } from './fees.js';
 import type { RouteContext } from './route-context.js';
 import { PRICE_CURRENCIES } from './routes-catalog.js';
 import { createCheckoutSchema } from './schemas.js';
@@ -120,14 +122,6 @@ function assertHttpUrl(value: string, field: string): void {
   }
 }
 
-function notImplemented(what: string): PayboxError {
-  return fail(
-    'unsupported_operation',
-    'NOT_IMPLEMENTED',
-    `${what} is not yet supported by paybox's Bachs emulator. See docs/bachs.md for what is implemented.`,
-  );
-}
-
 /** Corridors that can charge a checkout without converting anything. */
 function corridorsFor(currencies: readonly string[]): Corridor[] {
   return (Object.keys(CORRIDORS) as Corridor[]).filter((corridor) => {
@@ -161,7 +155,6 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
     const actor = await ctx.actor(request);
     const body = createCheckoutSchema.parse(request.body ?? {});
 
-    if (body.platform_fee || body.transfer_data) throw notImplemented('Connect split payments');
     // "Send it with no pricing and the checkout collects a card and charges
     // nothing" -- `setup` mode.
     const setup = body.save_payment_method === true && !body.product_cart && !body.pricing;
@@ -197,6 +190,7 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
           ? await priceCart(body.product_cart, actor)
           : pricePricing(body.pricing!);
       const mode: CheckoutMode = setup ? 'setup' : priced.recurring ? 'subscription' : 'payment';
+      const split = await parseSplit(body, actor, priced);
 
       if (mode === 'subscription') assertSubscriptionCheckout(priced, body);
       if (setup && !(body.customer && 'customer_id' in body.customer)) {
@@ -277,6 +271,7 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
       const now = clock.nowISO();
       const checkout: StoredCheckout = {
         ...ownerField(actor),
+        ...(split ? { split } : {}),
         id: hexId(ids, 'chk'),
         mode,
         savePaymentMethod: body.save_payment_method ?? false,
@@ -610,6 +605,162 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
       lines: [],
       recurring: null,
     };
+  }
+
+  /**
+   * The split a checkout carries (connect/split-payments). Presence decides
+   * the shape: `X-Account-Id` alone is a direct charge, `transfer_data`
+   * alone a destination charge, and both together are contradictory.
+   */
+  async function parseSplit(
+    body: ReturnType<typeof createCheckoutSchema.parse>,
+    actor: Actor,
+    priced: Priced,
+  ): Promise<StoredSplit | null> {
+    const transfer = body.transfer_data ?? null;
+    const raw = body.platform_fee ?? null;
+    if (!transfer && raw === null) return null;
+    if (transfer && actor.account) {
+      throw fail(
+        'validation_failed',
+        'CONTRADICTORY_CHARGE_TYPE',
+        'X-Account-Id makes this a direct charge and transfer_data a destination charge. Send one or the other.',
+      );
+    }
+    if (transfer && raw !== null && transfer.amount != null) {
+      throw fail(
+        'validation_failed',
+        'VALIDATION_ERROR',
+        'platform_fee and transfer_data.amount are mutually exclusive: send one.',
+      );
+    }
+    const currency = priced.currency;
+    const gross = priced.amount;
+    // "Checked at create, before payment": against the sale in every currency
+    // it can be paid in, and against the least a pay-what-you-want payer can
+    // choose.
+    const within = (value: number, field: string) => {
+      assertWithinGross(value, gross, field);
+      if (priced.priceType === 'fixed') {
+        for (const [option, optionAmount] of Object.entries(priced.currencyOptions)) {
+          assertWithinGross(convertMinor(value, currency, option), optionAmount, `${field} (in ${option})`);
+        }
+      }
+      // The least a pay-what-you-want sale can come to: the custom minimum,
+      // with any fixed lines of the cart beside it.
+      const floor =
+        (priced.minimum ?? 0) +
+        priced.lines.filter((line) => line.priceType === 'fixed').reduce((sum, line) => sum + line.unitAmount * line.quantity, 0);
+      if (priced.priceType === 'custom' && (floor === 0 || value >= floor)) {
+        throw fail(
+          'validation_failed',
+          'INVALID_PLATFORM_FEE',
+          `${field}: a pay-what-you-want checkout with a split needs a minimum_amount above it.`,
+        );
+      }
+    };
+    const platformFee = raw !== null ? splitAmount(raw, currency, 'platform_fee') : null;
+    if (platformFee !== null) within(platformFee, 'platform_fee');
+    if (!transfer) {
+      // On a plain checkout a platform fee "has no effect", though it is checked.
+      return { kind: actor.account ? 'direct' : 'none', platformFee, destination: null, destinationAmount: null, currency };
+    }
+    // "Any other ID returns 404 so the response never confirms that an
+    // unrelated account exists."
+    const destination = await state.accounts.get(transfer.destination);
+    if (!destination || destination.parent !== ctx.organizationId) throw notFound('Account');
+    const share = transfer.amount != null ? splitAmount(transfer.amount, currency, 'transfer_data.amount') : null;
+    if (share !== null) within(share, 'transfer_data.amount');
+    if (platformFee === null && share === null) {
+      throw fail(
+        'validation_failed',
+        'INVALID_PLATFORM_FEE',
+        'A destination charge needs platform_fee or transfer_data.amount.',
+      );
+    }
+    return { kind: 'destination', platformFee, destination: destination.id, destinationAmount: share, currency };
+  }
+
+  /**
+   * The core payment fields for a checkout's charge: a direct charge is the
+   * account's, less the platform's cut; a destination charge is the
+   * platform's, with the seller's share forwarded on settlement. The cut is
+   * struck in the sale's base currency and carried into the currency the
+   * payer pays in at the fixed rate.
+   */
+  async function chargeShape(
+    checkout: StoredCheckout,
+    owner: Actor,
+    amount: number,
+    currency: string,
+    corridor: Corridor,
+  ) {
+    const split = checkout.split;
+    const inPayment = (value: number) => convertMinor(value, split!.currency, currency);
+    if (split?.kind === 'destination') {
+      const seller = (await state.accounts.get(split.destination!))!;
+      const platformFee = split.platformFee !== null ? inPayment(split.platformFee) : amount - inPayment(split.destinationAmount!);
+      if (platformFee <= 0 || platformFee >= amount) {
+        throw fail('validation_failed', 'INVALID_PLATFORM_FEE', "The split must leave something for both parties of this sale.");
+      }
+      return { subaccountId: seller.engineId, settlementMode: 'forwarded' as const, platformFee };
+    }
+    const direct = directCharge(owner);
+    if (split?.kind === 'direct' && split.platformFee !== null && direct.subaccountId) {
+      const platformFee = inPayment(split.platformFee);
+      // The account pays the processing fee out of what is left: a cut that
+      // leaves less than the fee would take its balance below zero, which
+      // only a lost dispute may do.
+      // Counted even when the platform collects the account's fees: if the
+      // platform cannot cover one, it falls back to the sale.
+      if (platformFee + processingFee(amount, corridor) >= amount) {
+        throw fail(
+          'validation_failed',
+          'INVALID_PLATFORM_FEE',
+          "platform_fee and Bachs' processing fee together exceed this sale.",
+        );
+      }
+      return { ...direct, platformFee };
+    }
+    return direct;
+  }
+
+  /**
+   * What arrived differs from what was asked: whose balance takes the
+   * difference. The sale's owner, or on a split sale whoever holds the rest
+   * (split.ts `splitParts`).
+   */
+  async function moveVariance(
+    checkout: StoredCheckout,
+    payment: Payment,
+    direction: 'credit' | 'debit',
+    amount: number,
+    reason: string,
+  ): Promise<void> {
+    const entry = (value: number, pot: string | null) => ({
+      provider: PROVIDER,
+      currency: payment.currency,
+      amount: value,
+      reason,
+      resourceId: payment.id,
+      subaccountId: pot,
+    });
+    const parts = splitParts(payment, checkout.split);
+    if (!parts) {
+      if (direction === 'credit') await engine.creditBalance(entry(amount, paymentPot(payment)));
+      else await engine.debitBalance(entry(amount, paymentPot(payment)));
+      return;
+    }
+    if (direction === 'credit') {
+      await engine.creditBalance(entry(amount, parts.restPot));
+      return;
+    }
+    // A shortfall comes off the rest, as far as it goes; past that the fixed
+    // part was never paid in full either. Nobody is left below zero by it.
+    const rest = Math.max(0, payment.amount - parts.fixed);
+    const fromRest = Math.min(amount, rest);
+    if (fromRest > 0) await engine.debitBalance(entry(fromRest, parts.restPot));
+    if (amount > fromRest) await engine.debitBalance(entry(amount - fromRest, parts.fixedPot));
   }
 
   /** `customer` on the request: an existing record by id, or created/matched by email. */
@@ -979,8 +1130,9 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
     if (!payment) {
       payment = await engine.createPayment({
         provider: PROVIDER,
-        // "Create with the header = a direct charge": the account's money.
-        ...directCharge(owner),
+        // "Create with the header = a direct charge": the account's money;
+        // `transfer_data` makes it the platform's, with a share forwarded.
+        ...(await chargeShape(checkout, owner, amount, currency, corridor)),
         amount,
         currency,
         reference: checkout.id,
@@ -1153,14 +1305,7 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
         });
         // Settlement credits the requested amount; the balance holds what
         // actually arrived, so the excess is credited too.
-        await engine.creditBalance({
-          provider: PROVIDER,
-          currency: payment.currency,
-          amount: received - payment.amount,
-          reason: 'overpayment',
-          resourceId: payment.id,
-          subaccountId: paymentPot(payment),
-        });
+        await moveVariance(checkout, payment, 'credit', received - payment.amount, 'overpayment');
         return;
       }
       case 'send_rest':
@@ -1175,14 +1320,7 @@ export function registerCheckoutRoutes(fastify: FastifyInstance, ctx: RouteConte
           // Accepted as final at what was paid: settlement credited the full
           // requested amount, so the shortfall comes back off.
           const paid = Number(details.amount_paid ?? 0);
-          await engine.debitBalance({
-            provider: PROVIDER,
-            currency: payment.currency,
-            amount: payment.amount - paid,
-            reason: 'underpayment_accepted',
-            resourceId: payment.id,
-            subaccountId: paymentPot(payment),
-          });
+          await moveVariance(checkout, payment, 'debit', payment.amount - paid, 'underpayment_accepted');
         }
         return;
       }

@@ -647,6 +647,15 @@ email, and `byEmail` takes the owner, defaulting to the platform. Every other
 provider has one owner, so nothing changes for them. `exchangeBalance` takes an
 owner pot the same way.
 
+### `createTransfer({ destinationPlatform })` and the ledger's `resourceId` filter
+
+A Bachs account sends money back to its platform (`destination: "self"`). A
+null `destinationSubaccountId` means the money left for a bank, with nothing
+credited. `destinationPlatform` is an internal move into the platform's own
+pot instead, for a transfer created already settled. The ledger list takes a
+`resourceId`, so a charge's fee posting can be read back (`fee_paid_by`)
+without scanning every entry.
+
 ### Dispute `providerStatus` and `resolution` options
 
 Bachs has six dispute statuses where the canonical vocabulary has four, and
