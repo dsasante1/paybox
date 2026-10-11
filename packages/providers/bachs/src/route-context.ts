@@ -4,6 +4,7 @@ import type { PaymentEngine, Storage } from '@paybox/core';
 import type { PaymentSimulator } from '@paybox/simulator';
 import type { WebhookDispatcher } from '@paybox/webhooks';
 import type { BachsBilling } from './billing.js';
+import type { BachsTreasury } from './treasury.js';
 import type { PaymentContext } from './serializers.js';
 import type { BachsState, StoredCustomer } from './state.js';
 
@@ -26,6 +27,8 @@ export interface RouteContext {
   paymentContext(payment: Payment): Promise<PaymentContext>;
   /** Subscriptions, invoices and off-session charges. */
   billing: BachsBilling;
+  /** Settlement, payouts, conversions and schedules. */
+  treasury: BachsTreasury;
   /** Set by the catalog routes: a product's running totals for `ProductResponse`. */
   productTotals(productId: string): Promise<{ totalPayments: number; totalAmount: number }>;
   /** Set by the catalog routes; used by checkout to create or match a buyer. */

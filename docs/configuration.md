@@ -82,7 +82,7 @@ logLevel: info            # debug | info | warn | error
 | `simulation.autoAdvance` | `PAYBOX_AUTO_ADVANCE` | `true` | `false`: no charge moves unless you move it (CLI, dashboard, `/api`, scenario). |
 | `simulation.autoAdvanceDelayMs` | `PAYBOX_AUTO_ADVANCE_MS` | `3000` | Virtual milliseconds between a charge and its instrument's outcome. Under a frozen clock this is how far you must `time advance`. |
 | `balance.enforce` | `PAYBOX_ENFORCE_BALANCE` | `true` | `false` lets any transfer through regardless of balance. |
-| `balance.opening` | `PAYBOX_OPENING_BALANCE` | `10000000` | Applies to every provider and currency. Not a ledger row: `paybox reset` leaves it alone. `0` starts empty. |
+| `balance.opening` | `PAYBOX_OPENING_BALANCE` | `10000000` | Applies to every provider and currency (for Bachs, which holds only USD and NGN, those two). Not a ledger row: `paybox reset` leaves it alone. `0` starts empty. |
 | `bachs.subscriptionRecovery` | `PAYBOX_BACHS_SUBSCRIPTION_RECOVERY` | `cancel` | What a Bachs subscription does when its last retry fails: `cancel` (Bachs' default) or `unpaid`. A dashboard-only setting at Bachs; see [bachs.md](bachs.md#recovery). Anything else refuses to start. |
 | `balance.transferFee` | — | `{}` | File only. A currency listed here replaces Paystack's published tiered schedule outright with a flat fee in minor units. |
 | `logLevel` | `PAYBOX_LOG_LEVEL` | `info` | Structured JSON lines on stdout; `paybox logs` reads the in-memory ring buffer. |

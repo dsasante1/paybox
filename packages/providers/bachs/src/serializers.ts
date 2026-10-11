@@ -1,6 +1,7 @@
 import type { Customer, Invoice, InvoiceItem, Payment, PayboxEvent, Product, Refund, Subscription } from '@paybox/shared';
 import type { WebhookEndpoint } from '@paybox/core';
-import { processingFee, type Corridor } from './fees.js';
+import { processingFee, virtualAccountFee, type Corridor } from './fees.js';
+import { convertMinor } from './rates.js';
 import { toDecimal, toDecimalOrNull } from './money.js';
 import type {
   StoredCheckout,
@@ -205,7 +206,20 @@ export function corridorOf(payment: Payment): Corridor | null {
 /** What Bachs takes from a payment, in its currency; null until one was attempted. */
 export function feeOf(payment: Payment): number | null {
   const corridor = corridorOf(payment);
-  return corridor ? processingFee(payment.amount, corridor) : null;
+  if (!corridor) return null;
+  const account = payment.paymentMethodDetails.virtual_account as { type?: string } | undefined;
+  if (account?.type === 'permanent') return virtualAccountFee(payment.amount);
+  return processingFee(payment.amount, corridor);
+}
+
+/**
+ * Where a collection settles: NGN stays NGN, every other currency "is
+ * converted when it settles" into USD, at the fixed rate (rates.ts).
+ */
+export function settlementOf(payment: Payment): { currency: string; amount: number } {
+  const currency = payment.currency === 'NGN' ? 'NGN' : 'USD';
+  const net = Math.max(0, payment.amount - (feeOf(payment) ?? 0));
+  return { currency, amount: convertMinor(net, payment.currency, currency) };
 }
 
 /** Amount received so far: the full amount once collected, a partial one when underpaid. */
@@ -392,8 +406,8 @@ export function serializeChargeStatus(
     customer_id: context.customerId,
     amount: toDecimal(payment.amount, c),
     currency: c,
-    settlement_currency: c,
-    settlement_amount: toDecimal(Math.max(0, payment.amount - fee), c),
+    settlement_currency: settlementOf(payment).currency,
+    settlement_amount: toDecimal(settlementOf(payment).amount, settlementOf(payment).currency),
     status: paymentStatusOf(payment),
     metadata: metadataOf(context),
     status_history: statusHistory(payment, context.history),
@@ -429,8 +443,8 @@ export function serializePaymentListItem(
     customer_email: context.customer?.email ?? '',
     amount_paid: toDecimal(paid, c),
     amount_remaining: toDecimal(Math.max(0, payment.amount - paid), c),
-    settlement_amount: settled && fee !== null ? toDecimal(payment.amount - fee, c) : null,
-    settlement_currency: settled ? c : null,
+    settlement_amount: settled && fee !== null ? toDecimal(settlementOf(payment).amount, settlementOf(payment).currency) : null,
+    settlement_currency: settled ? settlementOf(payment).currency : null,
     fee: settled && fee !== null ? toDecimal(fee, c) : null,
     vat: null,
     currency: c,

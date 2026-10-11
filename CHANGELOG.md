@@ -7,6 +7,35 @@ out with the next tag — see [docs/releasing.md](docs/releasing.md).
 
 ## Unreleased
 
+- **Bachs: money out**, the third phase of its API
+  ([contract](docs/bachs.md#how-money-out-behaves)).
+  - **Payouts:** payout destinations (bank, mobile money, crypto wallet),
+    payouts, and cross-currency payout quotes (30 seconds, single use).
+    Bachs' test destinations decide the outcome: 999/0001112223 completes,
+    998/0001112224 fails.
+  - **Schedules:** payout schedules (`/v1/balance_settings`): daily, weekly,
+    monthly or instant, run on paybox's clock.
+  - **Conversions:** USD <-> NGN.
+  - **Virtual account:** the account's NGN virtual account, with a paybox test
+    control to deposit into it, since Bachs has no way to simulate one.
+  - **Reference lists:** payout currencies, banks, mobile-money providers,
+    bank-account resolve.
+  - **New webhooks:** `payout.created`, `payout.paid`, `payout.failed`,
+    `conversion.completed`.
+  - Transfers come with Connect, since they move money only to connected
+    accounts.
+- **Behaviour change: Bachs balances are USD and NGN only.**
+  `GET /bachs/v1/balances` used to show one balance per collected currency.
+  - A GHS mobile-money collection showed as a GHS balance. Bachs holds only
+    USD and NGN and converts the rest when it settles, so paybox now does too.
+  - The rates are fixed, and listed in docs/bachs.md.
+  - `total_balance_usd` now counts NGN at that rate.
+  - **Balances are net of Bachs' processing fee**, as `settlement_amount`
+    always said; the fee comes off when a collection settles.
+  - Both USD and NGN are always listed.
+  - **If your tests read a non-USD/NGN Bachs balance:** read the USD balance
+    instead.
+
 - **Bachs: subscriptions and saved cards**, the second phase of its API
   ([contract](docs/bachs.md#how-billing-behaves)).
   - **Subscriptions.** A recurring product in a checkout starts a subscription

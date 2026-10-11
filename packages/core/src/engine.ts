@@ -3192,6 +3192,53 @@ export class PaymentEngine {
     });
   }
 
+  /**
+   * Move value from one currency's balance to another's, atomically, at
+   * amounts the caller has already quoted.
+   *
+   * The engine never converts (CLAUDE.md, "No FX conversion ever happens"):
+   * an adapter whose provider exchanges currencies works out both amounts
+   * from its own published or fixed rate, and this records them -- a debit in
+   * one currency and a credit in the other, in one transaction, so a crash
+   * can never leave one without the other. With `checkFunds`, the debit is
+   * refused when the source balance cannot cover it, inside the same
+   * transaction as the check.
+   *
+   * Opt-in and provider-neutral; Bachs is the first user (its settlement into
+   * USD, its conversions and its cross-currency payouts).
+   */
+  async exchangeBalance(input: {
+    provider: ProviderId;
+    from: { currency: string; amount: number };
+    to: { currency: string; amount: number };
+    reason: string;
+    resourceId?: string | null;
+    checkFunds?: boolean;
+  }): Promise<void> {
+    validateAmount(input.from.amount);
+    validateAmount(input.to.amount);
+    const from = input.from.currency.toUpperCase();
+    const to = input.to.currency.toUpperCase();
+    if (from === to) {
+      throw new PayboxError('validation_failed', 'An exchange needs two different currencies.');
+    }
+    await this.#storage.transaction(async (tx) => {
+      if (input.checkFunds && this.#enforceBalance) {
+        const available = this.#openingBalance + (await tx.ledger.net(input.provider, from, null));
+        if (available < input.from.amount) {
+          throw new PayboxError(
+            'balance_insufficient',
+            `Insufficient ${from} balance: ${available} available, ${input.from.amount} required.`,
+            { details: { currency: from, available, required: input.from.amount } },
+          );
+        }
+      }
+      const base = { provider: input.provider, reason: input.reason, resourceId: input.resourceId ?? null, subaccountId: null };
+      await this.#ledgerIn(tx, 'debit', { ...base, currency: from, amount: input.from.amount });
+      await this.#ledgerIn(tx, 'credit', { ...base, currency: to, amount: input.to.amount });
+    });
+  }
+
   /** Ledger append bound to an open transaction. */
   async #ledgerIn(
     tx: Storage,

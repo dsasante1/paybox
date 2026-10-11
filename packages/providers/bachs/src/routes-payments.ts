@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import type { Payment, Refund } from '@paybox/shared';
 import { REFUND_SETTLE_JOB } from '@paybox/simulator';
 import { fail } from './errors.js';
-import { newestFirst, notFound, readPage } from './http.js';
+import { everyRow, newestFirst, notFound, readPage } from './http.js';
 import { refundId } from './ids.js';
 import { refundRecord } from './refunds.js';
 import { chargeLock, withLock } from './locks.js';
@@ -19,6 +19,8 @@ import {
   serializeRefund,
 } from './serializers.js';
 import type { StoredRefund } from './state.js';
+import { convertMinor } from './rates.js';
+import { settlementCurrency } from './treasury.js';
 import { paymentStatusOf, toBachsRefundStatus } from './status.js';
 
 const PROVIDER = 'bachs' as const;
@@ -40,9 +42,9 @@ export function registerPaymentRoutes(fastify: FastifyInstance, ctx: RouteContex
 
   /** Every Bachs payment, newest first. Small enough locally to filter in memory. */
   async function allPayments(): Promise<Payment[]> {
-    const page = await storage.payments.list({ provider: PROVIDER, limit: 10_000, offset: 0 });
+    const payments = await everyRow((page) => storage.payments.list({ provider: PROVIDER, ...page }));
     const rows = await Promise.all(
-      page.items.map(async (payment) => ({
+      payments.map(async (payment) => ({
         payment,
         seq:
           (await state.checkouts.byPayment(payment.id))?.paymentSeq ??
@@ -179,41 +181,55 @@ export function registerPaymentRoutes(fastify: FastifyInstance, ctx: RouteContex
           `Refund amount \`${toDecimal(amount, payment.currency)}\` exceeds refundable balance`,
         );
       }
-      const balance = await engine.getBalance(PROVIDER, payment.currency);
-      if (balance < amount) {
-        throw fail('balance_insufficient', 'BAD_REQUEST', 'Insufficient balance to refund');
-      }
+      // The money is in a held balance now: NGN for an NGN charge, USD for
+      // everything else, which settled into USD when it arrived. Checked and
+      // held in one step, with every other balance movement waiting: a refund
+      // "reserves" its amount when it is created, so a payout made before it
+      // settles cannot spend the same money.
+      const held = settlementCurrency(payment.currency);
+      const { refund, draft, now } = await ctx.treasury.exclusive(async () => {
+        const balance = await ctx.treasury.available(held);
+        if (balance < convertMinor(amount, payment.currency, held)) {
+          throw fail('balance_insufficient', 'BAD_REQUEST', 'Insufficient balance to refund');
+        }
 
-      // The Bachs record goes first: refund.created is published from inside
-      // the engine call and must already be able to find it.
-      const now = clock.nowISO();
-      const draft: StoredRefund = {
-        id: refundId(ids),
-        engineId: '',
-        seq: await state.nextSeq(),
-        chargeId: payment.providerTransactionId,
-        reference: body.reference,
-        requestedAmount: amount,
-        currency: payment.currency,
-        feeBearer: body.fee_bearer ?? 'org',
-        reason: body.reason ?? null,
-        simulatedOutcome: body.simulated_outcome ?? 'success',
-        createdAt: now,
-      };
-      await state.refunds.put(draft);
-      let refund: Refund;
-      try {
-        refund = await engine.createRefund({
-          paymentId: payment.id,
-          amount,
-          reason: draft.reason,
-          metadata: { bachs_refund_id: draft.id },
+        // The Bachs record goes first: refund.created is published from inside
+        // the engine call and must already be able to find it.
+        const now = clock.nowISO();
+        const draft: StoredRefund = {
+          id: refundId(ids),
+          engineId: '',
+          seq: await state.nextSeq(),
+          chargeId: payment.providerTransactionId,
+          reference: body.reference,
+          requestedAmount: amount,
+          currency: payment.currency,
+          feeBearer: body.fee_bearer ?? 'org',
+          reason: body.reason ?? null,
+          simulatedOutcome: body.simulated_outcome ?? 'success',
+          createdAt: now,
+        };
+        await state.refunds.put(draft);
+        let refund: Refund;
+        try {
+          refund = await engine.createRefund({
+            paymentId: payment.id,
+            amount,
+            reason: draft.reason,
+            metadata: { bachs_refund_id: draft.id },
+          });
+        } catch (error) {
+          // The engine refused after all; leave no half-made record behind.
+          await state.refunds.delete(draft.id);
+          throw error;
+        }
+        await ctx.treasury.holdForRefund({
+          refundId: refund.id,
+          currency: held,
+          amount: convertMinor(amount, payment.currency, held),
         });
-      } catch (error) {
-        // The engine refused after all; leave no half-made record behind.
-        await state.refunds.delete(draft.id);
-        throw error;
-      }
+        return { refund, draft, now };
+      });
       const stored = { ...draft, engineId: refund.id };
       await state.refunds.put(stored);
       await state.refunds.indexEngine(refund.id, stored.id);
@@ -298,31 +314,27 @@ export function registerPaymentRoutes(fastify: FastifyInstance, ctx: RouteContex
   /* -------------------------------- balances -------------------------------- */
 
   /**
-   * `AccountBalanceResponse`. Every currency the account has collected in,
-   * and USD always ("USD is always present"). The sandbox settles at once
-   * (connect/testing), so nothing is ever pending. Bachs holds only USD and
-   * NGN, converting the rest; paybox never converts, so a GHS collection
-   * shows as a GHS balance and `total_balance_usd` counts USD alone --
-   * docs/bachs.md records both.
+   * `AccountBalanceResponse`. Bachs holds USD and NGN only -- a collection in
+   * any other currency "is converted when it settles" into USD -- so those are
+   * the only balances, both always: the opening float is held in each, and
+   * spendable. The sandbox settles at once
+   * (connect/testing), so nothing is ever pending. `total_balance_usd` is both,
+   * in dollars at the fixed rate, "display only".
+   *
+   * A read: anything a sweep has not yet moved into USD is projected, never
+   * written (treasury.ts).
    */
   fastify.get('/v1/balances', async (request, reply) => {
     authenticate(request);
-    const currencies = new Set<string>(['USD']);
-    for (const payment of await allPayments()) currencies.add(payment.currency);
-    const balances = [];
-    for (const currency of [...currencies].sort()) {
-      const available = await engine.getBalance(PROVIDER, currency);
-      balances.push({
-        currency,
-        available_balance: toDecimal(available, currency),
-        pending_balance: toDecimal(0, currency),
-      });
-    }
-    const usd = balances.find((entry) => entry.currency === 'USD')!;
+    const usd = await ctx.treasury.available('USD');
+    const balances = [{ currency: 'USD', available_balance: toDecimal(usd, 'USD'), pending_balance: toDecimal(0, 'USD') }];
+    const ngn = await ctx.treasury.available('NGN');
+    balances.unshift({ currency: 'NGN', available_balance: toDecimal(ngn, 'NGN'), pending_balance: toDecimal(0, 'NGN') });
+    const total = usd + convertMinor(ngn, 'NGN', 'USD');
     return reply.send({
       account_id: ctx.organizationId,
       balances,
-      total_balance_usd: usd.available_balance,
+      total_balance_usd: toDecimal(total, 'USD'),
       pending_settlements_by_day: [],
     });
   });

@@ -582,20 +582,25 @@ describe('payments list', () => {
 /* ---------------------------------- balances ---------------------------------- */
 
 describe('balances', () => {
-  it('always has USD, with no pending money and no pending settlements', async () => {
+  it('holds USD and NGN, with no pending money and no pending settlements', async () => {
+    // Before money out, this listed USD alone and every other collected
+    // currency beside it. Bachs holds only USD and NGN, the opening float in
+    // each, and total_balance_usd counts both.
     const response = await get('/v1/balances');
     expect(response.statusCode).toBe(200);
     const json = response.json();
     expect(json.account_id).toBe(context.bachsKeys.organizationId);
     expect(json.account_id).toMatch(/^acct_/);
-    expect(json.balances.map((entry: { currency: string }) => entry.currency)).toEqual(['USD']);
-    expect(json.balances[0].pending_balance).toBe('0.00');
-    expect(json.balances[0].available_balance).toMatch(/^\d+\.\d{2}$/);
-    expect(json.total_balance_usd).toBe(json.balances[0].available_balance);
+    expect(json.balances.map((entry: { currency: string }) => entry.currency)).toEqual(['NGN', 'USD']);
+    expect(json.balances.every((entry: { pending_balance: string }) => entry.pending_balance === '0.00')).toBe(true);
+    expect(json.balances[1].available_balance).toMatch(/^\d+\.\d{2}$/);
+    const usd = Math.round(Number(json.balances[1].available_balance) * 100);
+    const ngn = Math.round(Number(json.balances[0].available_balance) * 100);
+    expect(Math.round(Number(json.total_balance_usd) * 100)).toBe(usd + Math.round(ngn / 1500));
     expect(json.pending_settlements_by_day).toEqual([]);
   });
 
-  it('adds every currency the account has collected in', async () => {
+  it('settles an NGN collection into NGN, leaving USD alone (Bachs holds only those two)', async () => {
     const before = (await get('/v1/balances')).json();
     await paidCheckout('4242424242424242', { currency: 'NGN', amount: '5000.00' });
     const json = (await get('/v1/balances')).json();
@@ -604,7 +609,7 @@ describe('balances', () => {
     const ngn = json.balances.find((entry: { currency: string }) => entry.currency === 'NGN');
     expect(Number(ngn.available_balance)).toBeGreaterThan(0);
     expect(json.balances.find((entry: { currency: string }) => entry.currency === 'USD').available_balance).toBe(
-      before.balances[0].available_balance,
+      before.balances.find((entry: { currency: string }) => entry.currency === 'USD').available_balance,
     );
     expect(json.pending_settlements_by_day).toEqual([]);
   });
